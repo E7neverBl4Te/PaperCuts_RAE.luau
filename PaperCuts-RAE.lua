@@ -269,7 +269,7 @@ local function CaptureWorldState()
     local state = {
         T = T,
         SimConfig = {
-            ServerTime       = Workspace:GetServerTimeNow(),
+            ServerTime       = os.clock(),
             FrameStep        = T,
             Gravity          = Workspace.Gravity,
             StreamingEnabled = Workspace.StreamingEnabled,
@@ -618,7 +618,7 @@ local function GenMetabolic(ws, cards)
         {PreCondAlwaysTrue},
         function(outputs)
             local currentGravity = Workspace.Gravity
-            local currentTime    = Workspace:GetServerTimeNow()
+            local currentTime    = os.clock()
             outputs = outputs or {}
             outputs["Metabolic"] = {
                 Gravity     = currentGravity,
