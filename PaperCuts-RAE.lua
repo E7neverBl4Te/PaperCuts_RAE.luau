@@ -1810,15 +1810,46 @@ local function Rollout(startNode, viable, allCards, intelHistory, maxDepth)
     while node do if node.Card then table.insert(nc,1,{Card=node.Card,Success=true}) end; node=node.Parent end
     for _,s in ipairs(nc) do table.insert(chain,s) end
 
-    -- Current state sig for ETM predictions
+    -- Propagating state sig: starts at current real state, then advances
+    -- based on observed CDG deltas after each simulated step.
+    -- This means deeper rollout steps get state-aware ETM predictions
+    -- rather than reusing the same snapshot throughout.
     local currentWS = RAE_State and RAE_State.WorldState
     local stateSig = currentWS and ETM_StateSig(currentWS) or "null"
+
+    -- Build a mutable state estimate we can advance through the simulation
+    local simHealth    = currentWS and currentWS.Agents.LocalPlayer and currentWS.Agents.LocalPlayer.Health or 100
+    local simPhysCount = currentWS and #(currentWS.Physics.ClientOwned or {}) or 0
+    local simInstCount = currentWS and currentWS.ObjectGraph.TotalInstances or 0
+    local simHasTool   = currentWS and currentWS.Agents.LocalPlayer and currentWS.Agents.LocalPlayer.EquippedTool and 1 or 0
+
+    local function AdvanceSimState(card, success)
+        -- Apply average observed CDG deltas for this card to the sim state
+        local impacts = CDG.StateImpact[card.ID]
+        if impacts and #impacts > 0 and success then
+            local avgInst, avgPhys, n = 0, 0, #impacts
+            for _, d in ipairs(impacts) do
+                avgInst = avgInst + (d.InstanceDelta or 0)
+                avgPhys = avgPhys + (d.ClientOwnedDelta or 0)
+            end
+            simInstCount = simInstCount + avgInst / n
+            simPhysCount = math.max(0, simPhysCount + avgPhys / n)
+        end
+        -- Recompute state sig from simulated state
+        return table.concat({
+            math.floor(simInstCount / 100),
+            math.floor((currentWS and #(currentWS.Latent.RemoteEvents or {}) or 0) / 5),
+            math.floor(simPhysCount),
+            math.floor(simHealth / 25),
+            simHasTool,
+        }, ":")
+    end
 
     while depth < maxDepth do
         if #viable == 0 then break end
         local nextCard = viable[math.random(#viable)]
 
-        -- ETM: context-aware prediction
+        -- ETM: state-aware prediction using the SIMULATED state sig (not the static one)
         local etmP, etmStd, etmN = ETM.Predict(nextCard.ID, stateSig)
         -- TransitionModel: sequential dependency
         local tmP = TransitionModel.Sample(prevCard.ID, nextCard.ID, prevSucc)
@@ -1826,25 +1857,27 @@ local function Rollout(startNode, viable, allCards, intelHistory, maxDepth)
         local dynRate = DynamicsModel.GetSuccessRate(nextCard.ID)
         -- CDG: synergy with previous card
         local synergy = CDG.GetSynergyScore(prevCard.ID, nextCard.ID)
-        -- Weighted blend — ETM weighted more heavily when it has sufficient data
-        local etmWeight = math.min(etmN / 10, 1.0)  -- ramps up as ETM learns
+
+        -- Weighted blend — ETM weight ramps up as it accumulates data
+        local etmWeight = math.min(etmN / 10, 1.0)
         local succProb
         if etmWeight > 0.3 then
             succProb = etmP * etmWeight + (tmP * 0.5 + dynRate * 0.5) * (1 - etmWeight)
         else
             succProb = tmP * 0.5 + dynRate * 0.5
         end
-        -- CDG synergy nudge: positive correlation boosts, negative penalises
         succProb = math.clamp(succProb + synergy * 0.1, 0.01, 0.99)
 
         local simSucc = math.random() < succProb
         table.insert(chain, {Card=nextCard, Success=simSucc})
         prevCard=nextCard; prevSucc=simSucc; depth=depth+1
+
+        -- Advance the simulated state so the NEXT step gets an updated state sig
+        stateSig = AdvanceSimState(nextCard, simSucc)
     end
 
     -- Chain score: base value + CDG causal bonus
     local baseScore = ValueSystem.ScoreChain(chain, allCards, intelHistory)
-    -- Bonus for chains that contain high-state-change-rate cards
     local causalBonus = 0
     for _, step in ipairs(chain) do
         causalBonus = causalBonus + CDG.GetStateChangeRate(step.Card.ID) * 0.05
@@ -1925,7 +1958,136 @@ function Planner.Plan(availableCards, lastLog, intelHistory)
     return bestChain
 end
 
--- ── RAE ENGINE STATE ─────────────────────────────────────────
+-- ── CHAIN PREDICTION (pre-commit certainty estimate) ──────────
+-- Walks the planned chain using ETM + DynamicsModel to produce
+-- a step-by-step predicted success probability WITHOUT executing.
+-- This is the difference between "experimenting" and "intending".
+function Planner.PredictChain(chain, ws)
+    if not chain or #chain == 0 then return nil end
+    local stateSig = ws and ETM_StateSig(ws) or "null"
+    local prevSucc = true
+    local prevID   = nil
+    local steps    = {}
+    local chainConfidence = 1.0  -- multiplicative: full chain probability
+
+    -- Same sim-state propagation logic as Rollout
+    local simHealth    = ws and ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.Health or 100
+    local simPhysCount = ws and #(ws.Physics.ClientOwned or {}) or 0
+    local simInstCount = ws and ws.ObjectGraph.TotalInstances or 0
+    local simHasTool   = ws and ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.EquippedTool and 1 or 0
+
+    for _, step in ipairs(chain) do
+        local card = step.Card or step
+        local etmP, etmStd, etmN = ETM.Predict(card.ID, stateSig)
+        local dynRate   = DynamicsModel.GetSuccessRate(card.ID)
+        local tmP       = prevID and TransitionModel.Sample(prevID, card.ID, prevSucc) or 0.5
+        local etmWeight = math.min(etmN / 10, 1.0)
+        local p
+        if etmWeight > 0.3 then
+            p = etmP * etmWeight + (tmP * 0.5 + dynRate * 0.5) * (1 - etmWeight)
+        else
+            p = tmP * 0.5 + dynRate * 0.5
+        end
+        p = math.clamp(p, 0.01, 0.99)
+        chainConfidence = chainConfidence * p
+
+        -- Track whether ETM has converged on this card
+        local converged = ETM.IsConverged(card.ID)
+
+        table.insert(steps, {
+            Card        = card,
+            PredictedP  = p,
+            StdDev      = etmStd,
+            ETM_N       = etmN,
+            Converged   = converged,
+            StateSig    = stateSig,
+        })
+
+        prevID   = card.ID
+        prevSucc = p >= 0.5
+
+        -- Advance simulated state (same logic as Rollout)
+        local impacts = CDG.StateImpact[card.ID]
+        if impacts and #impacts > 0 then
+            local avgInst, avgPhys, n = 0, 0, #impacts
+            for _, d in ipairs(impacts) do
+                avgInst = avgInst + (d.InstanceDelta or 0)
+                avgPhys = avgPhys + (d.ClientOwnedDelta or 0)
+            end
+            simInstCount = simInstCount + avgInst / n
+            simPhysCount = math.max(0, simPhysCount + avgPhys / n)
+        end
+        stateSig = table.concat({
+            math.floor(simInstCount / 100),
+            math.floor((ws and #(ws.Latent.RemoteEvents or {}) or 0) / 5),
+            math.floor(simPhysCount),
+            math.floor(simHealth / 25),
+            simHasTool,
+        }, ":")
+    end
+
+    -- Causal certainty: fraction of converged cards in the chain
+    local nConverged = 0
+    for _, s in ipairs(steps) do if s.Converged then nConverged = nConverged + 1 end end
+    local certainty = nConverged / math.max(#steps, 1)
+
+    return {
+        Steps            = steps,
+        ChainProbability = chainConfidence,
+        CausalCertainty  = certainty,
+        StepCount        = #steps,
+    }
+end
+
+-- ── CAUSAL CERTAINTY SCORE ─────────────────────────────────────
+-- Returns a 0–100 score representing how well RAE understands
+-- the current card set. Combines ETM convergence and prediction
+-- accuracy from the calibration log.
+function ETM.GetCausalCertainty(cards)
+    if not cards or #cards == 0 then return 0, 0, 0 end
+
+    local convergenceMap = ETM.GetConvergenceMap()
+    local nConverged, nTotal, totalStdDev = 0, 0, 0
+
+    for _, card in ipairs(cards) do
+        local entry = convergenceMap[card.ID]
+        nTotal = nTotal + 1
+        if entry then
+            totalStdDev = totalStdDev + entry.stddev
+            if entry.converged then nConverged = nConverged + 1 end
+        else
+            totalStdDev = totalStdDev + 0.5  -- max uncertainty for unseen cards
+        end
+    end
+
+    local convergenceRate = nConverged / math.max(nTotal, 1)
+    local avgStdDev       = totalStdDev / math.max(nTotal, 1)
+
+    -- Calibration score from Intel's calibration log
+    local calLog = IntelMem.CalibrationLog or {}
+    local calibrationScore = 0.5
+    if #calLog >= 5 then
+        local recentN   = math.min(20, #calLog)
+        local brier     = 0
+        for i = #calLog - recentN + 1, #calLog do
+            local entry = calLog[i]
+            brier = brier + (entry.Predicted - entry.Actual) ^ 2
+        end
+        brier = brier / recentN
+        calibrationScore = 1.0 - brier  -- 1.0 = perfect, 0.0 = completely wrong
+    end
+
+    -- Composite: convergence rate (50%) + low uncertainty (30%) + calibration (20%)
+    local uncertaintyScore = 1.0 - avgStdDev * 2  -- 0.5 stddev → 0 score
+    local composite = math.clamp(
+        convergenceRate * 0.50 +
+        math.max(uncertaintyScore, 0) * 0.30 +
+        calibrationScore * 0.20,
+        0, 1
+    )
+
+    return math.floor(composite * 100), nConverged, nTotal
+end
 local RAE_State = {
     Phase="DORMANT", WorldState=nil, Cards={}, SelectedCards={},
     LastLog=nil, LastPlan=nil, CycleCount=0, _IndexMap={},
@@ -1971,6 +2133,9 @@ local function RAE_Plan()
     if plan and #plan>0 then
         RAE_State.SelectedCards={}
         for _,step in ipairs(plan) do table.insert(RAE_State.SelectedCards, step.Card) end
+        -- Pre-commit prediction: estimate chain outcome BEFORE executing
+        local prediction = Planner.PredictChain(RAE_State.SelectedCards, RAE_State.WorldState)
+        RAE_State.LastPrediction = prediction
         if RAE_Callbacks.OnPlan then RAE_Callbacks.OnPlan(plan) end
     end
     return plan
@@ -2577,6 +2742,36 @@ do
             mem.Cycles, LWM.Age, _sessionRestored and "RESTORED ✓" or "NEW"), Color3.fromRGB(235,245,255))
         addRow(string.format("Phase Shifts: %d  |  Overfit Streak: %d  |  Activity: %.0f%%",
             #mem.PhaseShifts, mem.OverfitStreak, LWM.GetActivityScore()*100), Color3.fromRGB(235,245,255))
+
+        -- ── Causal Certainty & Predictive Status ────────────
+        addRow("═══ PREDICTIVE INTELLIGENCE STATUS ═══", Color3.fromRGB(220,240,255))
+        local certaintyScore, nConv, nCards = ETM.GetCausalCertainty(RAE_State.Cards)
+        local certaintyBar = string.rep("█", math.floor(certaintyScore/10))..string.rep("░", 10-math.floor(certaintyScore/10))
+        local certaintyLabel = certaintyScore>=70 and "CONVERGING" or certaintyScore>=40 and "LEARNING" or "EXPLORING"
+        addRow(string.format("Causal Certainty: %d%%  %s  [%s]", certaintyScore, certaintyBar, certaintyLabel),
+            certaintyScore>=70 and Color3.fromRGB(220,255,220) or certaintyScore>=40 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
+        addRow(string.format("Converged: %d/%d cards  |  Layer: %s",
+            nConv, nCards,
+            certaintyScore>=70 and "Layer 4 — Predictive" or certaintyScore>=40 and "Layer 3 — Behavioral" or "Layer 2 — Interaction"))
+        local _, strategy = Intel.SelectStrategy(RAE_State.Cards)
+        addRow(string.format("Strategy: %s  |  Cycles: %d", strategy or "EXPLORE", IntelMem.Cycles),
+            strategy=="EXPLOIT" and Color3.fromRGB(220,255,220) or Color3.fromRGB(255,248,220))
+        local pred = RAE_State.LastPrediction
+        if pred and pred.StepCount > 0 then
+            addRow("─── Last Plan Prediction ───", Color3.fromRGB(235,248,255))
+            addRow(string.format("Chain P: %.0f%%  |  Steps: %d  |  Causal certainty: %.0f%%",
+                pred.ChainProbability*100, pred.StepCount, pred.CausalCertainty*100),
+                pred.ChainProbability>=0.6 and Color3.fromRGB(220,255,220) or pred.ChainProbability>=0.3 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
+            for si, step in ipairs(pred.Steps) do
+                local conv = step.Converged and "✓" or (step.ETM_N>=5 and "~" or "?")
+                addRow(string.format("  [%s] %d: %-16s %.0f%%  n=%d σ=%.3f",
+                    conv, si, step.Card.Name:sub(1,16), step.PredictedP*100, step.ETM_N, step.StdDev),
+                    step.PredictedP>=0.65 and Color3.fromRGB(230,255,230) or step.PredictedP>=0.40 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
+            end
+        else
+            addRow("─── Last Plan Prediction ───", Color3.fromRGB(235,248,255))
+            addRow("Run Plan first to see step-by-step predictions.", Color3.fromRGB(235,235,235))
+        end
 
         -- ── Living World Model ────────────────────────────────
         addRow("─── Living World Model ───", Color3.fromRGB(240,248,255))
