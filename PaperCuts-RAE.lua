@@ -2073,7 +2073,7 @@ local bcClose=mk("TextButton",{Text="✕",Font=Enum.Font.GothamBold,TextSize=14,
 bcClose.MouseButton1Click:Connect(function() clickSound(); bytecodeViewer.Visible=false end)
 local bcScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(240,238,235),BorderSizePixel=0,Position=UDim2.new(0,16,0,40),Size=UDim2.new(1,-32,1,-56),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=6,Parent=bcWindow})
 addCorner(bcScroll,UDim.new(0,8)); addStroke(bcScroll,1,0.3)
-local bcText=mk("TextBox",{Text="",Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,-16,0,0),AutomaticSize=Enum.AutomaticSize.Y,Position=UDim2.new(0,8,0,8),ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=bcScroll})
+local bcText=mk("TextBox",{Text="",Font=Enum.Font.RobotoMono,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,-16,0,0),AutomaticSize=Enum.AutomaticSize.Y,Position=UDim2.new(0,8,0,8),ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=bcScroll})
 local function displayDecompiledScript(targetScript)
     if not targetScript then return end
     bcTitle.Text=" Bytecode: "..targetScript.Name; bcText.Text="Ripping bytecode..."; bytecodeViewer.Visible=true
@@ -2348,7 +2348,7 @@ do
                         local card=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,50),Parent=remoteScroll})
                         addCorner(card,UDim.new(0,6)); addStroke(card,1,0.2)
                         mk("TextLabel",{Text=v.Name,Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,10,0,8),Size=UDim2.new(1,-130,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=card})
-                        mk("TextLabel",{Text=v.ClassName.." | "..v:GetFullName(),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,10,0,26),Size=UDim2.new(1,-130,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=card})
+                        mk("TextLabel",{Text=v.ClassName.." | "..v:GetFullName(),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,10,0,26),Size=UDim2.new(1,-130,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=card})
                         local fireBtn=mk("TextButton",{Text="Fire",Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=Color3.fromRGB(230,240,230),Size=UDim2.new(0,80,0,30),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-10,0.5,0),Parent=card})
                         addCorner(fireBtn,UDim.new(0,6))
                         fireBtn.MouseButton1Click:Connect(function()
@@ -2396,7 +2396,7 @@ do
                             local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Parent=tvScroll})
                             addCorner(row,UDim.new(0,6)); addStroke(row,1,0.25)
                             mk("TextLabel",{Text=string.format("[%s] %s",category,v.Name),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-16,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
-                            mk("TextLabel",{Text=v:GetFullName(),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,8,0,20),Size=UDim2.new(1,-16,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=row})
+                            mk("TextLabel",{Text=v:GetFullName(),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,8,0,20),Size=UDim2.new(1,-16,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=row})
                         end
                     end
                 end
@@ -2413,7 +2413,7 @@ end
 do
     -- WorldState summary
     local _, sWS=makeSection(pageRAE,"WorldState(T)")
-    local wsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="No scan yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,120),Parent=sWS})
+    local wsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.RobotoMono,Text="No scan yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,120),Parent=sWS})
 
     -- Controls
     local _, sCtrl=makeSection(pageRAE,"Controls")
@@ -2498,7 +2498,7 @@ do
             local cf=mk("Frame",{BackgroundColor3=selected and Color3.fromRGB(220,240,220) or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,62),Parent=cardScroll})
             addCorner(cf,UDim.new(0,6)); addStroke(cf,1,selected and 0.1 or 0.25)
             mk("TextLabel",{Text=string.format("[%s] %s",card.Channel,card.Name),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,10,0,6),Size=UDim2.new(1,-120,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
-            mk("TextLabel",{Text=string.format("Risk:%s Conf:%d%% Val:%.2f",card.Metadata.Risk or "N/A",card.Metadata.Confidence or 0,vs.Total),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),Position=UDim2.new(0,10,0,24),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
+            mk("TextLabel",{Text=string.format("Risk:%s Conf:%d%% Val:%.2f",card.Metadata.Risk or "N/A",card.Metadata.Confidence or 0,vs.Total),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),Position=UDim2.new(0,10,0,24),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
             mk("TextLabel",{Text=card.Description,Font=Enum.Font.GothamMedium,TextSize=10,TextColor3=Color3.fromRGB(120,112,104),Position=UDim2.new(0,10,0,40),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=cf})
             local selBtn=mk("TextButton",{Text=selected and "✓ Sel" or "Select",Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=selected and Color3.fromRGB(180,230,180) or Color3.fromRGB(230,240,230),Size=UDim2.new(0,80,0,30),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-10,0.5,0),Parent=cf})
             addCorner(selBtn,UDim.new(0,6))
@@ -2559,7 +2559,7 @@ do
     local function addRow(text, color)
         local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=stateScroll})
         addCorner(row,UDim.new(0,4))
-        mk("TextLabel",{Text=text,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
+        mk("TextLabel",{Text=text,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
             TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-10,1,0),
             Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
     end
@@ -2692,7 +2692,7 @@ do
     local function addLogRow(text, color)
         local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,20),Parent=logScroll})
         addCorner(row,UDim.new(0,4))
-        mk("TextLabel",{Text=text,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-8,1,0),Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
+        mk("TextLabel",{Text=text,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-8,1,0),Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
     end
 
     previewBtn.Button.MouseButton1Click:Connect(function()
@@ -2790,7 +2790,7 @@ do
             mk("TextLabel",{Text="[INVOKE] "..rName,Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(80,100,150),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,Parent=row})
             local ca={}; for i,v in ipairs(args) do ca[i]=cleanTable(v) end
             local s,ds=pcall(function() return HttpService:JSONEncode(ca) end); if not s then ds=tostring(ca) end
-            mk("TextBox",{Text=ds,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
+            mk("TextBox",{Text=ds,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
         end)
     end
     local clearCbBtn=makeButton(sCallback,"Clear Logs",UDim2.new(1,0,0,30),"✕")
@@ -2811,7 +2811,7 @@ do
             mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=row})
             mk("TextLabel",{Text=string.format("[%s] %s",cType,rName),Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(150,80,80),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,Parent=row})
             local dd=type(dec)=="table" and HttpService:JSONEncode(dec) or tostring(dec)
-            mk("TextBox",{Text=dd,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
+            mk("TextBox",{Text=dd,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
         end)
     end
     local clearCipherBtn=makeButton(sCipher,"Clear Logs",UDim2.new(1,0,0,30),"✕")
@@ -2940,7 +2940,7 @@ do
                 if func then local env=getfenv(func); if env and env.script then scriptName=env.script.Name; scriptObj=env.script else scriptName=debug.info(func,"s") end end
                 local row=mk("TextButton",{Text="",AutoButtonColor=false,BackgroundColor3=Color3.fromRGB(240,235,230),Size=UDim2.new(1,0,0,22),Parent=signalScroll})
                 addCorner(row,UDim.new(0,4))
-                mk("TextLabel",{Text=string.format("  %s -> %s",eventName,scriptName),TextColor3=Color3.fromRGB(60,60,60),Font=Enum.Font.Code,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-30,1,0),BackgroundTransparency=1,Parent=row})
+                mk("TextLabel",{Text=string.format("  %s -> %s",eventName,scriptName),TextColor3=Color3.fromRGB(60,60,60),Font=Enum.Font.RobotoMono,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-30,1,0),BackgroundTransparency=1,Parent=row})
                 hookHover(row,Color3.fromRGB(240,235,230),Color3.fromRGB(230,225,220),1,1)
                 row.MouseButton1Click:Connect(function() clickSound(); if scriptObj then displayDecompiledScript(scriptObj) else sendNotification("Cannot locate Script for decompilation.","Warning") end end)
             end
@@ -2972,7 +2972,7 @@ do
     -- MASTER HOOK
     local SpoofedItems={}; local FakeCache={}
     local TokenForgerEnabled=false; local TokenCache={}; local TokenCacheLabel=nil
-    if not _G.PaperClayHookInstalled and getrawmetatable and hookmetamethod and checkcaller then
+    if not _G.PaperClayHookInstalled and getrawmetatable and hookmetamethod and checkcaller and setreadonly and newcclosure then
         _G.PaperClayHookInstalled=true
         local mt=getrawmetatable(game)
         local old_nc,old_idx=mt.__namecall,mt.__index
