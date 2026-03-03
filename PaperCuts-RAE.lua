@@ -1349,6 +1349,322 @@ function TransitionModel.Sample(prevID, nextID, prevSucc)
     return prevSucc and SampleBetaApprox(p.aGivenS,p.bGivenS) or SampleBetaApprox(p.aGivenF,p.bGivenF)
 end
 
+-- ══════════════════════════════════════════════════════════════
+-- DEEP INTELLIGENCE LAYER — Layer 3/4 upgrade
+-- Implements: Living World Model, Causal Dependency Graph,
+-- Enhanced Transition Model, Session Persistence
+-- ══════════════════════════════════════════════════════════════
+
+-- ── LIVING WORLD MODEL ────────────────────────────────────────
+-- Maintains a continuously updated internal representation
+-- rather than replacing WorldState each scan.
+local LWM = {
+    Snapshots      = {},  -- ring buffer of last 8 snapshots
+    Deltas         = {},  -- per-cycle state change vectors
+    RemoteRegistry = {},  -- name → { firstSeen, seenCount, fireHistory, argPatterns, totalFires }
+    TemporalMap    = {},  -- [remoteA][remoteB] = co-fire count
+    Age            = 0,
+}
+local LWM_MAXSNAP = 8
+
+local function LWM_ComputeDelta(snapA, snapB)
+    if not snapA or not snapB then return nil end
+    local d = {}
+    d.InstanceDelta    = snapB.ObjectGraph.TotalInstances - snapA.ObjectGraph.TotalInstances
+    d.PhysicsDelta     = #snapB.Physics.SimulatedAssemblies - #snapA.Physics.SimulatedAssemblies
+    d.ClientOwnedDelta = #snapB.Physics.ClientOwned - #snapA.Physics.ClientOwned
+    d.RemoteEventDelta = #snapB.Latent.RemoteEvents  - #snapA.Latent.RemoteEvents
+    d.ValueObjDelta    = #snapB.Latent.ValueObjects   - #snapA.Latent.ValueObjects
+    local prevFires = {}
+    for _, r in ipairs(snapA.Latent.RemoteEvents or {}) do prevFires[r.Name] = r.FireCount end
+    local fireDeltas = {}
+    for _, r in ipairs(snapB.Latent.RemoteEvents or {}) do
+        local prev = prevFires[r.Name] or 0
+        if r.FireCount > prev then fireDeltas[r.Name] = r.FireCount - prev end
+    end
+    d.RemoteFireDelta = fireDeltas
+    d.HasActivity = next(fireDeltas) ~= nil
+        or math.abs(d.InstanceDelta) > 5
+        or math.abs(d.ClientOwnedDelta) > 0
+    return d
+end
+
+local function LWM_UpdateRegistry(ws)
+    local now = os.clock()
+    for _, r in ipairs(ws.Latent.RemoteEvents or {}) do
+        if not LWM.RemoteRegistry[r.Name] then
+            LWM.RemoteRegistry[r.Name] = {
+                firstSeen=now, lastSeen=now, seenCount=0,
+                fireHistory={}, argPatterns={}, totalFires=0,
+            }
+        end
+        local reg = LWM.RemoteRegistry[r.Name]
+        reg.lastSeen = now; reg.seenCount = reg.seenCount + 1; reg.totalFires = r.FireCount
+        if r.LastArgs and #r.LastArgs > 0 then
+            local sig = {}
+            for _, v in ipairs(r.LastArgs) do table.insert(sig, type(v)) end
+            local k = table.concat(sig, ",")
+            reg.argPatterns[k] = (reg.argPatterns[k] or 0) + 1
+        end
+        table.insert(reg.fireHistory, {fires=r.FireCount, t=now})
+        if #reg.fireHistory > 20 then table.remove(reg.fireHistory, 1) end
+    end
+end
+
+local function LWM_UpdateTemporalMap(ws)
+    local activeFires = {}
+    for _, r in ipairs(ws.Latent.RemoteEvents or {}) do
+        local reg = LWM.RemoteRegistry[r.Name]
+        if reg and r.FireCount > (reg.totalFires or 0) then
+            table.insert(activeFires, r.Name)
+        end
+    end
+    for i = 1, #activeFires do
+        for j = i+1, #activeFires do
+            local a, b = activeFires[i], activeFires[j]
+            if not LWM.TemporalMap[a] then LWM.TemporalMap[a] = {} end
+            if not LWM.TemporalMap[b] then LWM.TemporalMap[b] = {} end
+            LWM.TemporalMap[a][b] = (LWM.TemporalMap[a][b] or 0) + 1
+            LWM.TemporalMap[b][a] = (LWM.TemporalMap[b][a] or 0) + 1
+        end
+    end
+end
+
+function LWM.Update(newWS)
+    LWM.Age = LWM.Age + 1
+    local prevWS = LWM.Snapshots[#LWM.Snapshots]
+    local delta = LWM_ComputeDelta(prevWS, newWS)
+    if delta then
+        table.insert(LWM.Deltas, delta)
+        if #LWM.Deltas > LWM_MAXSNAP then table.remove(LWM.Deltas, 1) end
+    end
+    table.insert(LWM.Snapshots, newWS)
+    if #LWM.Snapshots > LWM_MAXSNAP then table.remove(LWM.Snapshots, 1) end
+    LWM_UpdateRegistry(newWS)
+    LWM_UpdateTemporalMap(newWS)
+    return delta
+end
+
+function LWM.GetActivityScore()
+    if #LWM.Deltas == 0 then return 0 end
+    local active = 0
+    for _, d in ipairs(LWM.Deltas) do if d.HasActivity then active = active + 1 end end
+    return active / #LWM.Deltas
+end
+
+function LWM.GetRemoteProfile(name) return LWM.RemoteRegistry[name] end
+
+function LWM.GetCoFiringPartners(name, minCount)
+    minCount = minCount or 2
+    local partners = {}
+    if LWM.TemporalMap[name] then
+        for partner, count in pairs(LWM.TemporalMap[name]) do
+            if count >= minCount then table.insert(partners, {Name=partner, CoFireCount=count}) end
+        end
+        table.sort(partners, function(a,b) return a.CoFireCount > b.CoFireCount end)
+    end
+    return partners
+end
+
+function LWM.GetLatestDelta() return LWM.Deltas[#LWM.Deltas] end
+
+-- ── CAUSAL DEPENDENCY GRAPH ────────────────────────────────────
+-- Learns which cards produce real state changes from execution
+-- history, and which cards are correlated or synergistic.
+local CDG = {
+    Nodes       = {},  -- [cardID] → { channel, name, totalFires, successCount, stateChanges }
+    Edges       = {},  -- [cardA][cardB] → { coSuccess, coFail, coTotal, correlation }
+    StateImpact = {},  -- [cardID] → list of deltas observed after card fired
+}
+
+local function CDG_EnsureNode(card)
+    if not CDG.Nodes[card.ID] then
+        CDG.Nodes[card.ID] = {
+            Channel=card.Channel, Name=card.Name,
+            totalFires=0, successCount=0, stateChanges=0,
+        }
+    end
+    return CDG.Nodes[card.ID]
+end
+
+local function CDG_EnsureEdge(idA, idB)
+    if not CDG.Edges[idA] then CDG.Edges[idA] = {} end
+    if not CDG.Edges[idA][idB] then
+        CDG.Edges[idA][idB] = {coSuccess=0, coFail=0, coTotal=0, correlation=0}
+    end
+    return CDG.Edges[idA][idB]
+end
+
+function CDG.Update(log, wsBefore, wsAfter)
+    local delta = LWM_ComputeDelta(wsBefore, wsAfter)
+    for i, result in ipairs(log) do
+        local card = result.Step
+        local node = CDG_EnsureNode(card)
+        node.totalFires = node.totalFires + 1
+        if result.Success then node.successCount = node.successCount + 1 end
+        if delta and delta.HasActivity then
+            node.stateChanges = node.stateChanges + 1
+            if not CDG.StateImpact[card.ID] then CDG.StateImpact[card.ID] = {} end
+            table.insert(CDG.StateImpact[card.ID], delta)
+            if #CDG.StateImpact[card.ID] > 10 then table.remove(CDG.StateImpact[card.ID], 1) end
+        end
+        for j, other in ipairs(log) do
+            if j ~= i then
+                local edge = CDG_EnsureEdge(card.ID, other.Step.ID)
+                edge.coTotal = edge.coTotal + 1
+                if result.Success and other.Success then edge.coSuccess = edge.coSuccess + 1
+                elseif not result.Success and not other.Success then edge.coFail = edge.coFail + 1 end
+                if edge.coTotal > 0 then
+                    edge.correlation = (edge.coSuccess - edge.coFail) / edge.coTotal
+                end
+            end
+        end
+    end
+end
+
+function CDG.GetStateChangeRate(cardID)
+    local n = CDG.Nodes[cardID]
+    if not n or n.totalFires == 0 then return 0 end
+    return n.stateChanges / n.totalFires
+end
+
+function CDG.GetSynergyScore(idA, idB)
+    if not CDG.Edges[idA] or not CDG.Edges[idA][idB] then return 0 end
+    return CDG.Edges[idA][idB].correlation or 0
+end
+
+function CDG.GetLearnedOrder(cards)
+    -- Reorder by observed causal impact (high state-change rate first)
+    local sorted = {}
+    for _, card in ipairs(cards) do
+        table.insert(sorted, {Card=card, Impact=CDG.GetStateChangeRate(card.ID)})
+    end
+    table.sort(sorted, function(a,b) return a.Impact > b.Impact end)
+    local result = {}
+    for _, e in ipairs(sorted) do table.insert(result, e.Card) end
+    return result
+end
+
+-- ── ENHANCED TRANSITION MODEL (ETM) ───────────────────────────
+-- Context-aware f(State, Action) → P(outcome) learned function.
+-- State signatures make predictions state-dependent, not global.
+local ETM = {
+    Table       = {},  -- [cardID][stateSig] → { alpha, beta, n }
+    GlobalTable = {},  -- [cardID] → { alpha, beta, n }  (context-free fallback)
+}
+
+local function ETM_StateSig(ws)
+    if not ws then return "null" end
+    return table.concat({
+        math.floor((ws.ObjectGraph.TotalInstances or 0) / 100),
+        math.floor(#(ws.Latent.RemoteEvents or {}) / 5),
+        #(ws.Physics.ClientOwned or {}),
+        ws.Agents.LocalPlayer and math.floor((ws.Agents.LocalPlayer.Health or 0) / 25) or 0,
+        ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.EquippedTool and 1 or 0,
+    }, ":")
+end
+
+local function ETM_Ensure(cardID, sig)
+    if not ETM.Table[cardID] then ETM.Table[cardID] = {} end
+    if not ETM.Table[cardID][sig] then ETM.Table[cardID][sig] = {alpha=1.0, beta=1.0, n=0} end
+    return ETM.Table[cardID][sig]
+end
+
+local function ETM_EnsureGlobal(cardID)
+    if not ETM.GlobalTable[cardID] then ETM.GlobalTable[cardID] = {alpha=1.0, beta=1.0, n=0} end
+    return ETM.GlobalTable[cardID]
+end
+
+function ETM.Record(cardID, stateSig, success)
+    local ctx = ETM_Ensure(cardID, stateSig)
+    ctx.n = ctx.n + 1
+    if success then ctx.alpha = ctx.alpha + 1 else ctx.beta = ctx.beta + 1 end
+    local g = ETM_EnsureGlobal(cardID)
+    g.n = g.n + 1
+    if success then g.alpha = g.alpha + 1 else g.beta = g.beta + 1 end
+end
+
+function ETM.Predict(cardID, stateSig)
+    -- Returns p, stddev, n
+    local ctx = ETM.Table[cardID] and ETM.Table[cardID][stateSig]
+    local g   = ETM.GlobalTable[cardID]
+    local alpha, beta, n
+    if ctx and ctx.n >= 3 then
+        alpha, beta, n = ctx.alpha, ctx.beta, ctx.n
+    elseif g and g.n >= 2 then
+        alpha, beta, n = g.alpha, g.beta, g.n
+    else
+        return 0.5, 0.5, 0
+    end
+    local p = alpha / (alpha + beta)
+    local ab = alpha + beta
+    local stddev = math.sqrt((alpha * beta) / (ab * ab * (ab + 1)))
+    return p, stddev, n
+end
+
+function ETM.IsConverged(cardID)
+    local g = ETM.GlobalTable[cardID]
+    if not g or g.n < 10 then return false end
+    local ab = g.alpha + g.beta
+    return math.sqrt((g.alpha * g.beta) / (ab * ab * (ab + 1))) < 0.08
+end
+
+function ETM.GetConvergenceMap()
+    local result = {}
+    for cardID, g in pairs(ETM.GlobalTable) do
+        local ab = g.alpha + g.beta
+        local stddev = ab > 0 and math.sqrt((g.alpha * g.beta) / (ab * ab * (ab + 1))) or 0.5
+        result[cardID] = {
+            n=g.n, mean=g.alpha/ab, stddev=stddev,
+            converged = g.n >= 10 and stddev < 0.08,
+        }
+    end
+    return result
+end
+
+-- ── SESSION PERSISTENCE ────────────────────────────────────────
+-- Accumulated knowledge survives script re-execution within
+-- the same session via _G storage.
+local PERSIST_KEY = "_RAE_SessionMemory_v3"
+local PERSIST_VER = 3
+
+local function SessionSave()
+    _G[PERSIST_KEY] = {
+        version         = PERSIST_VER,
+        IntelMem        = IntelMem,
+        DynamicsTable   = DynamicsTable,
+        TransitionTable = TransitionTable,
+        ETM_Table       = ETM.Table,
+        ETM_Global      = ETM.GlobalTable,
+        CDG_Nodes       = CDG.Nodes,
+        CDG_Edges       = CDG.Edges,
+        CDG_StateImpact = CDG.StateImpact,
+        LWM_RemoteReg   = LWM.RemoteRegistry,
+        LWM_Temporal    = LWM.TemporalMap,
+        LWM_Age         = LWM.Age,
+    }
+end
+
+local function SessionLoad()
+    local s = _G[PERSIST_KEY]
+    if not s or s.version ~= PERSIST_VER then return false end
+    for k,v in pairs(s.IntelMem or {}) do IntelMem[k] = v end
+    for k,v in pairs(s.DynamicsTable or {}) do DynamicsTable[k] = v end
+    for k,v in pairs(s.TransitionTable or {}) do TransitionTable[k] = v end
+    for k,v in pairs(s.ETM_Table or {}) do ETM.Table[k] = v end
+    for k,v in pairs(s.ETM_Global or {}) do ETM.GlobalTable[k] = v end
+    for k,v in pairs(s.CDG_Nodes or {}) do CDG.Nodes[k] = v end
+    for k,v in pairs(s.CDG_Edges or {}) do CDG.Edges[k] = v end
+    for k,v in pairs(s.CDG_StateImpact or {}) do CDG.StateImpact[k] = v end
+    LWM.RemoteRegistry = s.LWM_RemoteReg or {}
+    LWM.TemporalMap    = s.LWM_Temporal  or {}
+    LWM.Age            = s.LWM_Age       or 0
+    return true
+end
+
+-- Attempt restore on load
+local _sessionRestored = SessionLoad()
+
 -- ── CHAIN EXECUTOR ────────────────────────────────────────────
 local CausalOrder={"Structural","Metabolic","Ownership","Replication","Latent","Agent","Network"}
 local CausalReasons={
@@ -1374,7 +1690,23 @@ local function ResolveDeps(selected, all)
     local chIdx={}; for i,ch in ipairs(CausalOrder) do chIdx[ch]=i end
     for ch in pairs(required) do local idx=chIdx[ch] or 0; for i=1,idx-1 do required[CausalOrder[i]]=true end end
     local chain={}; local seen={}
-    for _,ch in ipairs(CausalOrder) do if required[ch] then for _,card in ipairs(all) do if card.Channel==ch and not seen[card.ID] then table.insert(chain,card); seen[card.ID]=true; break end end end end
+    for _,ch in ipairs(CausalOrder) do
+        if required[ch] then
+            -- within a channel, pick the card with highest CDG state-change rate
+            local candidates = {}
+            for _,card in ipairs(all) do
+                if card.Channel==ch and not seen[card.ID] then
+                    table.insert(candidates, card)
+                end
+            end
+            table.sort(candidates, function(a,b)
+                return CDG.GetStateChangeRate(a.ID) > CDG.GetStateChangeRate(b.ID)
+            end)
+            if candidates[1] then
+                table.insert(chain, candidates[1]); seen[candidates[1].ID]=true
+            end
+        end
+    end
     for _,card in ipairs(selected) do if not seen[card.ID] then table.insert(chain,card); seen[card.ID]=true end end
     return chain
 end
@@ -1473,56 +1805,121 @@ end
 
 local function Rollout(startNode, viable, allCards, intelHistory, maxDepth)
     local chain={}; local prevCard=startNode.Card; local prevSucc=true; local depth=startNode.Depth
-    local node=startNode; local nc={}
+    local node=startNode
+    local nc={}
     while node do if node.Card then table.insert(nc,1,{Card=node.Card,Success=true}) end; node=node.Parent end
     for _,s in ipairs(nc) do table.insert(chain,s) end
-    while depth<maxDepth do
-        if #viable==0 then break end
-        local nextCard=viable[math.random(#viable)]
-        local succProb=TransitionModel.Sample(prevCard.ID, nextCard.ID, prevSucc)
-        local dynRate=DynamicsModel.GetSuccessRate(nextCard.ID)
-        if dynRate~=0.5 then succProb=(succProb+dynRate)/2 end
-        local simSucc=math.random()<succProb
-        table.insert(chain, {Card=nextCard,Success=simSucc})
+
+    -- Current state sig for ETM predictions
+    local currentWS = RAE_State and RAE_State.WorldState
+    local stateSig = currentWS and ETM_StateSig(currentWS) or "null"
+
+    while depth < maxDepth do
+        if #viable == 0 then break end
+        local nextCard = viable[math.random(#viable)]
+
+        -- ETM: context-aware prediction
+        local etmP, etmStd, etmN = ETM.Predict(nextCard.ID, stateSig)
+        -- TransitionModel: sequential dependency
+        local tmP = TransitionModel.Sample(prevCard.ID, nextCard.ID, prevSucc)
+        -- DynamicsModel: historical success rate
+        local dynRate = DynamicsModel.GetSuccessRate(nextCard.ID)
+        -- CDG: synergy with previous card
+        local synergy = CDG.GetSynergyScore(prevCard.ID, nextCard.ID)
+        -- Weighted blend — ETM weighted more heavily when it has sufficient data
+        local etmWeight = math.min(etmN / 10, 1.0)  -- ramps up as ETM learns
+        local succProb
+        if etmWeight > 0.3 then
+            succProb = etmP * etmWeight + (tmP * 0.5 + dynRate * 0.5) * (1 - etmWeight)
+        else
+            succProb = tmP * 0.5 + dynRate * 0.5
+        end
+        -- CDG synergy nudge: positive correlation boosts, negative penalises
+        succProb = math.clamp(succProb + synergy * 0.1, 0.01, 0.99)
+
+        local simSucc = math.random() < succProb
+        table.insert(chain, {Card=nextCard, Success=simSucc})
         prevCard=nextCard; prevSucc=simSucc; depth=depth+1
     end
-    return ValueSystem.ScoreChain(chain, allCards, intelHistory), chain
+
+    -- Chain score: base value + CDG causal bonus
+    local baseScore = ValueSystem.ScoreChain(chain, allCards, intelHistory)
+    -- Bonus for chains that contain high-state-change-rate cards
+    local causalBonus = 0
+    for _, step in ipairs(chain) do
+        causalBonus = causalBonus + CDG.GetStateChangeRate(step.Card.ID) * 0.05
+    end
+    return math.clamp(baseScore + causalBonus, 0, 1), chain
 end
 
 local Planner={}
 function Planner.Plan(availableCards, lastLog, intelHistory)
     if lastLog and #lastLog>0 then TransitionModel.Update(lastLog) end
+
     local viable={}
     for _,card in ipairs(availableCards) do
-        if (card.Metadata.Confidence or 50)/100>=MCTS_CFG.MinCardConf then table.insert(viable, card) end
+        if (card.Metadata.Confidence or 50)/100 >= MCTS_CFG.MinCardConf then
+            table.insert(viable, card)
+        end
     end
     if #viable==0 then return nil end
+
+    -- Adjust simulations based on environment activity:
+    -- Active environment → explore more; quiet → exploit known good cards
+    local activity = LWM.GetActivityScore()
+    local sims = math.floor(MCTS_CFG.Simulations * (0.8 + activity * 0.4))
+
     local root=NewNode(nil,nil,0)
-    for _=1,MCTS_CFG.Simulations do
+    for _=1,sims do
         local node=root
         while #node.Children>0 and node.Visits>0 do
             local best,bestScore=nil,-math.huge
-            for _,child in ipairs(node.Children) do local s=UCB1(child,node.Visits); if s>bestScore then bestScore=s; best=child end end
+            for _,child in ipairs(node.Children) do
+                local s=UCB1(child,node.Visits); if s>bestScore then bestScore=s; best=child end
+            end
             node=best
         end
-        local explored={}; for _,child in ipairs(node.Children) do if child.Card then explored[child.Card.ID]=true end end
-        local unexplored={}; for _,card in ipairs(viable) do if not explored[card.ID] then table.insert(unexplored,card) end end
+        local explored={}
+        for _,child in ipairs(node.Children) do if child.Card then explored[child.Card.ID]=true end end
+        local unexplored={}
+        for _,card in ipairs(viable) do if not explored[card.ID] then table.insert(unexplored,card) end end
         local expandNode=node
         if #unexplored>0 then
-            local nc=unexplored[math.random(#unexplored)]
-            expandNode=NewNode(nc,node,node.Depth+1); table.insert(node.Children,expandNode)
+            -- Prefer unexplored cards with high CDG state-change rates (they actually do things)
+            table.sort(unexplored, function(a,b)
+                return CDG.GetStateChangeRate(a.ID) > CDG.GetStateChangeRate(b.ID)
+            end)
+            -- Weighted random: top-impact cards selected more often but not exclusively
+            local pick
+            if math.random() < 0.65 and CDG.GetStateChangeRate(unexplored[1].ID) > 0 then
+                pick = unexplored[1]
+            else
+                pick = unexplored[math.random(#unexplored)]
+            end
+            expandNode=NewNode(pick, node, node.Depth+1)
+            table.insert(node.Children, expandNode)
         end
         local reward=0
-        if expandNode.Card then reward,_=Rollout(expandNode,viable,availableCards,intelHistory,MCTS_CFG.MaxDepth) end
+        if expandNode.Card then
+            reward, _ = Rollout(expandNode, viable, availableCards, intelHistory, MCTS_CFG.MaxDepth)
+        end
         local back=expandNode
-        while back do back.Visits=back.Visits+1; back.TotalReward=back.TotalReward+reward; back.MeanReward=back.TotalReward/back.Visits; back=back.Parent end
+        while back do
+            back.Visits=back.Visits+1
+            back.TotalReward=back.TotalReward+reward
+            back.MeanReward=back.TotalReward/back.Visits
+            back=back.Parent
+        end
     end
+
     local bestChain={}; local node=root; local depth=0
     while #node.Children>0 and depth<MCTS_CFG.MaxDepth do
         local best,bestR=nil,-math.huge
-        for _,child in ipairs(node.Children) do if child.Visits>0 and child.MeanReward>bestR then bestR=child.MeanReward; best=child end end
+        for _,child in ipairs(node.Children) do
+            if child.Visits>0 and child.MeanReward>bestR then bestR=child.MeanReward; best=child end
+        end
         if not best then break end
-        table.insert(bestChain, {Card=best.Card,ProjectedReward=best.MeanReward,Visits=best.Visits})
+        table.insert(bestChain, {Card=best.Card, ProjectedReward=best.MeanReward, Visits=best.Visits})
         node=best; depth=depth+1
     end
     return bestChain
@@ -1543,19 +1940,25 @@ end
 
 local function RAE_Scan()
     RAE_SetPhase("SCANNING")
-    local ws=WorldState.Capture()
-    RAE_State.WorldState=ws
-    local confidence=0
-    if ws.ObjectGraph.TotalInstances>0 then confidence=confidence+20 end
-    if ws.SimConfig.Gravity then confidence=confidence+20 end
-    if #ws.Physics.SimulatedAssemblies>0 then confidence=confidence+20 end
-    if #ws.Latent.RemoteEvents>0 then confidence=confidence+20 end
-    if ws.Agents.LocalPlayer then confidence=confidence+20 end
-    if confidence<40 then RAE_SetPhase("DORMANT"); return false end
-    local cards=CardGenesis.Generate(ws)
-    RAE_State.Cards=cards
-    local idx=1; RAE_State._IndexMap={}
-    for _,card in ipairs(cards) do RAE_State._IndexMap[idx]=card; idx=idx+1 end
+    local ws = WorldState.Capture()
+    RAE_State.WorldState = ws
+
+    -- Feed the Living World Model
+    local delta = LWM.Update(ws)
+    RAE_State.LastDelta = delta
+
+    local confidence = 0
+    if ws.ObjectGraph.TotalInstances > 0 then confidence = confidence + 20 end
+    if ws.SimConfig.Gravity then confidence = confidence + 20 end
+    if #ws.Physics.SimulatedAssemblies > 0 then confidence = confidence + 20 end
+    if #ws.Latent.RemoteEvents > 0 then confidence = confidence + 20 end
+    if ws.Agents.LocalPlayer then confidence = confidence + 20 end
+    if confidence < 40 then RAE_SetPhase("DORMANT"); return false end
+
+    local cards = CardGenesis.Generate(ws)
+    RAE_State.Cards = cards
+    local idx = 1; RAE_State._IndexMap = {}
+    for _, card in ipairs(cards) do RAE_State._IndexMap[idx] = card; idx = idx + 1 end
     RAE_SetPhase("READY")
     if RAE_Callbacks.OnScan then RAE_Callbacks.OnScan(ws, cards) end
     return true
@@ -1574,16 +1977,30 @@ local function RAE_Plan()
 end
 
 local function RAE_Commit()
-    if #RAE_State.SelectedCards==0 then return nil end
+    if #RAE_State.SelectedCards == 0 then return nil end
     RAE_SetPhase("EXECUTING")
-    local wsBefore=RAE_State.WorldState
-    local log=Executor.Execute(RAE_State.SelectedCards, RAE_State.Cards, wsBefore)
-    local wsAfter=WorldState.Capture()
-    for _,r in ipairs(log) do DynamicsModel.Record(r.Step.ID, wsBefore, wsAfter, r.Success) end
-    RAE_State.LastLog=log; RAE_State.CycleCount=RAE_State.CycleCount+1; RAE_State.SelectedCards={}
+    local wsBefore = RAE_State.WorldState
+    local stateSig = ETM_StateSig(wsBefore)
+    local log = Executor.Execute(RAE_State.SelectedCards, RAE_State.Cards, wsBefore)
+    local wsAfter = WorldState.Capture()
+
+    -- Feed all learned models
+    for _, r in ipairs(log) do
+        DynamicsModel.Record(r.Step.ID, wsBefore, wsAfter, r.Success)
+        ETM.Record(r.Step.ID, stateSig, r.Success)
+    end
+    CDG.Update(log, wsBefore, wsAfter)
+
+    RAE_State.LastLog = log
+    RAE_State.CycleCount = RAE_State.CycleCount + 1
+    RAE_State.SelectedCards = {}
     Intel.ProcessFeedback(log, RAE_State.Cards)
     TransitionModel.Update(log)
     ValueSystem.AdaptWeights(log, RAE_State.Cards)
+
+    -- Persist accumulated knowledge
+    SessionSave()
+
     RAE_SetPhase("COMPLETE"); RAE_SetPhase("READY")
     if RAE_Callbacks.OnCommit then RAE_Callbacks.OnCommit(log) end
     return log
@@ -2120,24 +2537,31 @@ do
 end
 
 -- ============================================================
--- PAGE: Recursive (RAE Cognitive State)
+-- PAGE: Recursive (RAE Cognitive State — Deep Intelligence)
 -- ============================================================
 do
-    local _, sBrain=makeSection(pageRecursive,"Cognitive Brain (Thompson Sampling)")
-    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Live cognitive state of RAE. Updates after every Commit cycle. Posteriors show Bayesian learning per card. Channel weights reflect success rates. Phase shifts indicate environment drift.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sBrain})
+    local _, sBrain=makeSection(pageRecursive,"Cognitive Intelligence")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Live deep cognitive state of RAE. Includes Living World Model activity, ETM convergence per card, Causal Dependency Graph, Thompson posteriors, and session persistence status.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        Size=UDim2.new(1,0,0,56),Parent=sBrain})
 
     local refreshBtn=makeButton(sBrain,"Refresh State",UDim2.new(0,200,0,40),"↻")
     refreshBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
 
-    local stateScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,400),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBrain})
+    local stateScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
+        Size=UDim2.new(1,0,0,520),CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBrain})
     addCorner(stateScroll,UDim.new(0,8)); addStroke(stateScroll,1,0.3)
     mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=stateScroll})
     mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=stateScroll})
 
-    local function addStateRow(parent, text, color)
-        local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=parent})
+    local function addRow(text, color)
+        local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=stateScroll})
         addCorner(row,UDim.new(0,4))
-        mk("TextLabel",{Text=text,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-10,1,0),Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
+        mk("TextLabel",{Text=text,Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
+            TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-10,1,0),
+            Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
     end
 
     local function refreshState()
@@ -2145,37 +2569,103 @@ do
         mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=stateScroll})
         mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=stateScroll})
 
-        local mem=Intel.GetMemory()
-        addStateRow(stateScroll,string.format("Cycles: %d  |  Phase Shifts: %d  |  Overfit Streak: %d",mem.Cycles,#mem.PhaseShifts,mem.OverfitStreak),Color3.fromRGB(235,245,255))
-        addStateRow(stateScroll,"─── Channel Weights ───",Color3.fromRGB(245,240,235))
-        for ch,w in pairs(mem.ChannelWeights) do
-            local bar=string.rep("█",math.floor(w*5))..string.rep("░",10-math.floor(w*5))
-            addStateRow(stateScroll,string.format("%-14s %.3f  %s",ch,w,bar))
+        local mem = Intel.GetMemory()
+
+        -- ── Session & Layer Status ────────────────────────────
+        addRow("═══ INTELLIGENCE LAYER STATUS ═══", Color3.fromRGB(225,235,255))
+        addRow(string.format("Cycles: %d  |  LWM Age: %d  |  Session: %s",
+            mem.Cycles, LWM.Age, _sessionRestored and "RESTORED ✓" or "NEW"), Color3.fromRGB(235,245,255))
+        addRow(string.format("Phase Shifts: %d  |  Overfit Streak: %d  |  Activity: %.0f%%",
+            #mem.PhaseShifts, mem.OverfitStreak, LWM.GetActivityScore()*100), Color3.fromRGB(235,245,255))
+
+        -- ── Living World Model ────────────────────────────────
+        addRow("─── Living World Model ───", Color3.fromRGB(240,248,255))
+        addRow(string.format("Snapshots: %d/%d  |  Deltas recorded: %d",
+            #LWM.Snapshots, LWM_MAXSNAP, #LWM.Deltas))
+        local latestDelta = LWM.GetLatestDelta()
+        if latestDelta then
+            addRow(string.format("Last Δ: Instances%+d  Physics%+d  ClientOwned%+d  Remotes%+d",
+                latestDelta.InstanceDelta, latestDelta.PhysicsDelta,
+                latestDelta.ClientOwnedDelta, latestDelta.RemoteEventDelta))
+            local fireNames = {}
+            for name, _ in pairs(latestDelta.RemoteFireDelta or {}) do table.insert(fireNames, name) end
+            if #fireNames > 0 then
+                addRow("Active fires: "..table.concat(fireNames, ", "), Color3.fromRGB(255,250,235))
+            end
         end
-        addStateRow(stateScroll,"─── Value Axis Weights ───",Color3.fromRGB(245,240,235))
-        for axis,w in pairs(ValueWeights) do
-            addStateRow(stateScroll,string.format("%-18s %.3f",axis,w))
+        local regCount = 0; for _ in pairs(LWM.RemoteRegistry) do regCount=regCount+1 end
+        local tmCount  = 0; for _ in pairs(LWM.TemporalMap) do tmCount=tmCount+1 end
+        addRow(string.format("Remote registry: %d entries  |  Temporal map nodes: %d", regCount, tmCount))
+
+        -- ── ETM Convergence ───────────────────────────────────
+        addRow("─── ETM Convergence Map ───", Color3.fromRGB(240,255,240))
+        local convMap = ETM.GetConvergenceMap()
+        local convergedCount, totalETM = 0, 0
+        for _, cv in pairs(convMap) do
+            totalETM = totalETM + 1
+            if cv.converged then convergedCount = convergedCount + 1 end
         end
+        addRow(string.format("Cards learned: %d/%d converged  (n≥10, σ<0.08)", convergedCount, totalETM),
+            convergedCount == totalETM and totalETM > 0 and Color3.fromRGB(220,255,220) or Color3.fromRGB(255,252,220))
+        for cardID, cv in pairs(convMap) do
+            local bar = cv.converged and "✓" or (cv.n >= 5 and "~" or "?")
+            addRow(string.format("[%s] %-12s mean=%.0f%%  σ=%.3f  n=%d",
+                bar, cardID:sub(1,12), cv.mean*100, cv.stddev, cv.n),
+                cv.converged and Color3.fromRGB(230,255,230) or nil)
+        end
+
+        -- ── Causal Dependency Graph ───────────────────────────
+        addRow("─── Causal Dependency Graph ───", Color3.fromRGB(255,245,235))
+        local cdgCount = 0; for _ in pairs(CDG.Nodes) do cdgCount=cdgCount+1 end
+        addRow(string.format("CDG nodes: %d", cdgCount))
+        for cardID, node in pairs(CDG.Nodes) do
+            if node.totalFires > 0 then
+                local scr = CDG.GetStateChangeRate(cardID)
+                local bar = string.rep("█", math.floor(scr*10))..string.rep("░", 10-math.floor(scr*10))
+                addRow(string.format("%-14s fires=%d  scr=%.0f%%  %s",
+                    node.Name:sub(1,14), node.totalFires, scr*100, bar),
+                    scr > 0.5 and Color3.fromRGB(220,255,235) or nil)
+            end
+        end
+
+        -- ── Channel Weights ───────────────────────────────────
+        addRow("─── Channel Weights ───", Color3.fromRGB(245,240,235))
+        for ch, w in pairs(mem.ChannelWeights) do
+            local bar = string.rep("█", math.floor(w*5))..string.rep("░", 10-math.floor(w*5))
+            addRow(string.format("%-14s %.3f  %s", ch, w, bar))
+        end
+
+        -- ── Value Axis Weights ────────────────────────────────
+        addRow("─── Value Axis Weights ───", Color3.fromRGB(245,240,235))
+        for axis, w in pairs(ValueWeights) do
+            addRow(string.format("%-18s %.3f", axis, w))
+        end
+
+        -- ── Card Posteriors ───────────────────────────────────
         if next(mem.CardHistory) then
-            addStateRow(stateScroll,"─── Card Posteriors ───",Color3.fromRGB(245,240,235))
-            for id,h in pairs(mem.CardHistory) do
-                addStateRow(stateScroll,string.format("%-10s α=%.2f β=%.2f mean=%.0f%% σ=%.3f n=%d",
-                    id:sub(1,10),h.alpha,h.beta,h.Confidence,h.StdDev,h.n))
+            addRow("─── Card Posteriors (Bayesian) ───", Color3.fromRGB(245,240,235))
+            for id, h in pairs(mem.CardHistory) do
+                addRow(string.format("%-10s α=%.2f β=%.2f mean=%.0f%% σ=%.3f n=%d",
+                    id:sub(1,10), h.alpha, h.beta, h.Confidence, h.StdDev, h.n))
             end
         end
-        if #mem.PhaseShifts>0 then
-            addStateRow(stateScroll,"─── Phase Shifts ───",Color3.fromRGB(255,245,235))
-            for _,s in ipairs(mem.PhaseShifts) do
-                addStateRow(stateScroll,string.format("Cycle %d: %s %.0f%%→%.0f%%",s.Cycle,s.Channel,s.PriorMean*100,s.RecentMean*100),Color3.fromRGB(255,240,220))
+
+        -- ── Phase Shifts ──────────────────────────────────────
+        if #mem.PhaseShifts > 0 then
+            addRow("─── Phase Shifts ───", Color3.fromRGB(255,245,235))
+            for _, s in ipairs(mem.PhaseShifts) do
+                addRow(string.format("Cycle %d: %s %.0f%%→%.0f%%",
+                    s.Cycle, s.Channel, s.PriorMean*100, s.RecentMean*100),
+                    Color3.fromRGB(255,240,220))
             end
         end
-        addStateRow(stateScroll,string.format("Value Weight Updates: %d",ValueHistory.WeightUpdates),Color3.fromRGB(240,255,240))
+
+        addRow(string.format("Value Weight Updates: %d", ValueHistory.WeightUpdates), Color3.fromRGB(240,255,240))
     end
 
     refreshBtn.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(refreshBtn.Button); refreshState() end)
-    -- Also update after each commit
-    local origOnCommit=RAE_Callbacks.OnCommit
-    RAE_Callbacks.OnCommit=function(log)
+    local origOnCommit = RAE_Callbacks.OnCommit
+    RAE_Callbacks.OnCommit = function(log)
         if origOnCommit then origOnCommit(log) end
         refreshState()
     end
@@ -2866,10 +3356,15 @@ end
 -- RAE AUTO-START (one-shot boot scan, then manual-only)
 -- ============================================================
 _G.RAE_Engine = {
-    Scan   = RAE_Scan,
-    Plan   = RAE_Plan,
-    Commit = RAE_Commit,
-    State  = RAE_State,
+    Scan     = RAE_Scan,
+    Plan     = RAE_Plan,
+    Commit   = RAE_Commit,
+    State    = RAE_State,
+    LWM      = LWM,
+    CDG      = CDG,
+    ETM      = ETM,
+    SessionSave = SessionSave,
+    SessionLoad = SessionLoad,
 }
 
 task.spawn(function()
