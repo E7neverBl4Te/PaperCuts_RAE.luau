@@ -1,24 +1,22 @@
 --[[
     ╔══════════════════════════════════════════════════════════════════════╗
-    ║   Paper & Clay  +  RAE — Recursive Autonomous Engine                ║
-    ║   Combined Edition                                                   ║
+    ║   Paper & Clay  +  RAE — Recursive Autonomous Engine  v2.0          ║
+    ║   Deep Intelligence Edition                                          ║
     ║                                                                      ║
-    ║   UI:  Paper & Clay shell — soft material, responsive layout        ║
-    ║   RAE: 7-layer autonomous engine embedded as live backend           ║
+    ║   NEW IN v2.0:                                                       ║
+    ║     StateSignature  — compact φ(S) with canonicalization/hashing    ║
+    ║     LWM             — Living World Model ring buffer + delta track  ║
+    ║     ETM             — Empirical Transition Model (Bayesian,         ║
+    ║                        state-conditional, convergence-aware)         ║
+    ║     CDG             — Causal Dependency Graph (effect size+conf)    ║
+    ║     Risk-Adj MCTS   — E[U] − λVar[U] − μCost selection criterion   ║
+    ║     Session Persist — _G persistence for IntelMem / ETM / CDG       ║
+    ║     Brier Calibration — predicted-vs-actual confidence tracking     ║
+    ║     Analytics Tab   — convergence map, CDG edges, calibration live  ║
     ║                                                                      ║
     ║   Tabs:                                                              ║
     ║     Overview · Player · Camera · World · Discovery                  ║
-    ║     RAE · Recursive · Bridge · Utilities · About                    ║
-    ║                                                                      ║
-    ║   RAE Architecture:                                                  ║
-    ║     Foundation — WorldState(T): 6-layer formal state vector         ║
-    ║     Layer 1    — Living Scan                                         ║
-    ║     Layer 2    — Card Genesis: Executable hypotheses                ║
-    ║     Layer 3    — Chain Executor: Fast path + Staged path            ║
-    ║     Layer 4    — Intelligence v3: Thompson sampling + drift         ║
-    ║     Layer 5    — Environment Dynamics: P(S_t+1 | S_t, A_t)         ║
-    ║     Layer 6    — Multi-Objective Value: 6-axis vector               ║
-    ║     Layer 7    — MCTS Planner: World-simulation rollouts            ║
+    ║     RAE · Recursive · Bridge · Analytics · Chain · Utilities · About║
     ╚══════════════════════════════════════════════════════════════════════╝
 --]]
 
@@ -40,7 +38,6 @@ local Workspace         = game:GetService("Workspace")
 local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
--- Cleanup existing UI
 local existing = playerGui:FindFirstChild("PaperClayUI")
 if existing then existing:Destroy() end
 
@@ -50,7 +47,6 @@ if existing then existing:Destroy() end
 local function tween(inst, ti, props)
     local t = TweenService:Create(inst, ti, props); t:Play(); return t
 end
-
 local function mk(className, props, children)
     local obj = Instance.new(className)
     pcall(function() obj.AutoLocalize = false end)
@@ -58,18 +54,15 @@ local function mk(className, props, children)
     if children then for _, c in ipairs(children) do c.Parent = obj end end
     return obj
 end
-
 local function addCorner(parent, radius)
     return mk("UICorner", { CornerRadius = radius or UDim.new(0, 14), Parent = parent })
 end
-
 local function addStroke(parent, thickness, transparency)
     return mk("UIStroke", {
         Thickness = thickness or 1, Transparency = transparency or 0.2,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Parent = parent,
     })
 end
-
 local function addShadow(parent, zIndex)
     local sh = mk("Frame", {
         Name = "Shadow", BackgroundColor3 = Color3.fromRGB(0,0,0),
@@ -79,13 +72,11 @@ local function addShadow(parent, zIndex)
     })
     addCorner(sh, UDim.new(0, 18)); return sh
 end
-
 local function pulseClick(btn)
     local s0 = btn.Size
     tween(btn, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = s0 + UDim2.fromOffset(2,2) })
     task.delay(0.09, function() if btn and btn.Parent then tween(btn, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Size = s0 }) end end)
 end
-
 local function hookHover(btn, baseBg, hoverBg, baseStrokeT, hoverStrokeT)
     local stroke = btn:FindFirstChildOfClass("UIStroke")
     btn.MouseEnter:Connect(function()
@@ -97,7 +88,6 @@ local function hookHover(btn, baseBg, hoverBg, baseStrokeT, hoverStrokeT)
         if stroke then tween(stroke, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Transparency = baseStrokeT }) end
     end)
 end
-
 local uiClickSound = mk("Sound", { Name="PaperClay_Click", SoundId="rbxassetid://911342077", Volume=0.25, Parent=SoundService })
 local function clickSound() if uiClickSound then uiClickSound:Play() end end
 
@@ -113,7 +103,6 @@ local function cleanTable(t, seen)
     for k, v in pairs(t) do n[cleanTable(k, seen)] = cleanTable(v, seen) end
     return n
 end
-
 local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local function base64_decode(data)
     data = string.gsub(data, '[^'..b64chars..'=]', '')
@@ -128,7 +117,6 @@ local function base64_decode(data)
         return string.char(c)
     end))
 end
-
 local function tryDecode(str)
     if (str:sub(1,1)=="{"and str:sub(-1)=="}")or(str:sub(1,1)=="["and str:sub(-1)=="]") then
         local s, res = pcall(function() return HttpService:JSONDecode(str) end)
@@ -146,7 +134,6 @@ local function tryDecode(str)
     end
     return nil, str
 end
-
 local function disassembleBytecode(bytecode)
     if type(bytecode) ~= "string" or #bytecode == 0 then return "-- Invalid Bytecode --" end
     if type(disassemble) == "function" then
@@ -209,7 +196,6 @@ local function disassembleBytecode(bytecode)
             for j,ins in ipairs(p.code) do
                 local op=bit32.band(ins,0xFF); local a=bit32.band(bit32.rshift(ins,8),0xFF)
                 local b=bit32.band(bit32.rshift(ins,16),0xFF); local c=bit32.band(bit32.rshift(ins,24),0xFF)
-                local bx=bit32.band(bit32.rshift(ins,16),0xFFFF)
                 table.insert(out,string.format("[%04d] OP_%02d A:%-3d B:%-3d C:%-3d",j,op,a,b,c))
             end
         end
@@ -219,16 +205,10 @@ local function disassembleBytecode(bytecode)
 end
 
 -- ============================================================
--- ██████╗  █████╗ ███████╗
--- ██╔══██╗██╔══██╗██╔════╝
--- ██████╔╝███████║█████╗
--- ██╔══██╗██╔══██║██╔══╝
--- ██║  ██║██║  ██║███████╗
--- ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
--- RECURSIVE AUTONOMOUS ENGINE — FULL EMBEDDED BACKEND
+-- RAE BACKEND — DEEP INTELLIGENCE EDITION
 -- ============================================================
 
--- SHARED MATH: Beta Distribution Sampling
+-- SHARED MATH
 local function SampleGamma(alpha)
     if alpha < 1 then return SampleGamma(1+alpha)*(math.random()^(1/alpha)) end
     local d=alpha-1/3; local c=1/math.sqrt(9*d)
@@ -242,12 +222,10 @@ local function SampleGamma(alpha)
         end
     end
 end
-
 local function SampleBeta(alpha, beta)
     local ga=SampleGamma(math.max(alpha,0.1)); local gb=SampleGamma(math.max(beta,0.1))
     local total=ga+gb; if total==0 then return 0.5 end; return ga/total
 end
-
 local function SampleBetaApprox(alpha, beta)
     local a=math.max(alpha,0.1); local b=math.max(beta,0.1)
     local mean=a/(a+b); local var=(a*b)/((a+b)^2*(a+b+1))
@@ -255,21 +233,286 @@ local function SampleBetaApprox(alpha, beta)
     return math.clamp(mean+noise, 0.01, 0.99)
 end
 
--- ── WORLD STATE ──────────────────────────────────────────────
--- ── WORLD STATE ──────────────────────────────────────────────
--- All heavy iteration is chunked: yields every CHUNK_SIZE instances
--- so the scan spreads across multiple frames instead of stalling one.
+-- ── SEMANTIC CLASSIFIER ──────────────────────────────────────
+local SEMANTIC_TAGS = {
+    Economy  = {"coin","cash","money","gem","gold","credit","balance","point","currency","reward","earn","pay","buy","purchase","shop","cost"},
+    Heal     = {"heal","health","hp","regen","revive","respawn","medkit"},
+    Damage   = {"damage","hurt","hit","attack","strike","kill","death"},
+    Movement = {"teleport","tp","move","position","warp","dash","blink","cframe","jump"},
+    Cooldown = {"cooldown","timer","daily","claim","stamp","elapsed","reset","delay"},
+    Admin    = {"kick","ban","admin","rank","mod","promote","demote","execute","run"},
+    Save     = {"save","load","data","store","sync","persist","datastore"},
+    Crafting = {"craft","recipe","forge","combine","brew","upgrade","build"},
+    Loot     = {"loot","crate","box","spin","open","roll","drop","chest","unbox"},
+    Trade    = {"trade","offer","accept","swap","exchange","deal"},
+}
+local function ClassifyRemote(name)
+    local nl = name:lower()
+    for tag, patterns in pairs(SEMANTIC_TAGS) do
+        for _, p in ipairs(patterns) do
+            if nl:find(p) then return tag end
+        end
+    end
+    return "General"
+end
+
+-- ============================================================
+-- NEW: STATE SIGNATURE φ(S)
+-- Compact, canonical, hash-stable state token for ETM lookups.
+-- ============================================================
+local StateSignature = {}
+local function _discretize(v, step) return math.floor((v or 0) / step) * step end
+
+function StateSignature.Compute(ws)
+    if not ws then return "null_sig" end
+    local lp = ws.Agents and ws.Agents.LocalPlayer
+    local totalFires, economySeen = 0, 0
+    for _, r in ipairs(ws.Latent and ws.Latent.RemoteEvents or {}) do
+        totalFires = totalFires + (r.FireCount or 0)
+        if ClassifyRemote(r.Name) == "Economy" then economySeen = 1 end
+    end
+    local matchActive = 0
+    for _ in pairs(ws.Latent and ws.Latent.MatchState or {}) do matchActive = 1; break end
+    return string.format("h%d_p%d_c%d_f%d_e%d_m%d_i%d",
+        _discretize(lp and lp.Health or 0, 20),
+        _discretize(#(ws.Physics and ws.Physics.SimulatedAssemblies or {}), 5),
+        #(ws.Physics and ws.Physics.ClientOwned or {}),
+        _discretize(totalFires, 10),
+        economySeen, matchActive,
+        _discretize(ws.ObjectGraph and ws.ObjectGraph.TotalInstances or 0, 100))
+end
+function StateSignature.Diff(sigA, sigB)
+    if sigA == sigB then return 0.0 end
+    local partsA, partsB = {}, {}
+    for p in sigA:gmatch("[^_]+") do table.insert(partsA, p) end
+    for p in sigB:gmatch("[^_]+") do table.insert(partsB, p) end
+    local diff = 0
+    for i = 1, math.min(#partsA, #partsB) do
+        if partsA[i] ~= partsB[i] then diff = diff + 1 end
+    end
+    return diff / math.max(#partsA, #partsB, 1)
+end
+
+-- ============================================================
+-- NEW: LIVING WORLD MODEL (LWM)
+-- Ring buffer of world-state snapshots. Temporal deltas,
+-- rolling averages, and remote registry for co-firing analysis.
+-- ============================================================
+local LWM_Buffer         = {}
+local LWM_RemoteRegistry = {}
+local LWM_CFG            = { MaxSnapshots = 12 }
+local LWM = {}
+
+function LWM.Record(ws, sig)
+    if not ws then return end
+    local lp = ws.Agents and ws.Agents.LocalPlayer
+    local totalFires = 0
+    for _, r in ipairs(ws.Latent and ws.Latent.RemoteEvents or {}) do
+        totalFires = totalFires + (r.FireCount or 0)
+        if not LWM_RemoteRegistry[r.Name] then
+            LWM_RemoteRegistry[r.Name] = { totalFires = 0, lastSeen = 0 }
+        end
+        LWM_RemoteRegistry[r.Name].totalFires = r.FireCount
+        LWM_RemoteRegistry[r.Name].lastSeen   = os.clock()
+    end
+    table.insert(LWM_Buffer, {
+        sig = sig, timestamp = os.clock(),
+        metrics = {
+            health        = lp and lp.Health or 0,
+            physCount     = #(ws.Physics and ws.Physics.SimulatedAssemblies or {}),
+            clientOwned   = #(ws.Physics and ws.Physics.ClientOwned or {}),
+            remoteFires   = totalFires,
+            scriptCount   = ws.ObjectGraph and ws.ObjectGraph.ScriptCount or 0,
+            instanceCount = ws.ObjectGraph and ws.ObjectGraph.TotalInstances or 0,
+            remoteCount   = #(ws.Latent and ws.Latent.RemoteEvents or {}),
+        }
+    })
+    if #LWM_Buffer > LWM_CFG.MaxSnapshots then table.remove(LWM_Buffer, 1) end
+end
+function LWM.GetDelta()
+    if #LWM_Buffer < 2 then return nil end
+    local prev    = LWM_Buffer[#LWM_Buffer - 1].metrics
+    local curr    = LWM_Buffer[#LWM_Buffer].metrics
+    local elapsed = LWM_Buffer[#LWM_Buffer].timestamp - LWM_Buffer[#LWM_Buffer - 1].timestamp
+    return {
+        healthDelta   = curr.health        - prev.health,
+        physDelta     = curr.physCount     - prev.physCount,
+        ownedDelta    = curr.clientOwned   - prev.clientOwned,
+        firesDelta    = curr.remoteFires   - prev.remoteFires,
+        instanceDelta = curr.instanceCount - prev.instanceCount,
+        elapsed       = math.max(elapsed, 0.001),
+    }
+end
+function LWM.GetTemporalAverage(key, window)
+    window = window or 5
+    if #LWM_Buffer == 0 then return 0 end
+    local sum, count = 0, 0
+    for i = math.max(1, #LWM_Buffer - window + 1), #LWM_Buffer do
+        local v = LWM_Buffer[i].metrics[key]
+        if type(v) == "number" then sum = sum + v; count = count + 1 end
+    end
+    return count > 0 and (sum / count) or 0
+end
+function LWM.GetRecentSig()
+    if #LWM_Buffer == 0 then return "null_sig" end
+    return LWM_Buffer[#LWM_Buffer].sig
+end
+function LWM.GetSnapshotCount()      return #LWM_Buffer          end
+function LWM.GetBuffer()             return LWM_Buffer            end
+function LWM.GetRemoteRegistry()     return LWM_RemoteRegistry    end
+
+-- ============================================================
+-- NEW: EMPIRICAL TRANSITION MODEL (ETM)
+-- P(success | cardID, stateSignature). State-conditional Beta
+-- posteriors with Welford variance. Convergence criterion:
+-- stddev < 0.08 AND n >= 10.
+-- ============================================================
+local ETM_Table = {}
+local ETM_CFG   = { MinCount=10, ConvergenceStdDev=0.08, DecayRate=0.92 }
+local ETM = {}
+
+function ETM.GetOrInit(cardID, stateSig)
+    if not ETM_Table[cardID] then ETM_Table[cardID] = {} end
+    if not ETM_Table[cardID][stateSig] then
+        ETM_Table[cardID][stateSig] = {
+            alpha=1.0, beta=1.0, n=0, mean=0.5, M2=0.0,
+            stddev=0.5, converged=false, lastUpdated=os.clock(),
+        }
+    end
+    return ETM_Table[cardID][stateSig]
+end
+function ETM.Update(cardID, stateSig, success)
+    local e = ETM.GetOrInit(cardID, stateSig)
+    e.alpha = e.alpha * ETM_CFG.DecayRate
+    e.beta  = e.beta  * ETM_CFG.DecayRate
+    if success then e.alpha = e.alpha + 1.0 else e.beta = e.beta + 1.0 end
+    e.n = e.n + 1
+    local v  = success and 1.0 or 0.0
+    local d1 = v - e.mean; e.mean = e.mean + d1 / e.n
+    local d2 = v - e.mean; e.M2   = e.M2 + d1 * d2
+    if e.n >= 2 then e.stddev = math.sqrt(e.M2 / (e.n - 1)) end
+    e.converged   = (e.stddev < ETM_CFG.ConvergenceStdDev and e.n >= ETM_CFG.MinCount)
+    e.lastUpdated = os.clock()
+end
+function ETM.Predict(cardID, stateSig)
+    if not ETM_Table[cardID] then return 0.5, false, 0.5 end
+    local e = ETM_Table[cardID][stateSig]
+    if not e then
+        local totalA, totalB, count = 0.0, 0.0, 0
+        for _, se in pairs(ETM_Table[cardID]) do
+            totalA = totalA + se.alpha; totalB = totalB + se.beta; count = count + 1
+        end
+        if count > 0 then return totalA / (totalA + totalB), false, 0.35 end
+        return 0.5, false, 0.5
+    end
+    return e.alpha / (e.alpha + e.beta), e.converged, e.stddev
+end
+function ETM.GetConvergenceMap()
+    local map = {}
+    local gTotal, gConverged = 0, 0
+    for cardID, sigs in pairs(ETM_Table) do
+        local tot, conv = 0, 0
+        for _, e in pairs(sigs) do tot = tot + 1; if e.converged then conv = conv + 1 end end
+        map[cardID]  = { total=tot, converged=conv, rate=tot>0 and (conv/tot) or 0 }
+        gTotal = gTotal + tot; gConverged = gConverged + conv
+    end
+    map["_global"] = { total=gTotal, converged=gConverged, rate=gTotal>0 and (gConverged/gTotal) or 0 }
+    return map
+end
+function ETM.GetTableRef()   return ETM_Table   end
+function ETM.SetTableRef(t)  ETM_Table = t      end
+
+-- ============================================================
+-- NEW: CAUSAL DEPENDENCY GRAPH (CDG)
+-- Co-execution statistics for card pairs. Effect size = lift
+-- in B's success probability given A succeeded vs baseline.
+-- Used to causal-reorder chains before execution.
+-- ============================================================
+local CDG_Table = {}
+local CDG = {}
+
+function CDG.GetOrInitEdge(aID, bID)
+    if not CDG_Table[aID] then CDG_Table[aID] = {} end
+    if not CDG_Table[aID][bID] then
+        CDG_Table[aID][bID] = {
+            coFired=0, coSuccess=0, coFail=0, aFailBSuc=0,
+            coTotal=0, effectSize=0.0, confidence=0.0, lastUpdated=0,
+        }
+    end
+    return CDG_Table[aID][bID]
+end
+function CDG.UpdateFromLog(log)
+    if not log or #log < 2 then return end
+    for i = 1, #log - 1 do
+        local aStep = log[i]
+        for j = i + 1, math.min(i + 4, #log) do
+            local bStep = log[j]
+            local e = CDG.GetOrInitEdge(aStep.Step.ID, bStep.Step.ID)
+            e.coFired = e.coFired + 1; e.coTotal = e.coTotal + 1
+            if     aStep.Success and     bStep.Success then e.coSuccess = e.coSuccess + 1 end
+            if     aStep.Success and not bStep.Success then e.coFail    = e.coFail    + 1 end
+            if not aStep.Success and     bStep.Success then e.aFailBSuc = e.aFailBSuc + 1 end
+            local pBgivenASucc = e.coFired > 0 and (e.coSuccess / e.coFired) or 0.5
+            local baseline     = (e.coSuccess + e.aFailBSuc) / math.max(e.coTotal, 1)
+            e.effectSize  = pBgivenASucc - baseline
+            e.confidence  = math.min(e.coFired / 12.0, 1.0)
+            e.lastUpdated = os.clock()
+        end
+    end
+end
+function CDG.GetStrongEdges(minConf)
+    minConf = minConf or 0.25
+    local edges = {}
+    for aID, targets in pairs(CDG_Table) do
+        for bID, e in pairs(targets) do
+            if e.confidence >= minConf then
+                table.insert(edges, {
+                    FromID=aID, ToID=bID, EffectSize=e.effectSize,
+                    Confidence=e.confidence, CoSuccess=e.coSuccess,
+                    CoFail=e.coFail, CoFired=e.coFired,
+                })
+            end
+        end
+    end
+    table.sort(edges, function(a, b) return math.abs(a.EffectSize) > math.abs(b.EffectSize) end)
+    return edges
+end
+function CDG.GetCausalScore(cardID)
+    if not CDG_Table[cardID] then return 0.0 end
+    local score = 0.0
+    for _, e in pairs(CDG_Table[cardID]) do score = score + e.effectSize * e.confidence end
+    return score
+end
+function CDG.ReorderChain(chain)
+    local scored = {}
+    for i, card in ipairs(chain) do
+        table.insert(scored, { card=card, idx=i, causal=CDG.GetCausalScore(card.ID) })
+    end
+    table.sort(scored, function(a, b)
+        if math.abs(a.causal - b.causal) < 0.05 then return a.idx < b.idx end
+        return a.causal > b.causal
+    end)
+    local out = {}
+    for _, entry in ipairs(scored) do table.insert(out, entry.card) end
+    return out
+end
+function CDG.GetTableRef()   return CDG_Table   end
+function CDG.SetTableRef(t)  CDG_Table = t      end
+
+-- ============================================================
+-- WORLD STATE (chunked BFS scan)
+-- ============================================================
 local WorldState = {}
-local WS_CHUNK = 500  -- instances processed before yielding (larger = fewer interruptions)
+local WS_CHUNK   = 500
 
 local function CaptureWorldState()
-    local T = os.clock()
+    local T  = os.clock()
     local lp = Players.LocalPlayer
     local char = lp and lp.Character
     local state = {
         T = T,
         SimConfig = {
-            ServerTime       = os.clock(),
+            ServerTime       = Workspace:GetServerTimeNow(),
             FrameStep        = T,
             Gravity          = Workspace.Gravity,
             StreamingEnabled = Workspace.StreamingEnabled,
@@ -285,48 +528,33 @@ local function CaptureWorldState()
         Latent      = { RemoteEvents={}, RemoteFunctions={}, BindableEvents={}, ObservedFires={}, ValueObjects={}, MatchState={}, SpawnerState={} },
         Network     = { ReplicatedInstances=0, StreamedIn={}, StreamedOut={}, OwnershipMap={}, PendingRemotes={}, ReplicationLag=0 },
     }
-
-    -- ── Layer 2: Object Graph (chunked) ──────────────────────
-    -- We only track already-connected remotes on re-scans to avoid
-    -- stacking duplicate OnClientEvent listeners.
     local knownRemotes = {}
     if RAE_State and RAE_State.WorldState then
         for _, entry in ipairs(RAE_State.WorldState.Latent.RemoteEvents or {}) do
             knownRemotes[entry.Name] = entry
         end
     end
-
-    local allDesc = game:GetDescendants()
-    local n = 0
+    local allDesc = game:GetDescendants(); local n = 0
     for _, obj in ipairs(allDesc) do
         state.ObjectGraph.TotalInstances = state.ObjectGraph.TotalInstances + 1
         local cls = obj.ClassName
-
-        if cls == "Script" or cls == "LocalScript" then
+        if cls=="Script" or cls=="LocalScript" then
             state.ObjectGraph.ScriptCount = state.ObjectGraph.ScriptCount + 1
             if obj.Enabled then state.ObjectGraph.EnabledScripts = state.ObjectGraph.EnabledScripts + 1
             else state.ObjectGraph.DisabledScripts = state.ObjectGraph.DisabledScripts + 1 end
-        elseif cls == "ModuleScript" then
+        elseif cls=="ModuleScript" then
             state.ObjectGraph.ScriptCount = state.ObjectGraph.ScriptCount + 1
             state.ObjectGraph.EnabledScripts = state.ObjectGraph.EnabledScripts + 1
-        elseif cls == "IntValue" or cls == "NumberValue" or cls == "BoolValue" or cls == "StringValue" then
+        elseif cls=="IntValue" or cls=="NumberValue" or cls=="BoolValue" or cls=="StringValue" then
             table.insert(state.Latent.ValueObjects, { Name=obj.Name, Path=obj:GetFullName(), Value=obj.Value, Class=cls })
         end
-
         local tags = obj:GetTags()
         if #tags > 0 then
             table.insert(state.ObjectGraph.TaggedInstances, { Instance=obj, Name=obj.Name, Path=obj:GetFullName(), Tags=tags })
         end
-
-        n = n + 1
-        if n >= WS_CHUNK then n = 0; task.wait() end
+        n = n + 1; if n >= WS_CHUNK then n = 0; task.wait() end
     end
-
-    -- ── Layer 3: Physics (chunked, Workspace only) ────────────
-    -- Cap unanchored parts at 200 to avoid runaway scans in large worlds.
-    local wsDesc = Workspace:GetDescendants()
-    n = 0
-    local physCap = 0
+    local wsDesc = Workspace:GetDescendants(); n = 0; local physCap = 0
     for _, obj in ipairs(wsDesc) do
         if obj:IsA("BasePart") then
             state.Physics.TotalMass = state.Physics.TotalMass + obj.AssemblyMass
@@ -351,14 +579,11 @@ local function CaptureWorldState()
                 end
             end
         end
-        n = n + 1
-        if n >= WS_CHUNK then n = 0; task.wait() end
+        n = n + 1; if n >= WS_CHUNK then n = 0; task.wait() end
     end
-
-    -- ── Layer 4: Agents (instant — small list) ────────────────
     if char then
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        local hum = char:FindFirstChildOfClass("Humanoid")
+        local hrp  = char:FindFirstChild("HumanoidRootPart")
+        local hum  = char:FindFirstChildOfClass("Humanoid")
         local tool = char:FindFirstChildOfClass("Tool")
         state.Agents.LocalPlayer = {
             Name=lp.Name, UserId=lp.UserId, Team=lp.Team and lp.Team.Name or "None",
@@ -382,10 +607,6 @@ local function CaptureWorldState()
             })
         end
     end
-
-    -- ── Layer 5: Latent (shallow BFS, chunked) ────────────────
-    -- Iterates only direct children of each parent up to depth 6.
-    -- Reuses existing remote listener entries rather than reconnecting.
     local queue = { {node=ReplicatedStorage, depth=0}, {node=Workspace, depth=0} }
     local qi = 1; n = 0
     while qi <= #queue do
@@ -397,17 +618,16 @@ local function CaptureWorldState()
                 for _, child in ipairs(children) do
                     local cls = child.ClassName
                     if cls == "RemoteEvent" then
-                        -- reuse existing listener entry if already tracking this remote
-                        local existing = knownRemotes[child.Name]
-                        if existing and existing.Instance == child then
-                            table.insert(state.Latent.RemoteEvents, existing)
+                        local ex2 = knownRemotes[child.Name]
+                        if ex2 and ex2.Instance == child then
+                            table.insert(state.Latent.RemoteEvents, ex2)
                         else
                             local entry = { Instance=child, Name=child.Name, Path=child:GetFullName(), FireCount=0, LastArgs=nil, LastFire=0 }
                             table.insert(state.Latent.RemoteEvents, entry)
                             child.OnClientEvent:Connect(function(...)
-                                entry.FireCount=entry.FireCount+1
-                                entry.LastArgs={...}
-                                entry.LastFire=os.clock()
+                                entry.FireCount = entry.FireCount + 1
+                                entry.LastArgs  = {...}
+                                entry.LastFire  = os.clock()
                                 table.insert(state.Latent.ObservedFires, { Remote=child.Name, Args={...}, Time=os.clock() })
                             end)
                         end
@@ -424,21 +644,19 @@ local function CaptureWorldState()
                         state.Latent.SpawnerState[child.Name] = { Instance=child, Class=cls, Path=child:GetFullName() }
                     end
                     table.insert(queue, { node=child, depth=depth+1 })
-                    n = n + 1
-                    if n >= WS_CHUNK then n = 0; task.wait() end
+                    n = n + 1; if n >= WS_CHUNK then n = 0; task.wait() end
                 end
             end
         end
     end
-
-    -- ── Layer 6: Network (lightweight — no full iteration) ──
     state.Network.ReplicatedInstances = state.ObjectGraph.TotalInstances
-
     return state
 end
 WorldState.Capture = CaptureWorldState
 
--- ── CARD GENESIS ─────────────────────────────────────────────
+-- ============================================================
+-- CARD GENESIS
+-- ============================================================
 local CardGenesis = {}
 local function NewCard(channel, name, description, preconditions, action, expectedOutcome, cost, metadata)
     return {
@@ -448,141 +666,25 @@ local function NewCard(channel, name, description, preconditions, action, expect
         Metadata=metadata or {}, TelemetryLog={}, Born=os.clock(),
     }
 end
-
 local function PreCondAlwaysTrue() return true, "No preconditions." end
 local function PreCondInstanceExists(instance)
     return function() local ok=pcall(function() return instance.Parent~=nil end); return ok, ok and "Instance exists." or "Instance missing." end
 end
 
--- ── Semantic keyword classifier for remote naming ─────────────
--- Priority order matters: more specific categories checked first
--- so "ban" hits Identity before Ambiguous, "buy" hits Purchase before Economy, etc.
-local TRUST_VECTORS = {
-    Identity = {
-        "kick","ban","admin","rank","user","target","role","debug","execute","run","mod",
-        "sudo","su","root","op","owner","creator","staff","supervisor","guard","police",
-        "chief","boss","commander","overseer","auth","authenticate","login","signin","verify",
-        "verification","whitelist","blacklist","permission","perms","privilege","privs","access",
-        "clearance","is_dev","is_tester","qa","beta_tester",
-    },
-    AntiCheat = {
-        "anti","detect","security","crash","log","watchdog","warden","shield","protect","defense",
-        "safeguard","firewall","scan","monitor","tracker","flag","alert","warn","violation","cheat",
-        "hack","exploit","inject","injector","hook","spy","telemetry","analytics","metrics","heartbeat",
-        "ping","latency","chk","check_integrity","verify_client","tamper","memcheck",
-    },
-    SaveLoad = {
-        "save","load","syncdata","data","datastore","ds","db","database","sql","cache","memory",
-        "profile","playerdata","pdata","usrdata","session","flush","dump","commit","fetch","push","override",
-    },
-    Purchase = {
-        "buy","purchase","shop","checkout","basket","sell","vend","vendor","market","merchant","trader",
-    },
-    Economy = {
-        "addcoin","addcash","money","currency","cost","gems","coins","points","credits",
-        "balance","gold","bux","robux","tix","creds","tokens","tickets","vbucks","ebucks",
-        "diamonds","jewels","emerald","sapphire","ruby","pearl","silver","copper","bronze",
-        "iron","plat","platinum","cash","bucks","bills","moula","wallet","bal","purse","funds",
-        "wealth","capital","salary","paycheck","wages","income","ec","pc","gc",
-    },
-    Bank = {
-        "bank","vault","deposit","withdraw","storage","stash","inv","bag","backpack","sack","pouch","holding",
-    },
-    Loot = {
-        "crate","box","case","spin","unbox","open","roll","rng","drop","seed","random","luck","chance",
-        "gacha","pull","chest","safe","coffer","treasure","prize","gift","bonus","wheel","jackpot",
-        "lottery","raffle","ticket_spin",
-    },
-    Trade = {
-        "trade","offer","accept","swap","exchange","trx","transaction","deal","barter","haggle",
-        "decline","confirm","req",
-    },
-    Crafting = {
-        "craft","recipe","forge","combine","brew","upgrade","anvil","smelt","cook","mix","blend",
-        "assemble","dismantle","scrap","salvage","recycle","breakdown",
-    },
-    Quest = {
-        "quest","mission","objective","task","progress","q","obj","goal","bounty","contract","errand",
-        "chore","job","duty","milestone","achievement","badge","trophy","title","step","turnin",
-    },
-    Combat = {
-        "hit","damage","attack","shoot","projectile","bullet","impact","strike","melee","dmg","atk",
-        "def","armor","hp","mana","mp","stamina","energy","sp","xp","exp","lvl","level","hitbox",
-        "hurtbox","raycast","trace","proj","missile","arrow","swing","slash","stab","punch","kick",
-        "kill","slay","fatality","death","die","respawn","revive","crit","critical","bleed","poison","burn","freeze",
-    },
-    Movement = {
-        "teleport","tp","move","position","cframe","warp","dash","blink","dodge","jump","fly","glide",
-        "hover","pos","coord","loc","location","dest","destination",
-    },
-    Physics = {
-        "velocity","force","impulse","constraint","mass","size","scale","physics","vector","vel","accel",
-        "push","weight","grav",
-    },
-    Vehicles = {
-        "seat","vehicle","car","drive","occupant","mount","ride","boat","plane",
-    },
-    Regions = {
-        "zone","region","area","enter","leave","boundary","door","room","stage","map","world","realm",
-        "bounds","portal","gate","transition",
-    },
-    State = {
-        "isadmin","isvip","isdead","stunned","ragdoll","god","invincible",
-    },
-    Time = {
-        "daily","claim","reward","cooldown","timer","stamp","elapsed",
-    },
-    DataValidation = {
-        "submit","update","equip","unequip","chat","msg",
-    },
-    Ambiguous = {
-        "doaction","main","network","remote","sync","handler","event",
-    },
-}
-
--- Priority list: checked in order so specific categories win over broad ones
-local TRUST_PRIORITY = {
-    "Identity","AntiCheat","SaveLoad","Purchase","Economy","Bank","Loot","Trade",
-    "Crafting","Quest","Combat","Movement","Physics","Vehicles","Regions",
-    "State","Time","DataValidation","Ambiguous",
-}
-
-local function ClassifyRemote(name)
-    local nl = name:lower()
-    for _, category in ipairs(TRUST_PRIORITY) do
-        for _, pattern in ipairs(TRUST_VECTORS[category]) do
-            if nl:find(pattern, 1, true) then  -- plain find (no Lua patterns), faster and safer
-                return category
-            end
-        end
-    end
-    return "General"
-end
-
--- ── CARD GENESIS — STRUCTURAL ─────────────────────────────────
 local function GenStructural(ws, cards)
     local og = ws.ObjectGraph
     if not og or og.TotalInstances == 0 then return end
-
-    -- Architecture profile: reads and caches — no side effects
     table.insert(cards, NewCard("Structural", "Architecture Profile",
         string.format("%d instances | %d scripts (%d enabled, %d disabled)",
             og.TotalInstances, og.ScriptCount, og.EnabledScripts, og.DisabledScripts),
         {PreCondAlwaysTrue},
         function(outputs)
             outputs = outputs or {}
-            outputs["Structural"] = {
-                TotalInstances = og.TotalInstances,
-                ScriptCount    = og.ScriptCount,
-                EnabledScripts = og.EnabledScripts,
-            }
+            outputs["Structural"] = { TotalInstances=og.TotalInstances, ScriptCount=og.ScriptCount, EnabledScripts=og.EnabledScripts }
             return outputs["Structural"]
         end,
         "Caches architectural context for downstream cards.",
-        {CPU="low", Network="none", Disruption="none"},
-        {Risk="None", Confidence=100}))
-
-    -- Tagged instance map: builds a lookup by tag name for other cards to use
+        {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=100}))
     if #og.TaggedInstances > 0 then
         local tagMap = {}
         for _, entry in ipairs(og.TaggedInstances) do
@@ -595,49 +697,27 @@ local function GenStructural(ws, cards)
             string.format("%d tagged instances across %d tag types.",
                 #og.TaggedInstances, (function() local n=0; for _ in pairs(tagMap) do n=n+1 end; return n end)()),
             {PreCondAlwaysTrue},
-            function(outputs)
-                outputs = outputs or {}
-                outputs["TagMap"] = tagMap
-                return tagMap
-            end,
+            function(outputs) outputs = outputs or {}; outputs["TagMap"] = tagMap; return tagMap end,
             "Builds tag-keyed lookup table for spatial and semantic targeting.",
-            {CPU="low", Network="none", Disruption="none"},
-            {Risk="None", Confidence=95}))
+            {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=95}))
     end
 end
 
--- ── CARD GENESIS — METABOLIC ──────────────────────────────────
 local function GenMetabolic(ws, cards)
-    local sc = ws.SimConfig
-    if not sc then return end
-
-    -- Gravity probe: reads current gravity and checks if it can be changed client-side
+    local sc = ws.SimConfig; if not sc then return end
     table.insert(cards, NewCard("Metabolic", "Simulation Config Snapshot",
-        string.format("Gravity:%.1f | Streaming:%s | ServerTime:%.2f",
-            sc.Gravity, tostring(sc.StreamingEnabled), sc.ServerTime),
+        string.format("Gravity:%.1f | Streaming:%s | ServerTime:%.2f", sc.Gravity, tostring(sc.StreamingEnabled), sc.ServerTime),
         {PreCondAlwaysTrue},
         function(outputs)
-            local currentGravity = Workspace.Gravity
-            local currentTime    = os.clock()
             outputs = outputs or {}
-            outputs["Metabolic"] = {
-                Gravity     = currentGravity,
-                ServerTime  = currentTime,
-                Streaming   = sc.StreamingEnabled,
-            }
+            outputs["Metabolic"] = { Gravity=Workspace.Gravity, ServerTime=Workspace:GetServerTimeNow(), Streaming=sc.StreamingEnabled }
             return outputs["Metabolic"]
         end,
-        "Captures live physics config as context for physics and network cards.",
-        {CPU="none", Network="none", Disruption="none"},
-        {Risk="None", Confidence=100}))
+        "Captures live physics config.", {CPU="none", Network="none", Disruption="none"}, {Risk="None", Confidence=100}))
 end
 
--- ── CARD GENESIS — PHYSICS ────────────────────────────────────
 local function GenPhysics(ws, cards)
-    local phys = ws.Physics
-    if not phys then return end
-
-    -- Client-owned parts: actually apply velocity influence
+    local phys = ws.Physics; if not phys then return end
     for _, entry in ipairs(phys.ClientOwned or {}) do
         local inst = entry.Instance
         table.insert(cards, NewCard("Ownership", "Velocity Influence: " .. entry.Name,
@@ -647,148 +727,77 @@ local function GenPhysics(ws, cards)
             {PreCondInstanceExists(inst)},
             function(outputs)
                 local ok, result = pcall(function()
-                    -- Read current state
-                    local vel  = inst.AssemblyLinearVelocity
-                    local cf   = inst.CFrame
-                    local mass = inst.AssemblyMass
-
-                    -- Apply influence: dampen extreme velocities, boost low ones
-                    local speed = vel.Magnitude
-                    local newVel
-                    if speed > 100 then
-                        -- Dampen runaway velocity
-                        newVel = vel.Unit * 80
-                        inst.AssemblyLinearVelocity = newVel
-                    elseif speed < 1 then
-                        -- Give stationary parts a small directional nudge aligned to local up
-                        newVel = Vector3.new(0, 5, 0)
-                        inst.AssemblyLinearVelocity = newVel
-                    else
-                        newVel = vel  -- already in healthy range, just snapshot
-                    end
-
-                    return {
-                        Part       = inst.Name,
-                        Mass       = mass,
-                        VelBefore  = speed,
-                        VelAfter   = newVel.Magnitude,
-                        CFrame     = cf,
-                        Applied    = speed > 100 or speed < 1,
-                    }
+                    local vel = inst.AssemblyLinearVelocity; local speed = vel.Magnitude; local newVel
+                    if speed > 100 then newVel = vel.Unit * 80; inst.AssemblyLinearVelocity = newVel
+                    elseif speed < 1 then newVel = Vector3.new(0,5,0); inst.AssemblyLinearVelocity = newVel
+                    else newVel = vel end
+                    return { Part=inst.Name, Mass=inst.AssemblyMass, VelBefore=speed, VelAfter=newVel.Magnitude, CFrame=inst.CFrame, Applied=speed>100 or speed<1 }
                 end)
-                if ok then return result
-                else return {Error = tostring(result), Part = inst.Name} end
+                return ok and result or {Error=tostring(result), Part=inst.Name}
             end,
-            "Applies velocity normalization to client-owned part. Dampens runaway, nudges stationary.",
-            {CPU="medium", Network="low", Disruption="medium"},
-            {Risk="Medium", Confidence=80, Instance=inst, Path=entry.Path}))
+            "Applies velocity normalization to client-owned part.",
+            {CPU="medium", Network="low", Disruption="medium"}, {Risk="Medium", Confidence=80, Instance=inst, Path=entry.Path}))
     end
-
-    -- Server-owned boundary: builds a spatial index for targeting
     if #phys.ServerOwned > 3 then
         table.insert(cards, NewCard("Ownership", "Server Physics Index",
-            string.format("%d server-simulated parts. Spatial index available.", #phys.ServerOwned),
+            string.format("%d server-simulated parts.", #phys.ServerOwned),
             {PreCondAlwaysTrue},
             function(outputs)
-                -- Build a spatial bucket index (16-stud cells)
                 local buckets = {}
                 for _, entry in ipairs(phys.ServerOwned) do
                     local pos = entry.CFrame.Position
-                    local key = string.format("%d,%d,%d",
-                        math.floor(pos.X/16), math.floor(pos.Y/16), math.floor(pos.Z/16))
+                    local key = string.format("%d,%d,%d", math.floor(pos.X/16), math.floor(pos.Y/16), math.floor(pos.Z/16))
                     if not buckets[key] then buckets[key] = {} end
                     table.insert(buckets[key], entry.Name)
                 end
-                outputs = outputs or {}
-                outputs["PhysicsIndex"] = buckets
-                return {BucketCount = (function() local n=0; for _ in pairs(buckets) do n=n+1 end; return n end)(), Buckets = buckets}
+                outputs = outputs or {}; outputs["PhysicsIndex"] = buckets
+                return {BucketCount=(function() local n=0; for _ in pairs(buckets) do n=n+1 end; return n end)(), Buckets=buckets}
             end,
-            "Builds spatial bucket index of server parts for proximity reasoning.",
-            {CPU="low", Network="none", Disruption="none"},
-            {Risk="None", Confidence=80}))
+            "Builds spatial bucket index of server parts.",
+            {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=80}))
     end
 end
 
--- ── CARD GENESIS — LATENT (REMOTES + STATE) ───────────────────
 local function GenLatent(ws, cards)
-    local lat = ws.Latent
-    if not lat then return end
-
-    -- RemoteEvents: generate one card per remote with full action logic
+    local lat = ws.Latent; if not lat then return end
     for _, remote in ipairs(lat.RemoteEvents or {}) do
-        local inst     = remote.Instance
-        local observed = remote.FireCount > 0
+        local inst = remote.Instance; local observed = remote.FireCount > 0
         local semantic = ClassifyRemote(remote.Name)
-        local conf     = observed and math.min(50 + remote.FireCount * 10, 90) or 35
-
+        local conf = observed and math.min(50 + remote.FireCount * 10, 90) or 35
         table.insert(cards, NewCard("Replication",
             string.format("[%s] %s", semantic, remote.Name),
-            observed
-                and string.format("Observed %d fires. Last args: %s. Replay ready.",
-                    remote.FireCount,
-                    remote.LastArgs and HttpService:JSONEncode(
-                        (function()
-                            local safe = {}
-                            for i, v in ipairs(remote.LastArgs) do
-                                safe[i] = type(v) == "table" and "[table]"
-                                       or type(v) == "userdata" and "[instance]"
-                                       or tostring(v)
-                            end
-                            return safe
-                        end)()) or "nil")
-                or "Not yet observed. Probe-fire will attempt silent activation.",
+            observed and string.format("Observed %d fires. Replay ready.", remote.FireCount)
+                      or "Not yet observed. Probe-fire will attempt silent activation.",
             {PreCondInstanceExists(inst)},
             function(outputs)
                 local ok, result = pcall(function()
                     if observed and remote.LastArgs and #remote.LastArgs > 0 then
-                        -- Replay with captured argument types, substituting safe values
-                        -- where instance refs may have become stale
                         local safeArgs = {}
                         for i, arg in ipairs(remote.LastArgs) do
                             local t = type(arg)
-                            if t == "number" or t == "string" or t == "boolean" then
-                                table.insert(safeArgs, arg)
-                            elseif t == "userdata" then
-                                -- Try to re-resolve by name within ReplicatedStorage/Workspace
+                            if t=="number" or t=="string" or t=="boolean" then table.insert(safeArgs, arg)
+                            elseif t=="userdata" then
                                 local ok2, resolved = pcall(function()
-                                    return ReplicatedStorage:FindFirstChild(arg.Name, true)
-                                        or Workspace:FindFirstChild(arg.Name, true)
+                                    return ReplicatedStorage:FindFirstChild(arg.Name, true) or Workspace:FindFirstChild(arg.Name, true)
                                 end)
                                 table.insert(safeArgs, ok2 and resolved or arg)
-                            else
-                                table.insert(safeArgs, arg)
-                            end
+                            else table.insert(safeArgs, arg) end
                         end
                         inst:FireServer(unpack(safeArgs))
-                        return {
-                            Action   = "Replay",
-                            Remote   = remote.Name,
-                            ArgCount = #safeArgs,
-                            Semantic = semantic,
-                        }
+                        return { Action="Replay", Remote=remote.Name, ArgCount=#safeArgs, Semantic=semantic }
                     else
-                        -- Probe fire: no args, maps server response
                         inst:FireServer()
-                        return {
-                            Action   = "Probe",
-                            Remote   = remote.Name,
-                            ArgCount = 0,
-                            Semantic = semantic,
-                        }
+                        return { Action="Probe", Remote=remote.Name, ArgCount=0, Semantic=semantic }
                     end
                 end)
-                return ok and result or {Error = tostring(result), Remote = remote.Name}
+                return ok and result or {Error=tostring(result), Remote=remote.Name}
             end,
             observed and "Replay captured args at server." or "Probe-fire to map server behavior.",
-            {CPU="low", Network= observed and "medium" or "low", Disruption= observed and "medium" or "low"},
-            {Risk= observed and "Medium" or "Low", Confidence=conf,
-             Semantic=semantic, Observed=observed, FireCount=remote.FireCount}))
+            {CPU="low", Network=observed and "medium" or "low", Disruption=observed and "medium" or "low"},
+            {Risk=observed and "Medium" or "Low", Confidence=conf, Semantic=semantic, Observed=observed, FireCount=remote.FireCount}))
     end
-
-    -- RemoteFunctions: invoke and capture return value
     for _, rfunc in ipairs(lat.RemoteFunctions or {}) do
-        local inst     = rfunc.Instance
-        local semantic = ClassifyRemote(rfunc.Name)
+        local inst = rfunc.Instance; local semantic = ClassifyRemote(rfunc.Name)
         table.insert(cards, NewCard("Replication",
             string.format("[Fn:%s] %s", semantic, rfunc.Name),
             "RemoteFunction — InvokeServer will capture return value.",
@@ -796,30 +805,15 @@ local function GenLatent(ws, cards)
             function(outputs)
                 local ok, result = pcall(function()
                     local ret = inst:InvokeServer()
-                    local retStr
-                    if type(ret) == "table" then
-                        local s, j = pcall(function() return HttpService:JSONEncode(ret) end)
-                        retStr = s and j or "[table]"
-                    else
-                        retStr = tostring(ret)
-                    end
-                    outputs = outputs or {}
-                    outputs["RF_"..rfunc.Name] = ret
-                    return {
-                        Action   = "Invoke",
-                        Remote   = rfunc.Name,
-                        Return   = retStr,
-                        Semantic = semantic,
-                    }
+                    local retStr = type(ret)=="table" and (function() local s,j=pcall(function() return HttpService:JSONEncode(ret) end); return s and j or "[table]" end)() or tostring(ret)
+                    outputs = outputs or {}; outputs["RF_"..rfunc.Name] = ret
+                    return { Action="Invoke", Remote=rfunc.Name, Return=retStr, Semantic=semantic }
                 end)
-                return ok and result or {Error = tostring(result), Remote = rfunc.Name}
+                return ok and result or {Error=tostring(result), Remote=rfunc.Name}
             end,
-            "Invokes RemoteFunction and captures server return value.",
-            {CPU="low", Network="medium", Disruption="low"},
-            {Risk="Low", Confidence=45, Semantic=semantic}))
+            "Invokes RemoteFunction and captures return value.",
+            {CPU="low", Network="medium", Disruption="low"}, {Risk="Low", Confidence=45, Semantic=semantic}))
     end
-
-    -- Value objects: read live values and detect changes from last scan
     if #lat.ValueObjects > 0 then
         table.insert(cards, NewCard("Latent", "Live Value State",
             string.format("%d value objects — live read.", #lat.ValueObjects),
@@ -827,32 +821,18 @@ local function GenLatent(ws, cards)
             function(outputs)
                 local snapshot = {}
                 for _, vo in ipairs(lat.ValueObjects) do
-                    local ok, current = pcall(function()
-                        local inst = game:FindFirstChild(vo.Name, true)
-                        return inst and inst.Value or vo.Value
-                    end)
-                    snapshot[vo.Name] = {
-                        Path    = vo.Path,
-                        Class   = vo.Class,
-                        Cached  = vo.Value,
-                        Current = ok and current or vo.Value,
-                        Drifted = ok and (current ~= vo.Value),
-                    }
+                    local ok, current = pcall(function() local inst=game:FindFirstChild(vo.Name,true); return inst and inst.Value or vo.Value end)
+                    snapshot[vo.Name] = { Path=vo.Path, Class=vo.Class, Cached=vo.Value, Current=ok and current or vo.Value, Drifted=ok and (current~=vo.Value) }
                 end
-                outputs = outputs or {}
-                outputs["ValueState"] = snapshot
-                return snapshot
+                outputs = outputs or {}; outputs["ValueState"] = snapshot; return snapshot
             end,
-            "Reads all value objects live and flags any that drifted since scan.",
-            {CPU="low", Network="none", Disruption="none"},
-            {Risk="None", Confidence=90}))
+            "Reads all value objects live.",
+            {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=90}))
     end
-
-    -- Match state: read and interpret game phase variables
     local mc = 0; for _ in pairs(lat.MatchState) do mc = mc + 1 end
     if mc > 0 then
         table.insert(cards, NewCard("Latent", "Match Phase Read",
-            string.format("%d match/game state variables — live interpretation.", mc),
+            string.format("%d match/game state variables.", mc),
             {PreCondAlwaysTrue},
             function(outputs)
                 local phases = {}
@@ -864,270 +844,134 @@ local function GenLatent(ws, cards)
                         elseif inst:IsA("StringValue") then return inst.Value
                         else return tostring(inst) end
                     end)
-                    phases[name] = {
-                        Value  = ok and val or "unreadable",
-                        Class  = entry.Class,
-                        Active = ok and val ~= 0 and val ~= false and val ~= "" and val ~= nil,
-                    }
+                    phases[name] = { Value=ok and val or "unreadable", Class=entry.Class, Active=ok and val~=0 and val~=false and val~="" and val~=nil }
                 end
-                outputs = outputs or {}
-                outputs["MatchPhase"] = phases
-                return phases
+                outputs = outputs or {}; outputs["MatchPhase"] = phases; return phases
             end,
-            "Reads all match/game-phase variables live. Flags active phases.",
-            {CPU="low", Network="none", Disruption="none"},
-            {Risk="None", Confidence=85}))
+            "Reads all match/game-phase variables live.",
+            {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=85}))
     end
-
-    -- Economy surface: catches Economy, Purchase, Bank, and Loot remotes
     local economyRemotes = {}
-    local ECONOMY_CATEGORIES = { Economy=true, Purchase=true, Bank=true, Loot=true }
     for _, remote in ipairs(lat.RemoteEvents or {}) do
-        if ECONOMY_CATEGORIES[ClassifyRemote(remote.Name)] then
-            table.insert(economyRemotes, remote)
-        end
+        if ClassifyRemote(remote.Name) == "Economy" then table.insert(economyRemotes, remote) end
     end
     if #economyRemotes > 0 then
+        local names = {}; for _, r in ipairs(economyRemotes) do table.insert(names, r.Name) end
         table.insert(cards, NewCard("Latent", "Economy Surface Detected",
-            string.format("%d economy-tagged remotes found: %s",
-                #economyRemotes,
-                table.concat((function()
-                    local names = {}
-                    for _, r in ipairs(economyRemotes) do table.insert(names, r.Name) end
-                    return names
-                end)(), ", ")),
+            string.format("%d economy-tagged remotes: %s", #economyRemotes, table.concat(names, ", ")),
             {PreCondAlwaysTrue},
             function(outputs)
-                -- Fire each economy remote with its captured args or probe
                 local results = {}
                 for _, remote in ipairs(economyRemotes) do
                     local ok, r = pcall(function()
                         if remote.LastArgs and #remote.LastArgs > 0 then
-                            remote.Instance:FireServer(unpack(remote.LastArgs))
-                            return {Remote=remote.Name, Action="Replay", Args=#remote.LastArgs}
-                        else
-                            remote.Instance:FireServer()
-                            return {Remote=remote.Name, Action="Probe"}
-                        end
+                            remote.Instance:FireServer(unpack(remote.LastArgs)); return {Remote=remote.Name, Action="Replay", Args=#remote.LastArgs}
+                        else remote.Instance:FireServer(); return {Remote=remote.Name, Action="Probe"} end
                     end)
-                    table.insert(results, ok and r or {Remote=remote.Name, Error=tostring(r)})
-                    task.wait(0.05)
+                    table.insert(results, ok and r or {Remote=remote.Name, Error=tostring(r)}); task.wait(0.05)
                 end
-                outputs = outputs or {}
-                outputs["EconomyResult"] = results
-                return results
+                outputs = outputs or {}; outputs["EconomyResult"] = results; return results
             end,
-            "Fires all economy-tagged remotes with captured or probe args.",
-            {CPU="low", Network="high", Disruption="high"},
-            {Risk="High", Confidence=60, EconomyCount=#economyRemotes}))
+            "Fires all economy-tagged remotes.",
+            {CPU="low", Network="high", Disruption="high"}, {Risk="High", Confidence=60, EconomyCount=#economyRemotes}))
     end
 end
 
--- ── CARD GENESIS — AGENTS ─────────────────────────────────────
 local function GenAgents(ws, cards)
-    local agents = ws.Agents
-    if not agents or not agents.LocalPlayer then return end
+    local agents = ws.Agents; if not agents or not agents.LocalPlayer then return end
     local lp = agents.LocalPlayer
-
-    -- Local player state: reads AND pushes persistent settings
     table.insert(cards, NewCard("Agent", "Local Player Sync",
         string.format("%s | HP:%.0f/%.0f | Speed:%.1f | Jump:%.1f | Tool:%s",
-            lp.Name, lp.Health, lp.MaxHealth, lp.WalkSpeed, lp.JumpPower,
-            lp.EquippedTool or "none"),
+            lp.Name, lp.Health, lp.MaxHealth, lp.WalkSpeed, lp.JumpPower, lp.EquippedTool or "none"),
         {PreCondAlwaysTrue},
         function(outputs)
             local char = Players.LocalPlayer.Character
             local hum  = char and char:FindFirstChildOfClass("Humanoid")
             if not hum then return {Error="No humanoid found."} end
-
-            -- Re-apply persistent movement settings in case they were reset
             local applied = {}
-            if persistent.WalkSpeed and hum.WalkSpeed ~= persistent.WalkSpeed then
-                pcall(function() hum.WalkSpeed = persistent.WalkSpeed end)
-                table.insert(applied, "WalkSpeed→"..persistent.WalkSpeed)
-            end
-            if persistent.JumpPower and hum.JumpPower ~= persistent.JumpPower then
-                pcall(function() hum.JumpPower = persistent.JumpPower end)
-                table.insert(applied, "JumpPower→"..persistent.JumpPower)
-            end
-
-            -- Snapshot current state
+            if persistent.WalkSpeed and hum.WalkSpeed ~= persistent.WalkSpeed then pcall(function() hum.WalkSpeed=persistent.WalkSpeed end); table.insert(applied,"WalkSpeed→"..persistent.WalkSpeed) end
+            if persistent.JumpPower and hum.JumpPower ~= persistent.JumpPower then pcall(function() hum.JumpPower=persistent.JumpPower end); table.insert(applied,"JumpPower→"..persistent.JumpPower) end
             local hrp = char:FindFirstChild("HumanoidRootPart")
-            local snapshot = {
-                Name       = Players.LocalPlayer.Name,
-                Health     = hum.Health,
-                MaxHealth  = hum.MaxHealth,
-                WalkSpeed  = hum.WalkSpeed,
-                JumpPower  = hum.JumpPower,
-                HumState   = tostring(hum:GetState()),
-                Position   = hrp and hrp.Position or Vector3.new(),
-                Applied    = applied,
-            }
-            outputs = outputs or {}
-            outputs["AgentState"] = snapshot
-            return snapshot
+            local snapshot = { Name=Players.LocalPlayer.Name, Health=hum.Health, MaxHealth=hum.MaxHealth, WalkSpeed=hum.WalkSpeed, JumpPower=hum.JumpPower, HumState=tostring(hum:GetState()), Position=hrp and hrp.Position or Vector3.new(), Applied=applied }
+            outputs = outputs or {}; outputs["AgentState"] = snapshot; return snapshot
         end,
-        "Snapshots local player state and re-applies persistent movement settings if drifted.",
-        {CPU="none", Network="none", Disruption="none"},
-        {Risk="None", Confidence=100}))
-
-    -- Character physics: reads HRP position and velocity for spatial reasoning
+        "Snapshots local player state and re-applies persistent movement settings.",
+        {CPU="none", Network="none", Disruption="none"}, {Risk="None", Confidence=100}))
     if lp.Health > 0 then
-        table.insert(cards, NewCard("Agent", "Spatial Context",
-            "Local character position and velocity available for spatial reasoning.",
+        table.insert(cards, NewCard("Agent", "Spatial Context", "Local character position and velocity for spatial reasoning.",
             {PreCondAlwaysTrue},
             function(outputs)
-                local char = Players.LocalPlayer.Character
-                local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                local char = Players.LocalPlayer.Character; local hrp = char and char:FindFirstChild("HumanoidRootPart")
                 if not hrp then return {Error="HumanoidRootPart not found."} end
-
-                local pos = hrp.Position
-                local vel = hrp.AssemblyLinearVelocity
-
-                -- Build proximity map: distances to all other players
+                local pos = hrp.Position; local vel = hrp.AssemblyLinearVelocity
                 local proximity = {}
                 for _, p in ipairs(Players:GetPlayers()) do
                     if p ~= Players.LocalPlayer and p.Character then
-                        local otherHRP = p.Character:FindFirstChild("HumanoidRootPart")
-                        if otherHRP then
-                            table.insert(proximity, {
-                                Name = p.Name,
-                                Dist = (otherHRP.Position - pos).Magnitude,
-                            })
-                        end
+                        local oHRP = p.Character:FindFirstChild("HumanoidRootPart")
+                        if oHRP then table.insert(proximity, { Name=p.Name, Dist=(oHRP.Position-pos).Magnitude }) end
                     end
                 end
-                table.sort(proximity, function(a, b) return a.Dist < b.Dist end)
-
-                local result = {
-                    Position  = pos,
-                    Velocity  = vel,
-                    Speed     = vel.Magnitude,
-                    Proximity = proximity,
-                    Grounded  = (function()
-                        local hum = char:FindFirstChildOfClass("Humanoid")
-                        return hum and hum:GetState() == Enum.HumanoidStateType.Running
-                    end)(),
-                }
-                outputs = outputs or {}
-                outputs["SpatialContext"] = result
-                return result
+                table.sort(proximity, function(a,b) return a.Dist<b.Dist end)
+                local result = { Position=pos, Velocity=vel, Speed=vel.Magnitude, Proximity=proximity,
+                    Grounded=(function() local hum=char:FindFirstChildOfClass("Humanoid"); return hum and hum:GetState()==Enum.HumanoidStateType.Running end)() }
+                outputs = outputs or {}; outputs["SpatialContext"] = result; return result
             end,
-            "Builds spatial context: local position, velocity, and proximity to all players.",
-            {CPU="low", Network="none", Disruption="none"},
-            {Risk="None", Confidence=95}))
-
-        -- Tool activation: if player has a tool equipped, actually activate it
+            "Builds spatial context.", {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=95}))
         if lp.EquippedTool then
             table.insert(cards, NewCard("Agent", "Activate Tool: " .. lp.EquippedTool,
-                string.format("Tool '%s' equipped. Activation available.", lp.EquippedTool),
+                string.format("Tool '%s' equipped.", lp.EquippedTool),
                 {PreCondAlwaysTrue},
                 function(outputs)
-                    local char = Players.LocalPlayer.Character
-                    local tool = char and char:FindFirstChildOfClass("Tool")
+                    local char = Players.LocalPlayer.Character; local tool = char and char:FindFirstChildOfClass("Tool")
                     if not tool then return {Error="Tool no longer equipped."} end
-
-                    -- Fire the tool's Activated event client-side
-                    local activated = false
-                    local ok = pcall(function()
-                        tool:Activate()
-                        activated = true
-                    end)
-                    if not ok then
-                        -- Fallback: find and fire the Handle's touch directly
-                        local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
-                        if handle then
-                            -- just record it as available
-                            activated = false
-                        end
-                    end
-
-                    return {
-                        Tool      = tool.Name,
-                        Activated = activated,
-                        Handle    = tool:FindFirstChild("Handle") ~= nil,
-                    }
+                    local activated = false; local ok = pcall(function() tool:Activate(); activated=true end)
+                    if not ok then local handle=tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"); if handle then activated=false end end
+                    return { Tool=tool.Name, Activated=activated, Handle=tool:FindFirstChild("Handle")~=nil }
                 end,
                 "Activates currently equipped tool.",
-                {CPU="low", Network="medium", Disruption="medium"},
-                {Risk="Medium", Confidence=70, ToolName=lp.EquippedTool}))
+                {CPU="low", Network="medium", Disruption="medium"}, {Risk="Medium", Confidence=70, ToolName=lp.EquippedTool}))
         end
     end
-
-    -- Nearby players: proximity tracking with live distance
     for _, other in ipairs(agents.OtherPlayers or {}) do
         if lp.CFrame then
             local dist = (other.CFrame.Position - lp.CFrame.Position).Magnitude
             if dist < 60 then
                 table.insert(cards, NewCard("Agent", "Track: " .. other.Name,
-                    string.format("%s | HP:%.0f/%.0f | Dist:%.1fm",
-                        other.Name, other.Health, other.MaxHealth, dist),
+                    string.format("%s | HP:%.0f/%.0f | Dist:%.1fm", other.Name, other.Health, other.MaxHealth, dist),
                     {PreCondAlwaysTrue},
                     function(outputs)
-                        -- Get live position
-                        local targetPlayer = Players:FindFirstChild(other.Name)
-                        local targetChar   = targetPlayer and targetPlayer.Character
-                        local targetHRP    = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
-                        local targetHum    = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
-
-                        local myChar = Players.LocalPlayer.Character
-                        local myHRP  = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
-                        local liveDist = (targetHRP and myHRP)
-                            and (targetHRP.Position - myHRP.Position).Magnitude
-                            or dist
-
-                        local result = {
-                            Name      = other.Name,
-                            Health    = targetHum and targetHum.Health or other.Health,
-                            MaxHealth = targetHum and targetHum.MaxHealth or other.MaxHealth,
-                            Distance  = liveDist,
-                            Position  = targetHRP and targetHRP.Position or other.CFrame.Position,
-                            Alive     = (targetHum and targetHum.Health > 0) or other.Health > 0,
-                            Approach  = liveDist < 20 and "Close" or liveDist < 50 and "Mid" or "Far",
-                        }
+                        local tp=Players:FindFirstChild(other.Name); local tc=tp and tp.Character
+                        local tHRP=tc and tc:FindFirstChild("HumanoidRootPart"); local tHum=tc and tc:FindFirstChildOfClass("Humanoid")
+                        local myChar=Players.LocalPlayer.Character; local myHRP=myChar and myChar:FindFirstChild("HumanoidRootPart")
+                        local liveDist=(tHRP and myHRP) and (tHRP.Position-myHRP.Position).Magnitude or dist
+                        local result = { Name=other.Name, Health=tHum and tHum.Health or other.Health, MaxHealth=tHum and tHum.MaxHealth or other.MaxHealth,
+                            Distance=liveDist, Position=tHRP and tHRP.Position or other.CFrame.Position,
+                            Alive=(tHum and tHum.Health>0) or other.Health>0,
+                            Approach=liveDist<20 and "Close" or liveDist<50 and "Mid" or "Far" }
                         outputs = outputs or {}
-                        if not outputs["TrackedPlayers"] then outputs["TrackedPlayers"] = {} end
-                        outputs["TrackedPlayers"][other.Name] = result
-                        return result
+                        if not outputs["TrackedPlayers"] then outputs["TrackedPlayers"]={} end
+                        outputs["TrackedPlayers"][other.Name] = result; return result
                     end,
-                    "Tracks player live — updates position, health, and approach zone.",
-                    {CPU="low", Network="none", Disruption="none"},
-                    {Risk="None", Confidence=80, TargetName=other.Name}))
+                    "Tracks player live.", {CPU="low", Network="none", Disruption="none"}, {Risk="None", Confidence=80, TargetName=other.Name}))
             end
         end
     end
 end
 
--- ── CARD GENESIS — NETWORK ────────────────────────────────────
 local function GenNetwork(ws, cards)
-    -- Generate a network surface summary using what we already know from remotes
-    local lat = ws.Latent
-    if not lat then return end
-    local evCount  = #(lat.RemoteEvents or {})
-    local fnCount  = #(lat.RemoteFunctions or {})
-    local observed = 0
-    for _, r in ipairs(lat.RemoteEvents or {}) do if r.FireCount > 0 then observed = observed + 1 end end
-
+    local lat = ws.Latent; if not lat then return end
+    local evCount  = #(lat.RemoteEvents or {}); local fnCount = #(lat.RemoteFunctions or {})
+    local observed = 0; for _, r in ipairs(lat.RemoteEvents or {}) do if r.FireCount>0 then observed=observed+1 end end
     if evCount + fnCount > 0 then
         table.insert(cards, NewCard("Network", "Network Surface Map",
-            string.format("%d events (%d observed) | %d functions — surface mapped.",
-                evCount, observed, fnCount),
+            string.format("%d events (%d observed) | %d functions — surface mapped.", evCount, observed, fnCount),
             {PreCondAlwaysTrue},
             function(outputs)
-                local surface = {
-                    Events    = evCount,
-                    Functions = fnCount,
-                    Observed  = observed,
-                    Coverage  = math.floor(observed / math.max(evCount, 1) * 100),
-                }
-                outputs = outputs or {}
-                outputs["NetworkSurface"] = surface
-                return surface
+                local surface = { Events=evCount, Functions=fnCount, Observed=observed, Coverage=math.floor(observed/math.max(evCount,1)*100) }
+                outputs = outputs or {}; outputs["NetworkSurface"] = surface; return surface
             end,
-            "Summarizes known network surface. Coverage = observed/total events.",
-            {CPU="none", Network="none", Disruption="none"},
-            {Risk="None", Confidence=95}))
+            "Summarizes known network surface.",
+            {CPU="none", Network="none", Disruption="none"}, {Risk="None", Confidence=95}))
     end
 end
 
@@ -1140,12 +984,14 @@ function CardGenesis.Generate(ws)
     return cards
 end
 
--- ── MULTI-OBJECTIVE VALUE SYSTEM ─────────────────────────────
+-- ============================================================
+-- MULTI-OBJECTIVE VALUE SYSTEM
+-- ============================================================
 local ValueWeights = { Reliability=1.0, InformationGain=0.8, Cost=0.7, Reversibility=0.9, Optionality=0.7, Stability=0.8 }
 local ValueHistory = { WeightUpdates=0 }
-local COST_SCORES = { none=1.0, low=0.85, medium=0.65, high=0.40 }
+local COST_SCORES  = { none=1.0, low=0.85, medium=0.65, high=0.40 }
+local ValueSystem  = {}
 
-local ValueSystem = {}
 function ValueSystem.ScoreCard(card, allCards, intelHistory)
     local h = intelHistory and intelHistory[card.ID]
     local reliability = h and (h.alpha/(h.alpha+h.beta)) or (card.Metadata.Confidence or 50)/100
@@ -1157,7 +1003,7 @@ function ValueSystem.ScoreCard(card, allCards, intelHistory)
     local costScore=(cpu+net+dis)/3
     local risk=card.Metadata.Risk or "None"
     local reversibility = risk=="None" and 1.0 or risk=="Low" and 0.85 or risk=="Medium" and 0.60 or 0.30
-    local downstream=0; for _, o in ipairs(allCards) do if o.Channel~=card.Channel then downstream=downstream+1 end end
+    local downstream=0; for _,o in ipairs(allCards) do if o.Channel~=card.Channel then downstream=downstream+1 end end
     local optionality=math.clamp(downstream/math.max(#allCards,1),0,1)
     local stability = dis==1.0 and 1.0 or dis==0.85 and 0.80 or dis==0.65 and 0.55 or 0.25
     local totalWeight=0; for _,w in pairs(ValueWeights) do totalWeight=totalWeight+w end
@@ -1165,7 +1011,6 @@ function ValueSystem.ScoreCard(card, allCards, intelHistory)
         reversibility*ValueWeights.Reversibility + optionality*ValueWeights.Optionality + stability*ValueWeights.Stability)/totalWeight
     return { Total=score, Reliability=reliability, InfoGain=infoGain, Cost=costScore, Reversibility=reversibility, Optionality=optionality, Stability=stability }
 end
-
 function ValueSystem.ScoreChain(chain, allCards, intelHistory)
     local total=0.0; local discount=1.0; local completedAll=true
     for i, step in ipairs(chain) do
@@ -1181,7 +1026,6 @@ function ValueSystem.ScoreChain(chain, allCards, intelHistory)
     maxVal=maxVal+0.15
     return math.clamp(total/math.max(maxVal,0.001),0,1)
 end
-
 function ValueSystem.AdaptWeights(log, allCards)
     ValueHistory.WeightUpdates=ValueHistory.WeightUpdates+1
     for _, result in ipairs(log) do
@@ -1195,46 +1039,43 @@ function ValueSystem.AdaptWeights(log, allCards)
     end
 end
 
--- ── COGNITIVE INTELLIGENCE v3 ─────────────────────────────────
-local Intel = {}
+-- ============================================================
+-- COGNITIVE INTELLIGENCE v3
+-- ============================================================
+local Intel    = {}
 local CFG_INTEL = { MemoryDecayRate=0.88, PhaseShiftThreshold=0.25, OverfitDetectionWindow=4, VariancePenaltyCoeff=0.35 }
 local IntelMem = {
     CardHistory={}, ChannelTimeseries={ Structural={},Metabolic={},Ownership={},Replication={},Latent={},Agent={},Network={} },
     ChannelWeights={ Structural=1.0,Metabolic=1.0,Ownership=1.0,Replication=1.0,Latent=1.0,Agent=1.0,Network=1.0 },
     FailureHeuristics={}, CalibrationLog={}, PhaseShifts={}, OverfitStreak=0, Cycles=0,
 }
-
 local function GetOrInitCard(id, initConf)
     if not IntelMem.CardHistory[id] then
         local p=math.clamp(initConf/100,0.01,0.99); local scale=8
-        IntelMem.CardHistory[id]={ alpha=p*scale,beta=(1-p)*scale, n=0,mean=p,M2=0.0,StdDev=0.0, Timeline={},Confidence=initConf }
+        IntelMem.CardHistory[id]={ alpha=p*scale, beta=(1-p)*scale, n=0, mean=p, M2=0.0, StdDev=0.0, Timeline={}, Confidence=initConf }
     end
     return IntelMem.CardHistory[id]
 end
-
 local function WelfordUpdate(h,v)
     h.n=h.n+1; local d1=v-h.mean; h.mean=h.mean+d1/h.n; local d2=v-h.mean; h.M2=h.M2+d1*d2
     if h.n>=2 then h.StdDev=math.sqrt(h.M2/(h.n-1)) end
 end
-
 local function UpdatePosterior(h,success)
     h.alpha=h.alpha*CFG_INTEL.MemoryDecayRate; h.beta=h.beta*CFG_INTEL.MemoryDecayRate
     if success then h.alpha=h.alpha+1 else h.beta=h.beta+1 end
     h.Confidence=(h.alpha/(h.alpha+h.beta))*100
 end
-
 local function ThompsonScore(card, h)
     local sample=SampleBeta(math.max(h.alpha,0.1),math.max(h.beta,0.1))
     local vp=h.StdDev*CFG_INTEL.VariancePenaltyCoeff
     local cw=IntelMem.ChannelWeights[card.Channel] or 1.0
     local pd=1.0
-    for _, s in ipairs(IntelMem.PhaseShifts) do if s.Channel==card.Channel and IntelMem.Cycles-s.Cycle<=2 then pd=0.75; break end end
+    for _,s in ipairs(IntelMem.PhaseShifts) do if s.Channel==card.Channel and IntelMem.Cycles-s.Cycle<=2 then pd=0.75; break end end
     local pat=card.Channel..":"..(card.Metadata.Condition or "general")
     local fh=IntelMem.FailureHeuristics[pat]
     local fp=fh and fh.penalty or 0.0
     return math.max((sample-vp)*cw*pd*(1-fp),0.0)
 end
-
 function Intel.SelectStrategy(cards)
     local scored={}
     for _, card in ipairs(cards) do
@@ -1246,11 +1087,10 @@ function Intel.SelectStrategy(cards)
     local strategy=(w and w.Mean>=0.60) and "EXPLOIT" or "EXPLORE"
     return scored, strategy
 end
-
 function Intel.ProcessFeedback(log, cards)
     IntelMem.Cycles=IntelMem.Cycles+1; local cycle=IntelMem.Cycles
     local chR={}
-    for _, r in ipairs(log) do
+    for _,r in ipairs(log) do
         local ch=r.Step.Channel; if not chR[ch] then chR[ch]={total=0,success=0} end
         chR[ch].total=chR[ch].total+1; if r.Success then chR[ch].success=chR[ch].success+1 end
     end
@@ -1261,7 +1101,7 @@ function Intel.ProcessFeedback(log, cards)
             if #IntelMem.ChannelTimeseries[ch]>10 then table.remove(IntelMem.ChannelTimeseries[ch],1) end
         end
     end
-    for _, r in ipairs(log) do
+    for _,r in ipairs(log) do
         local card=r.Step; local h=GetOrInitCard(card.ID, card.Metadata.Confidence or 50)
         table.insert(h.Timeline, {result=r.Success,cycle=cycle})
         WelfordUpdate(h, r.Success and 1.0 or 0.0)
@@ -1275,7 +1115,6 @@ function Intel.ProcessFeedback(log, cards)
         end
         local cw=IntelMem.ChannelWeights[card.Channel] or 1.0
         IntelMem.ChannelWeights[card.Channel]=math.clamp(cw+(r.Success and 0.04 or -0.07),0.2,2.0)
-        -- Phase shift
         local s=IntelMem.ChannelTimeseries[card.Channel]
         if s and #s>=4 then
             local rM=(s[#s]+s[#s-1])/2; local pM=(s[#s-2]+s[#s-3])/2
@@ -1286,17 +1125,16 @@ function Intel.ProcessFeedback(log, cards)
         table.insert(IntelMem.CalibrationLog, {Predicted=(card.Metadata.Confidence or 50)/100,Actual=r.Success and 1 or 0,Cycle=cycle})
     end
     local allCorrect=true
-    for _, r in ipairs(log) do if ((r.Step.Metadata.Confidence or 50)>=60)~=r.Success then allCorrect=false; break end end
+    for _,r in ipairs(log) do if ((r.Step.Metadata.Confidence or 50)>=60)~=r.Success then allCorrect=false; break end end
     IntelMem.OverfitStreak=allCorrect and IntelMem.OverfitStreak+1 or 0
     if IntelMem.OverfitStreak>=CFG_INTEL.OverfitDetectionWindow then IntelMem.OverfitStreak=0 end
 end
-
 function Intel.GetMemory() return IntelMem end
 
--- ── DYNAMICS MODEL ────────────────────────────────────────────
-local DynamicsTable={}
-local DynamicsModel={}
-
+-- ============================================================
+-- DYNAMICS MODEL
+-- ============================================================
+local DynamicsTable={}; local DynamicsModel={}
 local function ExtractSig(ws)
     if not ws then return {} end
     return {
@@ -1307,7 +1145,6 @@ local function ExtractSig(ws)
         StreamedIn     = #(ws.Network.StreamedIn or {}),
     }
 end
-
 function DynamicsModel.Record(cardID, wsBefore, wsAfter, success)
     if not DynamicsTable[cardID] then DynamicsTable[cardID]={Deltas={},Successes=0,Attempts=0} end
     local e=DynamicsTable[cardID]; e.Attempts=e.Attempts+1
@@ -1318,22 +1155,20 @@ function DynamicsModel.Record(cardID, wsBefore, wsAfter, success)
         table.insert(e.Deltas, delta)
     end
 end
-
 function DynamicsModel.GetSuccessRate(cardID)
     local e=DynamicsTable[cardID]; if not e or e.Attempts==0 then return 0.5 end
     return e.Successes/e.Attempts
 end
 
--- ── TRANSITION MODEL ─────────────────────────────────────────
-local TransitionTable={}
-local TransitionModel={}
-
+-- ============================================================
+-- TRANSITION MODEL
+-- ============================================================
+local TransitionTable={}; local TransitionModel={}
 local function GetOrInitPair(prevID, nextID)
     if not TransitionTable[prevID] then TransitionTable[prevID]={} end
     if not TransitionTable[prevID][nextID] then TransitionTable[prevID][nextID]={aGivenS=1.0,bGivenS=1.0,aGivenF=1.0,bGivenF=1.0,observations=0} end
     return TransitionTable[prevID][nextID]
 end
-
 function TransitionModel.Update(log)
     for i=1,#log-1 do
         local prev=log[i]; local nxt=log[i+1]; local pair=GetOrInitPair(prev.Step.ID,nxt.Step.ID)
@@ -1342,330 +1177,15 @@ function TransitionModel.Update(log)
         else if nxt.Success then pair.aGivenF=pair.aGivenF+1 else pair.bGivenF=pair.bGivenF+1 end end
     end
 end
-
 function TransitionModel.Sample(prevID, nextID, prevSucc)
     if not TransitionTable[prevID] or not TransitionTable[prevID][nextID] then return 0.5 end
     local p=TransitionTable[prevID][nextID]
     return prevSucc and SampleBetaApprox(p.aGivenS,p.bGivenS) or SampleBetaApprox(p.aGivenF,p.bGivenF)
 end
 
--- ══════════════════════════════════════════════════════════════
--- DEEP INTELLIGENCE LAYER — Layer 3/4 upgrade
--- Implements: Living World Model, Causal Dependency Graph,
--- Enhanced Transition Model, Session Persistence
--- ══════════════════════════════════════════════════════════════
-
--- ── LIVING WORLD MODEL ────────────────────────────────────────
--- Maintains a continuously updated internal representation
--- rather than replacing WorldState each scan.
-local LWM = {
-    Snapshots      = {},  -- ring buffer of last 8 snapshots
-    Deltas         = {},  -- per-cycle state change vectors
-    RemoteRegistry = {},  -- name → { firstSeen, seenCount, fireHistory, argPatterns, totalFires }
-    TemporalMap    = {},  -- [remoteA][remoteB] = co-fire count
-    Age            = 0,
-}
-local LWM_MAXSNAP = 8
-
-local function LWM_ComputeDelta(snapA, snapB)
-    if not snapA or not snapB then return nil end
-    local d = {}
-    d.InstanceDelta    = snapB.ObjectGraph.TotalInstances - snapA.ObjectGraph.TotalInstances
-    d.PhysicsDelta     = #snapB.Physics.SimulatedAssemblies - #snapA.Physics.SimulatedAssemblies
-    d.ClientOwnedDelta = #snapB.Physics.ClientOwned - #snapA.Physics.ClientOwned
-    d.RemoteEventDelta = #snapB.Latent.RemoteEvents  - #snapA.Latent.RemoteEvents
-    d.ValueObjDelta    = #snapB.Latent.ValueObjects   - #snapA.Latent.ValueObjects
-    local prevFires = {}
-    for _, r in ipairs(snapA.Latent.RemoteEvents or {}) do prevFires[r.Name] = r.FireCount end
-    local fireDeltas = {}
-    for _, r in ipairs(snapB.Latent.RemoteEvents or {}) do
-        local prev = prevFires[r.Name] or 0
-        if r.FireCount > prev then fireDeltas[r.Name] = r.FireCount - prev end
-    end
-    d.RemoteFireDelta = fireDeltas
-    d.HasActivity = next(fireDeltas) ~= nil
-        or math.abs(d.InstanceDelta) > 5
-        or math.abs(d.ClientOwnedDelta) > 0
-    return d
-end
-
-local function LWM_UpdateRegistry(ws)
-    local now = os.clock()
-    for _, r in ipairs(ws.Latent.RemoteEvents or {}) do
-        if not LWM.RemoteRegistry[r.Name] then
-            LWM.RemoteRegistry[r.Name] = {
-                firstSeen=now, lastSeen=now, seenCount=0,
-                fireHistory={}, argPatterns={}, totalFires=0,
-            }
-        end
-        local reg = LWM.RemoteRegistry[r.Name]
-        reg.lastSeen = now; reg.seenCount = reg.seenCount + 1; reg.totalFires = r.FireCount
-        if r.LastArgs and #r.LastArgs > 0 then
-            local sig = {}
-            for _, v in ipairs(r.LastArgs) do table.insert(sig, type(v)) end
-            local k = table.concat(sig, ",")
-            reg.argPatterns[k] = (reg.argPatterns[k] or 0) + 1
-        end
-        table.insert(reg.fireHistory, {fires=r.FireCount, t=now})
-        if #reg.fireHistory > 20 then table.remove(reg.fireHistory, 1) end
-    end
-end
-
-local function LWM_UpdateTemporalMap(ws)
-    local activeFires = {}
-    for _, r in ipairs(ws.Latent.RemoteEvents or {}) do
-        local reg = LWM.RemoteRegistry[r.Name]
-        if reg and r.FireCount > (reg.totalFires or 0) then
-            table.insert(activeFires, r.Name)
-        end
-    end
-    for i = 1, #activeFires do
-        for j = i+1, #activeFires do
-            local a, b = activeFires[i], activeFires[j]
-            if not LWM.TemporalMap[a] then LWM.TemporalMap[a] = {} end
-            if not LWM.TemporalMap[b] then LWM.TemporalMap[b] = {} end
-            LWM.TemporalMap[a][b] = (LWM.TemporalMap[a][b] or 0) + 1
-            LWM.TemporalMap[b][a] = (LWM.TemporalMap[b][a] or 0) + 1
-        end
-    end
-end
-
-function LWM.Update(newWS)
-    LWM.Age = LWM.Age + 1
-    local prevWS = LWM.Snapshots[#LWM.Snapshots]
-    local delta = LWM_ComputeDelta(prevWS, newWS)
-    if delta then
-        table.insert(LWM.Deltas, delta)
-        if #LWM.Deltas > LWM_MAXSNAP then table.remove(LWM.Deltas, 1) end
-    end
-    table.insert(LWM.Snapshots, newWS)
-    if #LWM.Snapshots > LWM_MAXSNAP then table.remove(LWM.Snapshots, 1) end
-    LWM_UpdateRegistry(newWS)
-    LWM_UpdateTemporalMap(newWS)
-    return delta
-end
-
-function LWM.GetActivityScore()
-    if #LWM.Deltas == 0 then return 0 end
-    local active = 0
-    for _, d in ipairs(LWM.Deltas) do if d.HasActivity then active = active + 1 end end
-    return active / #LWM.Deltas
-end
-
-function LWM.GetRemoteProfile(name) return LWM.RemoteRegistry[name] end
-
-function LWM.GetCoFiringPartners(name, minCount)
-    minCount = minCount or 2
-    local partners = {}
-    if LWM.TemporalMap[name] then
-        for partner, count in pairs(LWM.TemporalMap[name]) do
-            if count >= minCount then table.insert(partners, {Name=partner, CoFireCount=count}) end
-        end
-        table.sort(partners, function(a,b) return a.CoFireCount > b.CoFireCount end)
-    end
-    return partners
-end
-
-function LWM.GetLatestDelta() return LWM.Deltas[#LWM.Deltas] end
-
--- ── CAUSAL DEPENDENCY GRAPH ────────────────────────────────────
--- Learns which cards produce real state changes from execution
--- history, and which cards are correlated or synergistic.
-local CDG = {
-    Nodes       = {},  -- [cardID] → { channel, name, totalFires, successCount, stateChanges }
-    Edges       = {},  -- [cardA][cardB] → { coSuccess, coFail, coTotal, correlation }
-    StateImpact = {},  -- [cardID] → list of deltas observed after card fired
-}
-
-local function CDG_EnsureNode(card)
-    if not CDG.Nodes[card.ID] then
-        CDG.Nodes[card.ID] = {
-            Channel=card.Channel, Name=card.Name,
-            totalFires=0, successCount=0, stateChanges=0,
-        }
-    end
-    return CDG.Nodes[card.ID]
-end
-
-local function CDG_EnsureEdge(idA, idB)
-    if not CDG.Edges[idA] then CDG.Edges[idA] = {} end
-    if not CDG.Edges[idA][idB] then
-        CDG.Edges[idA][idB] = {coSuccess=0, coFail=0, coTotal=0, correlation=0}
-    end
-    return CDG.Edges[idA][idB]
-end
-
-function CDG.Update(log, wsBefore, wsAfter)
-    local delta = LWM_ComputeDelta(wsBefore, wsAfter)
-    for i, result in ipairs(log) do
-        local card = result.Step
-        local node = CDG_EnsureNode(card)
-        node.totalFires = node.totalFires + 1
-        if result.Success then node.successCount = node.successCount + 1 end
-        if delta and delta.HasActivity then
-            node.stateChanges = node.stateChanges + 1
-            if not CDG.StateImpact[card.ID] then CDG.StateImpact[card.ID] = {} end
-            table.insert(CDG.StateImpact[card.ID], delta)
-            if #CDG.StateImpact[card.ID] > 10 then table.remove(CDG.StateImpact[card.ID], 1) end
-        end
-        for j, other in ipairs(log) do
-            if j ~= i then
-                local edge = CDG_EnsureEdge(card.ID, other.Step.ID)
-                edge.coTotal = edge.coTotal + 1
-                if result.Success and other.Success then edge.coSuccess = edge.coSuccess + 1
-                elseif not result.Success and not other.Success then edge.coFail = edge.coFail + 1 end
-                if edge.coTotal > 0 then
-                    edge.correlation = (edge.coSuccess - edge.coFail) / edge.coTotal
-                end
-            end
-        end
-    end
-end
-
-function CDG.GetStateChangeRate(cardID)
-    local n = CDG.Nodes[cardID]
-    if not n or n.totalFires == 0 then return 0 end
-    return n.stateChanges / n.totalFires
-end
-
-function CDG.GetSynergyScore(idA, idB)
-    if not CDG.Edges[idA] or not CDG.Edges[idA][idB] then return 0 end
-    return CDG.Edges[idA][idB].correlation or 0
-end
-
-function CDG.GetLearnedOrder(cards)
-    -- Reorder by observed causal impact (high state-change rate first)
-    local sorted = {}
-    for _, card in ipairs(cards) do
-        table.insert(sorted, {Card=card, Impact=CDG.GetStateChangeRate(card.ID)})
-    end
-    table.sort(sorted, function(a,b) return a.Impact > b.Impact end)
-    local result = {}
-    for _, e in ipairs(sorted) do table.insert(result, e.Card) end
-    return result
-end
-
--- ── ENHANCED TRANSITION MODEL (ETM) ───────────────────────────
--- Context-aware f(State, Action) → P(outcome) learned function.
--- State signatures make predictions state-dependent, not global.
-local ETM = {
-    Table       = {},  -- [cardID][stateSig] → { alpha, beta, n }
-    GlobalTable = {},  -- [cardID] → { alpha, beta, n }  (context-free fallback)
-}
-
-local function ETM_StateSig(ws)
-    if not ws then return "null" end
-    return table.concat({
-        math.floor((ws.ObjectGraph.TotalInstances or 0) / 100),
-        math.floor(#(ws.Latent.RemoteEvents or {}) / 5),
-        #(ws.Physics.ClientOwned or {}),
-        ws.Agents.LocalPlayer and math.floor((ws.Agents.LocalPlayer.Health or 0) / 25) or 0,
-        ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.EquippedTool and 1 or 0,
-    }, ":")
-end
-
-local function ETM_Ensure(cardID, sig)
-    if not ETM.Table[cardID] then ETM.Table[cardID] = {} end
-    if not ETM.Table[cardID][sig] then ETM.Table[cardID][sig] = {alpha=1.0, beta=1.0, n=0} end
-    return ETM.Table[cardID][sig]
-end
-
-local function ETM_EnsureGlobal(cardID)
-    if not ETM.GlobalTable[cardID] then ETM.GlobalTable[cardID] = {alpha=1.0, beta=1.0, n=0} end
-    return ETM.GlobalTable[cardID]
-end
-
-function ETM.Record(cardID, stateSig, success)
-    local ctx = ETM_Ensure(cardID, stateSig)
-    ctx.n = ctx.n + 1
-    if success then ctx.alpha = ctx.alpha + 1 else ctx.beta = ctx.beta + 1 end
-    local g = ETM_EnsureGlobal(cardID)
-    g.n = g.n + 1
-    if success then g.alpha = g.alpha + 1 else g.beta = g.beta + 1 end
-end
-
-function ETM.Predict(cardID, stateSig)
-    -- Returns p, stddev, n
-    local ctx = ETM.Table[cardID] and ETM.Table[cardID][stateSig]
-    local g   = ETM.GlobalTable[cardID]
-    local alpha, beta, n
-    if ctx and ctx.n >= 3 then
-        alpha, beta, n = ctx.alpha, ctx.beta, ctx.n
-    elseif g and g.n >= 2 then
-        alpha, beta, n = g.alpha, g.beta, g.n
-    else
-        return 0.5, 0.5, 0
-    end
-    local p = alpha / (alpha + beta)
-    local ab = alpha + beta
-    local stddev = math.sqrt((alpha * beta) / (ab * ab * (ab + 1)))
-    return p, stddev, n
-end
-
-function ETM.IsConverged(cardID)
-    local g = ETM.GlobalTable[cardID]
-    if not g or g.n < 10 then return false end
-    local ab = g.alpha + g.beta
-    return math.sqrt((g.alpha * g.beta) / (ab * ab * (ab + 1))) < 0.08
-end
-
-function ETM.GetConvergenceMap()
-    local result = {}
-    for cardID, g in pairs(ETM.GlobalTable) do
-        local ab = g.alpha + g.beta
-        local stddev = ab > 0 and math.sqrt((g.alpha * g.beta) / (ab * ab * (ab + 1))) or 0.5
-        result[cardID] = {
-            n=g.n, mean=g.alpha/ab, stddev=stddev,
-            converged = g.n >= 10 and stddev < 0.08,
-        }
-    end
-    return result
-end
-
--- ── SESSION PERSISTENCE ────────────────────────────────────────
--- Accumulated knowledge survives script re-execution within
--- the same session via _G storage.
-local PERSIST_KEY = "_RAE_SessionMemory_v3"
-local PERSIST_VER = 3
-
-local function SessionSave()
-    _G[PERSIST_KEY] = {
-        version         = PERSIST_VER,
-        IntelMem        = IntelMem,
-        DynamicsTable   = DynamicsTable,
-        TransitionTable = TransitionTable,
-        ETM_Table       = ETM.Table,
-        ETM_Global      = ETM.GlobalTable,
-        CDG_Nodes       = CDG.Nodes,
-        CDG_Edges       = CDG.Edges,
-        CDG_StateImpact = CDG.StateImpact,
-        LWM_RemoteReg   = LWM.RemoteRegistry,
-        LWM_Temporal    = LWM.TemporalMap,
-        LWM_Age         = LWM.Age,
-    }
-end
-
-local function SessionLoad()
-    local s = _G[PERSIST_KEY]
-    if not s or s.version ~= PERSIST_VER then return false end
-    for k,v in pairs(s.IntelMem or {}) do IntelMem[k] = v end
-    for k,v in pairs(s.DynamicsTable or {}) do DynamicsTable[k] = v end
-    for k,v in pairs(s.TransitionTable or {}) do TransitionTable[k] = v end
-    for k,v in pairs(s.ETM_Table or {}) do ETM.Table[k] = v end
-    for k,v in pairs(s.ETM_Global or {}) do ETM.GlobalTable[k] = v end
-    for k,v in pairs(s.CDG_Nodes or {}) do CDG.Nodes[k] = v end
-    for k,v in pairs(s.CDG_Edges or {}) do CDG.Edges[k] = v end
-    for k,v in pairs(s.CDG_StateImpact or {}) do CDG.StateImpact[k] = v end
-    LWM.RemoteRegistry = s.LWM_RemoteReg or {}
-    LWM.TemporalMap    = s.LWM_Temporal  or {}
-    LWM.Age            = s.LWM_Age       or 0
-    return true
-end
-
--- Attempt restore on load
-local _sessionRestored = SessionLoad()
-
--- ── CHAIN EXECUTOR ────────────────────────────────────────────
+-- ============================================================
+-- CHAIN EXECUTOR (with CDG causal reordering)
+-- ============================================================
 local CausalOrder={"Structural","Metabolic","Ownership","Replication","Latent","Agent","Network"}
 local CausalReasons={
     Structural="Architecture context required before behavioral reasoning.",
@@ -1676,41 +1196,22 @@ local CausalReasons={
     Agent="Agent state must be confirmed before network operations.",
     Network="Replication boundary must be known before execution.",
 }
-
 local Executor={}
 local function ValidatePreconditions(card, ws)
-    for _, pre in ipairs(card.Preconditions or {}) do
+    for _,pre in ipairs(card.Preconditions or {}) do
         local ok, reason=pre(ws); if not ok then return false, reason or "Precondition failed." end
     end
     return true, "OK"
 end
-
 local function ResolveDeps(selected, all)
     local required={}; for _,c in ipairs(selected) do required[c.Channel]=true end
     local chIdx={}; for i,ch in ipairs(CausalOrder) do chIdx[ch]=i end
     for ch in pairs(required) do local idx=chIdx[ch] or 0; for i=1,idx-1 do required[CausalOrder[i]]=true end end
     local chain={}; local seen={}
-    for _,ch in ipairs(CausalOrder) do
-        if required[ch] then
-            -- within a channel, pick the card with highest CDG state-change rate
-            local candidates = {}
-            for _,card in ipairs(all) do
-                if card.Channel==ch and not seen[card.ID] then
-                    table.insert(candidates, card)
-                end
-            end
-            table.sort(candidates, function(a,b)
-                return CDG.GetStateChangeRate(a.ID) > CDG.GetStateChangeRate(b.ID)
-            end)
-            if candidates[1] then
-                table.insert(chain, candidates[1]); seen[candidates[1].ID]=true
-            end
-        end
-    end
+    for _,ch in ipairs(CausalOrder) do if required[ch] then for _,card in ipairs(all) do if card.Channel==ch and not seen[card.ID] then table.insert(chain,card); seen[card.ID]=true; break end end end end
     for _,card in ipairs(selected) do if not seen[card.ID] then table.insert(chain,card); seen[card.ID]=true end end
     return chain
 end
-
 local function IsHighStakes(chain)
     for _,card in ipairs(chain) do
         local risk=card.Metadata.Risk or "None"
@@ -1719,7 +1220,6 @@ local function IsHighStakes(chain)
     end
     return false
 end
-
 local function ExecuteFastPath(chain, ws)
     local log={}; local outputs={}
     for i, card in ipairs(chain) do
@@ -1738,7 +1238,6 @@ local function ExecuteFastPath(chain, ws)
     end
     return log
 end
-
 local function ExecuteStagedPath(chain, ws)
     local log={}; local outputs={}
     for i, card in ipairs(chain) do
@@ -1777,355 +1276,195 @@ local function ExecuteStagedPath(chain, ws)
     end
     return log
 end
-
 function Executor.Execute(selected, all, ws)
     assert(#selected>0, "[RAE:Executor] No cards selected.")
-    local chain=ResolveDeps(selected, all)
-    if IsHighStakes(chain) then return ExecuteStagedPath(chain, ws)
-    else return ExecuteFastPath(chain, ws) end
+    local chain    = ResolveDeps(selected, all)
+    local reordered = CDG.ReorderChain(chain)   -- CDG causal reordering
+    if IsHighStakes(reordered) then return ExecuteStagedPath(reordered, ws)
+    else return ExecuteFastPath(reordered, ws) end
 end
-
 function Executor.Preview(selected, all)
-    local chain=ResolveDeps(selected, all)
-    local staged=IsHighStakes(chain)
-    return chain, staged
+    local chain    = ResolveDeps(selected, all)
+    local reordered = CDG.ReorderChain(chain)
+    return reordered, IsHighStakes(reordered)
 end
 
--- ── MCTS PLANNER ─────────────────────────────────────────────
-local MCTS_CFG={ Simulations=200, MaxDepth=6, UCB_C=1.41, MinCardConf=0.20 }
+-- ============================================================
+-- MCTS PLANNER v2 — Risk-adjusted: E[U] − λ·Var[U] − μ·Cost
+-- ETM-blended rollouts. Confidence gating via ETM+IntelMem.
+-- ============================================================
+local MCTS_CFG = { Simulations=200, MaxDepth=6, UCB_C=1.41, MinCardConf=0.20 }
+local RISK_CFG = { Lambda=0.25, Mu=0.12, ConfidenceGateThreshold=0.28 }
 
 local function NewNode(card, parent, depth)
-    return {Card=card,Parent=parent,Children={},Depth=depth,Visits=0,TotalReward=0.0,MeanReward=0.0}
+    return { Card=card, Parent=parent, Children={}, Depth=depth,
+             Visits=0, TotalReward=0.0, MeanReward=0.0, TotalRewardSq=0.0, Variance=0.0 }
 end
-
 local function UCB1(node, parentVisits)
     if node.Visits==0 then return math.huge end
-    return node.MeanReward + MCTS_CFG.UCB_C * math.sqrt(math.log(parentVisits)/node.Visits)
+    local riskPenalty = RISK_CFG.Lambda * math.sqrt(math.max(node.Variance,0))
+    local explore     = MCTS_CFG.UCB_C  * math.sqrt(math.log(parentVisits)/node.Visits)
+    return (node.MeanReward - riskPenalty) + explore
 end
-
 local function Rollout(startNode, viable, allCards, intelHistory, maxDepth)
     local chain={}; local prevCard=startNode.Card; local prevSucc=true; local depth=startNode.Depth
-    local node=startNode
-    local nc={}
+    local node=startNode; local nc={}
     while node do if node.Card then table.insert(nc,1,{Card=node.Card,Success=true}) end; node=node.Parent end
     for _,s in ipairs(nc) do table.insert(chain,s) end
-
-    -- Propagating state sig: starts at current real state, then advances
-    -- based on observed CDG deltas after each simulated step.
-    -- This means deeper rollout steps get state-aware ETM predictions
-    -- rather than reusing the same snapshot throughout.
-    local currentWS = RAE_State and RAE_State.WorldState
-    local stateSig = currentWS and ETM_StateSig(currentWS) or "null"
-
-    -- Build a mutable state estimate we can advance through the simulation
-    local simHealth    = currentWS and currentWS.Agents.LocalPlayer and currentWS.Agents.LocalPlayer.Health or 100
-    local simPhysCount = currentWS and #(currentWS.Physics.ClientOwned or {}) or 0
-    local simInstCount = currentWS and currentWS.ObjectGraph.TotalInstances or 0
-    local simHasTool   = currentWS and currentWS.Agents.LocalPlayer and currentWS.Agents.LocalPlayer.EquippedTool and 1 or 0
-
-    local function AdvanceSimState(card, success)
-        -- Apply average observed CDG deltas for this card to the sim state
-        local impacts = CDG.StateImpact[card.ID]
-        if impacts and #impacts > 0 and success then
-            local avgInst, avgPhys, n = 0, 0, #impacts
-            for _, d in ipairs(impacts) do
-                avgInst = avgInst + (d.InstanceDelta or 0)
-                avgPhys = avgPhys + (d.ClientOwnedDelta or 0)
-            end
-            simInstCount = simInstCount + avgInst / n
-            simPhysCount = math.max(0, simPhysCount + avgPhys / n)
-        end
-        -- Recompute state sig from simulated state
-        return table.concat({
-            math.floor(simInstCount / 100),
-            math.floor((currentWS and #(currentWS.Latent.RemoteEvents or {}) or 0) / 5),
-            math.floor(simPhysCount),
-            math.floor(simHealth / 25),
-            simHasTool,
-        }, ":")
-    end
-
+    local currentSig = LWM.GetRecentSig()
     while depth < maxDepth do
-        if #viable == 0 then break end
+        if #viable==0 then break end
         local nextCard = viable[math.random(#viable)]
-
-        -- ETM: state-aware prediction using the SIMULATED state sig (not the static one)
-        local etmP, etmStd, etmN = ETM.Predict(nextCard.ID, stateSig)
-        -- TransitionModel: sequential dependency
-        local tmP = TransitionModel.Sample(prevCard.ID, nextCard.ID, prevSucc)
-        -- DynamicsModel: historical success rate
-        local dynRate = DynamicsModel.GetSuccessRate(nextCard.ID)
-        -- CDG: synergy with previous card
-        local synergy = CDG.GetSynergyScore(prevCard.ID, nextCard.ID)
-
-        -- Weighted blend — ETM weight ramps up as it accumulates data
-        local etmWeight = math.min(etmN / 10, 1.0)
-        local succProb
-        if etmWeight > 0.3 then
-            succProb = etmP * etmWeight + (tmP * 0.5 + dynRate * 0.5) * (1 - etmWeight)
-        else
-            succProb = tmP * 0.5 + dynRate * 0.5
-        end
-        succProb = math.clamp(succProb + synergy * 0.1, 0.01, 0.99)
-
-        local simSucc = math.random() < succProb
-        table.insert(chain, {Card=nextCard, Success=simSucc})
+        local etmProb, etmConverged, _ = ETM.Predict(nextCard.ID, currentSig)
+        local transProb = TransitionModel.Sample(prevCard.ID, nextCard.ID, prevSucc)
+        local dynRate   = DynamicsModel.GetSuccessRate(nextCard.ID)
+        local blended
+        if etmConverged then blended = etmProb*0.70 + transProb*0.20 + dynRate*0.10
+        else                 blended = etmProb*0.35 + transProb*0.40 + dynRate*0.25 end
+        local simSucc = math.random() < blended
+        table.insert(chain, {Card=nextCard,Success=simSucc})
         prevCard=nextCard; prevSucc=simSucc; depth=depth+1
-
-        -- Advance the simulated state so the NEXT step gets an updated state sig
-        stateSig = AdvanceSimState(nextCard, simSucc)
     end
-
-    -- Chain score: base value + CDG causal bonus
-    local baseScore = ValueSystem.ScoreChain(chain, allCards, intelHistory)
-    local causalBonus = 0
-    for _, step in ipairs(chain) do
-        causalBonus = causalBonus + CDG.GetStateChangeRate(step.Card.ID) * 0.05
-    end
-    return math.clamp(baseScore + causalBonus, 0, 1), chain
+    return ValueSystem.ScoreChain(chain, allCards, intelHistory), chain
 end
 
 local Planner={}
 function Planner.Plan(availableCards, lastLog, intelHistory)
     if lastLog and #lastLog>0 then TransitionModel.Update(lastLog) end
-
-    local viable={}
-    for _,card in ipairs(availableCards) do
-        if (card.Metadata.Confidence or 50)/100 >= MCTS_CFG.MinCardConf then
-            table.insert(viable, card)
+    local currentSig = LWM.GetRecentSig()
+    local viable = {}
+    for _, card in ipairs(availableCards) do
+        local baseConf = (card.Metadata.Confidence or 50)/100
+        if baseConf >= MCTS_CFG.MinCardConf then
+            local etmProb, etmConverged, _ = ETM.Predict(card.ID, currentSig)
+            local effectiveConf = etmConverged and etmProb or (baseConf*0.6 + etmProb*0.4)
+            if effectiveConf >= RISK_CFG.ConfidenceGateThreshold then
+                table.insert(viable, card)
+            end
         end
     end
     if #viable==0 then return nil end
-
-    -- Adjust simulations based on environment activity:
-    -- Active environment → explore more; quiet → exploit known good cards
-    local activity = LWM.GetActivityScore()
-    local sims = math.floor(MCTS_CFG.Simulations * (0.8 + activity * 0.4))
-
-    local root=NewNode(nil,nil,0)
-    for _=1,sims do
+    local root = NewNode(nil,nil,0)
+    for _=1,MCTS_CFG.Simulations do
         local node=root
         while #node.Children>0 and node.Visits>0 do
             local best,bestScore=nil,-math.huge
-            for _,child in ipairs(node.Children) do
-                local s=UCB1(child,node.Visits); if s>bestScore then bestScore=s; best=child end
-            end
+            for _,child in ipairs(node.Children) do local s=UCB1(child,node.Visits); if s>bestScore then bestScore=s; best=child end end
             node=best
         end
-        local explored={}
-        for _,child in ipairs(node.Children) do if child.Card then explored[child.Card.ID]=true end end
-        local unexplored={}
-        for _,card in ipairs(viable) do if not explored[card.ID] then table.insert(unexplored,card) end end
+        local explored={}; for _,child in ipairs(node.Children) do if child.Card then explored[child.Card.ID]=true end end
+        local unexplored={}; for _,card in ipairs(viable) do if not explored[card.ID] then table.insert(unexplored,card) end end
         local expandNode=node
         if #unexplored>0 then
-            -- Prefer unexplored cards with high CDG state-change rates (they actually do things)
-            table.sort(unexplored, function(a,b)
-                return CDG.GetStateChangeRate(a.ID) > CDG.GetStateChangeRate(b.ID)
-            end)
-            -- Weighted random: top-impact cards selected more often but not exclusively
-            local pick
-            if math.random() < 0.65 and CDG.GetStateChangeRate(unexplored[1].ID) > 0 then
-                pick = unexplored[1]
-            else
-                pick = unexplored[math.random(#unexplored)]
-            end
-            expandNode=NewNode(pick, node, node.Depth+1)
-            table.insert(node.Children, expandNode)
+            local nc=unexplored[math.random(#unexplored)]
+            expandNode=NewNode(nc,node,node.Depth+1); table.insert(node.Children,expandNode)
         end
         local reward=0
-        if expandNode.Card then
-            reward, _ = Rollout(expandNode, viable, availableCards, intelHistory, MCTS_CFG.MaxDepth)
-        end
+        if expandNode.Card then reward,_=Rollout(expandNode,viable,availableCards,intelHistory,MCTS_CFG.MaxDepth) end
         local back=expandNode
         while back do
-            back.Visits=back.Visits+1
-            back.TotalReward=back.TotalReward+reward
+            back.Visits=back.Visits+1; back.TotalReward=back.TotalReward+reward
+            back.TotalRewardSq=back.TotalRewardSq+reward*reward
             back.MeanReward=back.TotalReward/back.Visits
+            back.Variance=(back.TotalRewardSq/back.Visits)-(back.MeanReward*back.MeanReward)
             back=back.Parent
         end
     end
-
     local bestChain={}; local node=root; local depth=0
     while #node.Children>0 and depth<MCTS_CFG.MaxDepth do
         local best,bestR=nil,-math.huge
         for _,child in ipairs(node.Children) do
-            if child.Visits>0 and child.MeanReward>bestR then bestR=child.MeanReward; best=child end
+            if child.Visits>0 then
+                local riskAdj=child.MeanReward - RISK_CFG.Lambda*math.sqrt(math.max(child.Variance,0))
+                if riskAdj>bestR then bestR=riskAdj; best=child end
+            end
         end
         if not best then break end
-        table.insert(bestChain, {Card=best.Card, ProjectedReward=best.MeanReward, Visits=best.Visits})
+        table.insert(bestChain, {Card=best.Card,ProjectedReward=best.MeanReward,Variance=best.Variance,Visits=best.Visits})
         node=best; depth=depth+1
     end
     return bestChain
 end
 
--- ── CHAIN PREDICTION (pre-commit certainty estimate) ──────────
--- Walks the planned chain using ETM + DynamicsModel to produce
--- a step-by-step predicted success probability WITHOUT executing.
--- This is the difference between "experimenting" and "intending".
-function Planner.PredictChain(chain, ws)
-    if not chain or #chain == 0 then return nil end
-    local stateSig = ws and ETM_StateSig(ws) or "null"
-    local prevSucc = true
-    local prevID   = nil
-    local steps    = {}
-    local chainConfidence = 1.0  -- multiplicative: full chain probability
+-- ============================================================
+-- SESSION PERSISTENCE (_G)
+-- ============================================================
+local PERSIST_VER   = "v2"
+local PERSIST_INTEL = "RAE_IntelMem_"  .. PERSIST_VER
+local PERSIST_ETM   = "RAE_ETM_Table_" .. PERSIST_VER
+local PERSIST_CDG   = "RAE_CDG_Table_" .. PERSIST_VER
 
-    -- Same sim-state propagation logic as Rollout
-    local simHealth    = ws and ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.Health or 100
-    local simPhysCount = ws and #(ws.Physics.ClientOwned or {}) or 0
-    local simInstCount = ws and ws.ObjectGraph.TotalInstances or 0
-    local simHasTool   = ws and ws.Agents.LocalPlayer and ws.Agents.LocalPlayer.EquippedTool and 1 or 0
-
-    for _, step in ipairs(chain) do
-        local card = step.Card or step
-        local etmP, etmStd, etmN = ETM.Predict(card.ID, stateSig)
-        local dynRate   = DynamicsModel.GetSuccessRate(card.ID)
-        local tmP       = prevID and TransitionModel.Sample(prevID, card.ID, prevSucc) or 0.5
-        local etmWeight = math.min(etmN / 10, 1.0)
-        local p
-        if etmWeight > 0.3 then
-            p = etmP * etmWeight + (tmP * 0.5 + dynRate * 0.5) * (1 - etmWeight)
-        else
-            p = tmP * 0.5 + dynRate * 0.5
-        end
-        p = math.clamp(p, 0.01, 0.99)
-        chainConfidence = chainConfidence * p
-
-        -- Track whether ETM has converged on this card
-        local converged = ETM.IsConverged(card.ID)
-
-        table.insert(steps, {
-            Card        = card,
-            PredictedP  = p,
-            StdDev      = etmStd,
-            ETM_N       = etmN,
-            Converged   = converged,
-            StateSig    = stateSig,
-        })
-
-        prevID   = card.ID
-        prevSucc = p >= 0.5
-
-        -- Advance simulated state (same logic as Rollout)
-        local impacts = CDG.StateImpact[card.ID]
-        if impacts and #impacts > 0 then
-            local avgInst, avgPhys, n = 0, 0, #impacts
-            for _, d in ipairs(impacts) do
-                avgInst = avgInst + (d.InstanceDelta or 0)
-                avgPhys = avgPhys + (d.ClientOwnedDelta or 0)
+local function SaveSession()
+    pcall(function()
+        _G[PERSIST_INTEL] = IntelMem
+        _G[PERSIST_ETM]   = ETM.GetTableRef()
+        _G[PERSIST_CDG]   = CDG.GetTableRef()
+    end)
+end
+local function LoadSession()
+    pcall(function()
+        if type(_G[PERSIST_INTEL])=="table" then
+            local saved=_G[PERSIST_INTEL]
+            if type(saved.CardHistory)=="table" then
+                for id,h in pairs(saved.CardHistory) do if not IntelMem.CardHistory[id] then IntelMem.CardHistory[id]=h end end
             end
-            simInstCount = simInstCount + avgInst / n
-            simPhysCount = math.max(0, simPhysCount + avgPhys / n)
+            if type(saved.ChannelWeights)=="table" then
+                for ch,w in pairs(saved.ChannelWeights) do if type(w)=="number" then IntelMem.ChannelWeights[ch]=w end end
+            end
+            IntelMem.Cycles=math.max(IntelMem.Cycles, type(saved.Cycles)=="number" and saved.Cycles or 0)
         end
-        stateSig = table.concat({
-            math.floor(simInstCount / 100),
-            math.floor((ws and #(ws.Latent.RemoteEvents or {}) or 0) / 5),
-            math.floor(simPhysCount),
-            math.floor(simHealth / 25),
-            simHasTool,
-        }, ":")
-    end
-
-    -- Causal certainty: fraction of converged cards in the chain
-    local nConverged = 0
-    for _, s in ipairs(steps) do if s.Converged then nConverged = nConverged + 1 end end
-    local certainty = nConverged / math.max(#steps, 1)
-
-    return {
-        Steps            = steps,
-        ChainProbability = chainConfidence,
-        CausalCertainty  = certainty,
-        StepCount        = #steps,
-    }
+        if type(_G[PERSIST_ETM])=="table" then ETM.SetTableRef(_G[PERSIST_ETM]) end
+        if type(_G[PERSIST_CDG])=="table" then CDG.SetTableRef(_G[PERSIST_CDG]) end
+    end)
 end
 
--- ── CAUSAL CERTAINTY SCORE ─────────────────────────────────────
--- Returns a 0–100 score representing how well RAE understands
--- the current card set. Combines ETM convergence and prediction
--- accuracy from the calibration log.
-function ETM.GetCausalCertainty(cards)
-    if not cards or #cards == 0 then return 0, 0, 0 end
-
-    local convergenceMap = ETM.GetConvergenceMap()
-    local nConverged, nTotal, totalStdDev = 0, 0, 0
-
-    for _, card in ipairs(cards) do
-        local entry = convergenceMap[card.ID]
-        nTotal = nTotal + 1
-        if entry then
-            totalStdDev = totalStdDev + entry.stddev
-            if entry.converged then nConverged = nConverged + 1 end
-        else
-            totalStdDev = totalStdDev + 0.5  -- max uncertainty for unseen cards
-        end
+-- Brier Score: mean squared error of predicted prob vs actual outcome (last 100 entries)
+local function ComputeBrierScore()
+    local log = IntelMem.CalibrationLog
+    if not log or #log==0 then return nil end
+    local n=math.min(#log,100); local sum=0.0
+    for i=#log-n+1,#log do
+        local e=log[i]; if e then sum=sum+(e.Predicted-e.Actual)^2 end
     end
-
-    local convergenceRate = nConverged / math.max(nTotal, 1)
-    local avgStdDev       = totalStdDev / math.max(nTotal, 1)
-
-    -- Calibration score from Intel's calibration log
-    local calLog = IntelMem.CalibrationLog or {}
-    local calibrationScore = 0.5
-    if #calLog >= 5 then
-        local recentN   = math.min(20, #calLog)
-        local brier     = 0
-        for i = #calLog - recentN + 1, #calLog do
-            local entry = calLog[i]
-            brier = brier + (entry.Predicted - entry.Actual) ^ 2
-        end
-        brier = brier / recentN
-        calibrationScore = 1.0 - brier  -- 1.0 = perfect, 0.0 = completely wrong
-    end
-
-    -- Composite: convergence rate (50%) + low uncertainty (30%) + calibration (20%)
-    local uncertaintyScore = 1.0 - avgStdDev * 2  -- 0.5 stddev → 0 score
-    local composite = math.clamp(
-        convergenceRate * 0.50 +
-        math.max(uncertaintyScore, 0) * 0.30 +
-        calibrationScore * 0.20,
-        0, 1
-    )
-
-    return math.floor(composite * 100), nConverged, nTotal
+    return sum/n
 end
+
+-- ============================================================
+-- RAE ENGINE STATE
+-- ============================================================
 local RAE_State = {
     Phase="DORMANT", WorldState=nil, Cards={}, SelectedCards={},
     LastLog=nil, LastPlan=nil, CycleCount=0, _IndexMap={},
+    CurrentSig="null_sig",
 }
 local RAE_Callbacks  = { OnScan=nil, OnPlan=nil, OnCommit=nil, OnPhase=nil }
-local RAE_SilentMode = false   -- true during autonomous background cycles
+local RAE_SilentMode = false
 
 local function RAE_SetPhase(phase)
     RAE_State.Phase=phase
     if RAE_Callbacks.OnPhase then RAE_Callbacks.OnPhase(phase) end
 end
-
 local function RAE_Scan()
     RAE_SetPhase("SCANNING")
-    local ws = WorldState.Capture()
-    RAE_State.WorldState = ws
-
-    -- Feed the Living World Model
-    local delta = LWM.Update(ws)
-    RAE_State.LastDelta = delta
-
-    local confidence = 0
-    if ws.ObjectGraph.TotalInstances > 0 then confidence = confidence + 20 end
-    if ws.SimConfig.Gravity then confidence = confidence + 20 end
-    if #ws.Physics.SimulatedAssemblies > 0 then confidence = confidence + 20 end
-    if #ws.Latent.RemoteEvents > 0 then confidence = confidence + 20 end
-    if ws.Agents.LocalPlayer then confidence = confidence + 20 end
-    if confidence < 40 then RAE_SetPhase("DORMANT"); return false end
-
-    local cards = CardGenesis.Generate(ws)
-    RAE_State.Cards = cards
-    local idx = 1; RAE_State._IndexMap = {}
-    for _, card in ipairs(cards) do RAE_State._IndexMap[idx] = card; idx = idx + 1 end
+    local ws  = WorldState.Capture()
+    local sig = StateSignature.Compute(ws)
+    RAE_State.WorldState = ws; RAE_State.CurrentSig = sig
+    LWM.Record(ws, sig)
+    local confidence=0
+    if ws.ObjectGraph.TotalInstances>0 then confidence=confidence+20 end
+    if ws.SimConfig.Gravity then confidence=confidence+20 end
+    if #ws.Physics.SimulatedAssemblies>0 then confidence=confidence+20 end
+    if #ws.Latent.RemoteEvents>0 then confidence=confidence+20 end
+    if ws.Agents.LocalPlayer then confidence=confidence+20 end
+    if confidence<40 then RAE_SetPhase("DORMANT"); return false end
+    local cards=CardGenesis.Generate(ws)
+    RAE_State.Cards=cards
+    local idx=1; RAE_State._IndexMap={}
+    for _,card in ipairs(cards) do RAE_State._IndexMap[idx]=card; idx=idx+1 end
     RAE_SetPhase("READY")
     if RAE_Callbacks.OnScan then RAE_Callbacks.OnScan(ws, cards) end
     return true
 end
-
 local function RAE_Plan()
     if RAE_State.Phase~="READY" then return nil end
     local plan=Planner.Plan(RAE_State.Cards, RAE_State.LastLog, Intel.GetMemory().CardHistory)
@@ -2133,54 +1472,41 @@ local function RAE_Plan()
     if plan and #plan>0 then
         RAE_State.SelectedCards={}
         for _,step in ipairs(plan) do table.insert(RAE_State.SelectedCards, step.Card) end
-        -- Pre-commit prediction: estimate chain outcome BEFORE executing
-        local prediction = Planner.PredictChain(RAE_State.SelectedCards, RAE_State.WorldState)
-        RAE_State.LastPrediction = prediction
         if RAE_Callbacks.OnPlan then RAE_Callbacks.OnPlan(plan) end
     end
     return plan
 end
-
 local function RAE_Commit()
-    if #RAE_State.SelectedCards == 0 then return nil end
+    if #RAE_State.SelectedCards==0 then return nil end
     RAE_SetPhase("EXECUTING")
-    local wsBefore = RAE_State.WorldState
-    local stateSig = ETM_StateSig(wsBefore)
-    local log = Executor.Execute(RAE_State.SelectedCards, RAE_State.Cards, wsBefore)
-    local wsAfter = WorldState.Capture()
-
-    -- Feed all learned models
-    for _, r in ipairs(log) do
+    local wsBefore=RAE_State.WorldState; local sigBefore=RAE_State.CurrentSig
+    local log=Executor.Execute(RAE_State.SelectedCards, RAE_State.Cards, wsBefore)
+    local wsAfter=WorldState.Capture(); local sigAfter=StateSignature.Compute(wsAfter)
+    for _,r in ipairs(log) do
         DynamicsModel.Record(r.Step.ID, wsBefore, wsAfter, r.Success)
-        ETM.Record(r.Step.ID, stateSig, r.Success)
+        ETM.Update(r.Step.ID, sigBefore, r.Success)
     end
-    CDG.Update(log, wsBefore, wsAfter)
-
-    RAE_State.LastLog = log
-    RAE_State.CycleCount = RAE_State.CycleCount + 1
-    RAE_State.SelectedCards = {}
+    CDG.UpdateFromLog(log)
+    LWM.Record(wsAfter, sigAfter)
+    RAE_State.LastLog=log; RAE_State.CycleCount=RAE_State.CycleCount+1
+    RAE_State.SelectedCards={}; RAE_State.CurrentSig=sigAfter
     Intel.ProcessFeedback(log, RAE_State.Cards)
     TransitionModel.Update(log)
     ValueSystem.AdaptWeights(log, RAE_State.Cards)
-
-    -- Persist accumulated knowledge
-    SessionSave()
-
+    SaveSession()
     RAE_SetPhase("COMPLETE"); RAE_SetPhase("READY")
     if RAE_Callbacks.OnCommit then RAE_Callbacks.OnCommit(log) end
     return log
 end
 
 -- ============================================================
--- UI ROOT
+-- UI ROOT / WINDOW
 -- ============================================================
 local screenGui = mk("ScreenGui", {
     Name="PaperClayUI", ResetOnSpawn=false, IgnoreGuiInset=true,
     ZIndexBehavior=Enum.ZIndexBehavior.Sibling, Parent=playerGui,
 })
 local root = mk("Frame", { Name="Root", BackgroundTransparency=1, Size=UDim2.new(1,0,1,0), Parent=screenGui })
-
--- ── Window ───────────────────────────────────────────────────
 local window = mk("Frame", {
     Name="Window", BackgroundColor3=Color3.fromRGB(250,247,242), BorderSizePixel=0,
     AnchorPoint=Vector2.new(0.5,0.5), Position=UDim2.new(0.5,0,0.5,0), Size=UDim2.new(0,960,0,580),
@@ -2188,7 +1514,9 @@ local window = mk("Frame", {
 })
 addCorner(window, UDim.new(0,18)); addStroke(window,1,0.22); addShadow(window,10)
 mk("UISizeConstraint", {MinSize=Vector2.new(720,440),MaxSize=Vector2.new(1200,820),Parent=window})
-mk("UIGradient", {Rotation=90,Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(252,249,245)),ColorSequenceKeypoint.new(1,Color3.fromRGB(246,241,234))}),Parent=window})
+mk("UIGradient", {Rotation=90,Color=ColorSequence.new({
+    ColorSequenceKeypoint.new(0,Color3.fromRGB(252,249,245)),
+    ColorSequenceKeypoint.new(1,Color3.fromRGB(246,241,234))}),Parent=window})
 
 -- ── Notification Engine ──────────────────────────────────────
 local notifContainer = mk("Frame", {
@@ -2196,7 +1524,8 @@ local notifContainer = mk("Frame", {
     AnchorPoint=Vector2.new(1,0), Position=UDim2.new(1,-16,0,64),
     Size=UDim2.new(0,260,1,-80), ZIndex=100, Parent=window,
 })
-mk("UIListLayout", {FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Right,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,10),Parent=notifContainer})
+mk("UIListLayout", {FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Right,
+    VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,10),Parent=notifContainer})
 
 local function sendNotification(msg, nType)
     local bgColor=Color3.fromRGB(246,242,236); local strokeColor=Color3.fromRGB(180,180,180); local icon="ℹ"
@@ -2220,10 +1549,9 @@ local function sendNotification(msg, nType)
     end)
 end
 
--- ── RAE Phase → Notification (suppressed in silent/autonomous mode) ──
 RAE_Callbacks.OnPhase = function(phase)
     if RAE_SilentMode then return end
-    if phase=="SCANNING" then sendNotification("RAE: Scanning WorldState...", "Info")
+    if phase=="SCANNING"  then sendNotification("RAE: Scanning WorldState...", "Info")
     elseif phase=="READY" then sendNotification("RAE: Ready ("..#RAE_State.Cards.." cards)", "Success")
     elseif phase=="EXECUTING" then sendNotification("RAE: Executing chain...", "Info") end
 end
@@ -2238,7 +1566,7 @@ local bcClose=mk("TextButton",{Text="✕",Font=Enum.Font.GothamBold,TextSize=14,
 bcClose.MouseButton1Click:Connect(function() clickSound(); bytecodeViewer.Visible=false end)
 local bcScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(240,238,235),BorderSizePixel=0,Position=UDim2.new(0,16,0,40),Size=UDim2.new(1,-32,1,-56),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=6,Parent=bcWindow})
 addCorner(bcScroll,UDim.new(0,8)); addStroke(bcScroll,1,0.3)
-local bcText=mk("TextBox",{Text="",Font=Enum.Font.RobotoMono,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,-16,0,0),AutomaticSize=Enum.AutomaticSize.Y,Position=UDim2.new(0,8,0,8),ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=bcScroll})
+local bcText=mk("TextBox",{Text="",Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,-16,0,0),AutomaticSize=Enum.AutomaticSize.Y,Position=UDim2.new(0,8,0,8),ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=bcScroll})
 local function displayDecompiledScript(targetScript)
     if not targetScript then return end
     bcTitle.Text=" Bytecode: "..targetScript.Name; bcText.Text="Ripping bytecode..."; bytecodeViewer.Visible=true
@@ -2248,7 +1576,7 @@ local function displayDecompiledScript(targetScript)
     end)
 end
 
--- ── UI Components ─────────────────────────────────────────────
+-- ── UI Component Factories ────────────────────────────────────
 local function makeButton(parent, text, size, iconText)
     local btn=mk("TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.fromRGB(246,242,236),BorderSizePixel=0,Size=size or UDim2.new(0,160,0,40),Font=Enum.Font.GothamSemibold,Text="",TextSize=14,Parent=parent})
     addCorner(btn,UDim.new(0,12)); addStroke(btn,1,0.25)
@@ -2259,7 +1587,6 @@ local function makeButton(parent, text, size, iconText)
     hookHover(btn,btn.BackgroundColor3,Color3.fromRGB(252,249,244),0.25,0.1)
     return {Button=btn,Label=label,Icon=icon}
 end
-
 local function makeSection(parent, titleText)
     local card=mk("Frame",{BackgroundColor3=Color3.fromRGB(247,243,237),BorderSizePixel=0,Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=parent})
     addCorner(card,UDim.new(0,14)); addStroke(card,1,0.35)
@@ -2269,7 +1596,6 @@ local function makeSection(parent, titleText)
     mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Left,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,10),Parent=holder})
     return card, holder
 end
-
 local function makeToggle(parent, text, defaultOn, onChanged)
     local row=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,34),Parent=parent})
     mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text=text or "Toggle",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-70,1,0),Parent=row})
@@ -2285,7 +1611,6 @@ local function makeToggle(parent, text, defaultOn, onChanged)
     render(); btn.MouseButton1Click:Connect(function() clickSound(); state=not state; render(); if onChanged then onChanged(state) end end)
     return {Root=row, Set=function(v) state=(v==true); render(); if onChanged then onChanged(state) end end, Get=function() return state end}
 end
-
 local function makeSlider(parent, text, min, max, defaultValue, onChanged)
     min=tonumber(min) or 0; max=tonumber(max) or 100; defaultValue=tonumber(defaultValue) or min
     local row=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,52),Parent=parent})
@@ -2316,53 +1641,22 @@ local function makeSlider(parent, text, min, max, defaultValue, onChanged)
     return {Root=row, Set=function(v) setValue(v,true) end, Get=function() return value end}
 end
 
-local function makeRemoteInput(parent, placeholderText)
-    local container=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,32),AutomaticSize=Enum.AutomaticSize.Y,Parent=parent})
-    local tb=mk("TextBox",{Text="",PlaceholderText=placeholderText,BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,-40,0,32),Font=Enum.Font.GothamMedium,TextSize=14,Parent=container})
-    addCorner(tb,UDim.new(0,8)); addStroke(tb,1,0.3)
-    local ddBtn=mk("TextButton",{Text="▼",BackgroundColor3=Color3.fromRGB(240,235,230),Size=UDim2.new(0,36,0,32),Position=UDim2.new(1,-36,0,0),Font=Enum.Font.GothamBold,TextColor3=Color3.fromRGB(100,100,100),TextSize=14,Parent=container})
-    addCorner(ddBtn,UDim.new(0,8)); addStroke(ddBtn,1,0.3)
-    local listHolder=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(250,247,242),BorderSizePixel=0,Size=UDim2.new(1,0,0,140),Position=UDim2.new(0,0,0,36),AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.new(0,0,0,0),ScrollBarThickness=4,Visible=false,ZIndex=5,Parent=container})
-    addCorner(listHolder,UDim.new(0,8)); addStroke(listHolder,1,0.4)
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=listHolder})
-    mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),Parent=listHolder})
-    local isOpen=false
-    ddBtn.MouseButton1Click:Connect(function()
-        clickSound(); isOpen=not isOpen; listHolder.Visible=isOpen; ddBtn.Text=isOpen and "▲" or "▼"
-        if isOpen then
-            listHolder:ClearAllChildren()
-            mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=listHolder})
-            mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),Parent=listHolder})
-            local fc=0
-            for _,rootObj in ipairs({ReplicatedStorage,Workspace}) do
-                for _,v in ipairs(rootObj:GetDescendants()) do
-                    if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-                        fc=fc+1
-                        local rb=mk("TextButton",{Text="  "..v.Name.." ("..v.ClassName:sub(7)..")",BackgroundTransparency=1,Size=UDim2.new(1,0,0,26),Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.fromRGB(60,60,60),TextXAlignment=Enum.TextXAlignment.Left,ZIndex=6,Parent=listHolder})
-                        hookHover(rb,Color3.fromRGB(250,247,242),Color3.fromRGB(230,225,220),1,1)
-                        rb.MouseButton1Click:Connect(function() clickSound(); tb.Text=v.Name; isOpen=false; listHolder.Visible=false; ddBtn.Text="▼" end)
-                    end
-                end
-            end
-            if fc==0 then mk("TextLabel",{Text="No remotes found.",BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=listHolder}) end
-        end
-    end)
-    return tb
-end
-
 -- ── Character Helpers ─────────────────────────────────────────
 local function getCharacter() return player.Character or player.CharacterAdded:Wait() end
 local function getHumanoid() local ch=getCharacter(); return ch:FindFirstChildOfClass("Humanoid") or ch:WaitForChild("Humanoid",5) end
 local function applyHumanoidSetting(field, value) local hum=getHumanoid(); if hum then pcall(function() hum[field]=value end) end end
 local persistent={WalkSpeed=16,JumpPower=50,AutoJumpEnabled=true,FOV=70,MinZoom=player.CameraMinZoomDistance,MaxZoom=player.CameraMaxZoomDistance}
-player.CharacterAdded:Connect(function() task.wait(0.25); applyHumanoidSetting("WalkSpeed",persistent.WalkSpeed); applyHumanoidSetting("JumpPower",persistent.JumpPower); applyHumanoidSetting("AutoJumpEnabled",persistent.AutoJumpEnabled) end)
+player.CharacterAdded:Connect(function()
+    task.wait(0.25); applyHumanoidSetting("WalkSpeed",persistent.WalkSpeed)
+    applyHumanoidSetting("JumpPower",persistent.JumpPower); applyHumanoidSetting("AutoJumpEnabled",persistent.AutoJumpEnabled)
+end)
 local blur=Lighting:FindFirstChild("PaperClay_Blur") :: BlurEffect?
 if not blur then blur=mk("BlurEffect",{Name="PaperClay_Blur",Size=0,Parent=Lighting}) end
 
 -- ── Topbar ────────────────────────────────────────────────────
 local topbar=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,56),Parent=window})
-mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.new(0,18,0,0),Size=UDim2.new(1,-260,1,0),Font=Enum.Font.GothamBold,Text="Paper & Clay  ⊕  RAE",TextColor3=Color3.fromRGB(46,42,38),TextSize=16,TextXAlignment=Enum.TextXAlignment.Left,Parent=topbar})
-mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.new(0,18,0,30),Size=UDim2.new(1,-260,0,20),Font=Enum.Font.GothamMedium,Text="Soft UI · Recursive Autonomous Engine · 6-axis value system",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=topbar})
+mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.new(0,18,0,0),Size=UDim2.new(1,-260,1,0),Font=Enum.Font.GothamBold,Text="Paper & Clay  ⊕  RAE  v2",TextColor3=Color3.fromRGB(46,42,38),TextSize=16,TextXAlignment=Enum.TextXAlignment.Left,Parent=topbar})
+mk("TextLabel",{BackgroundTransparency=1,Position=UDim2.new(0,18,0,30),Size=UDim2.new(1,-260,0,20),Font=Enum.Font.GothamMedium,Text="Soft UI · Recursive Autonomous Engine · Deep Intelligence Edition",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=topbar})
 local controls=mk("Frame",{BackgroundTransparency=1,AnchorPoint=Vector2.new(1,0),Position=UDim2.new(1,-14,0,12),Size=UDim2.new(0,220,0,32),Parent=topbar})
 mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,HorizontalAlignment=Enum.HorizontalAlignment.Right,VerticalAlignment=Enum.VerticalAlignment.Center,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,10),Parent=controls})
 local function makeCtrl(text,bg)
@@ -2371,26 +1665,22 @@ local function makeCtrl(text,bg)
 end
 local btnMin=makeCtrl("—",Color3.fromRGB(244,239,232)); local btnClose=makeCtrl("✕",Color3.fromRGB(244,233,228))
 
--- ── Body + Sidebar + Pages ────────────────────────────────────
+-- ── Body / Sidebar / Pages ────────────────────────────────────
 local body=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,0,0,56),Size=UDim2.new(1,0,1,-56),Parent=window})
 local bodyRow=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,16,0,12),Size=UDim2.new(1,-32,1,-24),Parent=body})
 mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,HorizontalAlignment=Enum.HorizontalAlignment.Left,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,14),Parent=bodyRow})
-
 local sidebar=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,239,231),BorderSizePixel=0,Size=UDim2.new(0,200,1,0),Parent=bodyRow})
 addCorner(sidebar,UDim.new(0,16)); addStroke(sidebar,1,0.32)
 mk("UIPadding",{PaddingTop=UDim.new(0,14),PaddingLeft=UDim.new(0,14),PaddingRight=UDim.new(0,14),PaddingBottom=UDim.new(0,14),Parent=sidebar})
 mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Tabs",TextColor3=Color3.fromRGB(64,58,52),TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sidebar})
 local navHolder=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,28),Parent=sidebar})
 mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8),Parent=navHolder})
-
 local contentCard=mk("Frame",{BackgroundColor3=Color3.fromRGB(250,247,242),BorderSizePixel=0,Size=UDim2.new(1,-214,1,0),Parent=bodyRow})
 addCorner(contentCard,UDim.new(0,16)); addStroke(contentCard,1,0.25); addShadow(contentCard,10)
 mk("UIPadding",{PaddingTop=UDim.new(0,16),PaddingLeft=UDim.new(0,16),PaddingRight=UDim.new(0,16),PaddingBottom=UDim.new(0,16),Parent=contentCard})
-
 local headerRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,52),Parent=contentCard})
 local panelTitle=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Overview",TextColor3=Color3.fromRGB(46,42,38),TextSize=16,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(0.6,0,1,0),Parent=headerRow})
 mk("Frame",{BackgroundColor3=Color3.fromRGB(225,218,209),BorderSizePixel=0,Size=UDim2.new(1,0,0,1),BackgroundTransparency=0.25,Parent=contentCard})
-
 local pagesFolder=mk("Folder",{Name="Pages",Parent=contentCard})
 local function makePage(name)
     local scroller=mk("ScrollingFrame",{BackgroundTransparency=1,BorderSizePixel=0,Position=UDim2.new(0,0,0,60),Size=UDim2.new(1,0,1,-60),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=6,ScrollingDirection=Enum.ScrollingDirection.Y,Visible=false,Parent=pagesFolder})
@@ -2398,40 +1688,49 @@ local function makePage(name)
     return scroller
 end
 
-local pageOverview   = makePage("Overview")
-local pagePlayer     = makePage("Player")
-local pageCamera     = makePage("Camera")
-local pageWorld      = makePage("World")
-local pageDiscovery  = makePage("Discovery")
-local pageRAE        = makePage("RAE")
-local pageRecursive  = makePage("Recursive")
-local pageBridge     = makePage("Bridge")
-local pageUtils      = makePage("Utilities")
-local pageAbout      = makePage("About")
+local pageOverview  = makePage("Overview")
+local pagePlayer    = makePage("Player")
+local pageCamera    = makePage("Camera")
+local pageWorld     = makePage("World")
+local pageDiscovery = makePage("Discovery")
+local pageRAE       = makePage("RAE")
+local pageRecursive = makePage("Recursive")
+local pageBridge    = makePage("Bridge")
+local pageAnalytics = makePage("Analytics")
+local pageChain     = makePage("Chain")
+local pageUtils     = makePage("Utilities")
+local pageAbout     = makePage("About")
 
 -- ============================================================
 -- PAGE: Overview
 -- ============================================================
 do
     local _, s1=makeSection(pageOverview,"Welcome")
-    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Welcome to Paper & Clay + RAE.\n\nRAE (Recursive Autonomous Engine) runs as a live backend — use the RAE tab to scan, plan, and execute. The Recursive tab shows cognitive state in real time.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,80),Parent=s1})
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Welcome to Paper & Clay + RAE v2 — Deep Intelligence Edition.\n\nNew in v2: LWM (Living World Model ring buffer), ETM (Empirical Transition Model with convergence), CDG (Causal Dependency Graph), risk-adjusted MCTS planning, session persistence via _G, and Brier Score calibration tracking. See the Analytics tab for live intelligence dashboards.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,96),Parent=s1})
     local _, s2=makeSection(pageOverview,"Quick Actions")
     local b1=makeButton(s2,"Reset Character",UDim2.new(0,200,0,40),"↺")
     b1.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(b1.Button); local hum=getHumanoid(); if hum then hum.Health=0 end end)
     local b2=makeButton(s2,"Center Window",UDim2.new(0,200,0,40),"◎")
     b2.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(b2.Button); window.Position=UDim2.new(0.5,0,0.5,0) end)
-    local _, s3=makeSection(pageOverview,"Status")
-    local statusLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Loading...",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=s3})
+    local _, s3=makeSection(pageOverview,"Live Status")
+    local statusLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="Loading...",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,108),Parent=s3})
     task.spawn(function()
         while statusLabel and statusLabel.Parent do
-            local char = player.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local cam = Workspace.CurrentCamera
-            statusLabel.Text = string.format(
-                "WalkSpeed: %d   JumpPower: %d   FOV: %d\nRAE Phase: %s   Cycle: %d   Cards: %d",
+            local char=player.Character; local hum=char and char:FindFirstChildOfClass("Humanoid")
+            local cam=Workspace.CurrentCamera
+            local cmap=ETM.GetConvergenceMap(); local gcov=cmap["_global"] or {total=0,converged=0,rate=0}
+            local brier=ComputeBrierScore()
+            statusLabel.Text=string.format(
+                "WalkSpeed: %d   JumpPower: %d   FOV: %d\nRAE Phase: %s   Cycle: %d   Cards: %d\nSig: %s\nLWM: %d snapshots   ETM: %d/%d conv (%.0f%%)\nBrier: %s   CDG edges: %d",
                 hum and hum.WalkSpeed or 0, hum and hum.JumpPower or 0,
                 cam and cam.FieldOfView or persistent.FOV,
-                RAE_State.Phase, RAE_State.CycleCount, #RAE_State.Cards)
+                RAE_State.Phase, RAE_State.CycleCount, #RAE_State.Cards,
+                RAE_State.CurrentSig,
+                LWM.GetSnapshotCount(), gcov.converged, gcov.total, gcov.rate*100,
+                brier and string.format("%.4f",brier) or "N/A",
+                #CDG.GetStrongEdges(0.1))
             task.wait(0.5)
         end
     end)
@@ -2462,16 +1761,13 @@ do
     makeSlider(s,"Max Zoom",5,200,persistent.MaxZoom,function(v) persistent.MaxZoom=v; pcall(function() player.CameraMaxZoomDistance=v end) end)
     local _, s2=makeSection(pageCamera,"Convenience")
     local recenter=makeButton(s2,"Recenter Camera",UDim2.new(0,320,0,40),"◎")
-    recenter.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(recenter.Button); local ch=getCharacter(); local hrp=ch and ch:FindFirstChild("HumanoidRootPart"); local cam=Workspace.CurrentCamera; if hrp and cam then cam.CFrame=CFrame.new(cam.CFrame.Position,cam.CFrame.Position+hrp.CFrame.LookVector) end end)
-    -- FOV enforcement: only re-apply if it drifts, checked at 4Hz not 60Hz
+    recenter.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(recenter.Button)
+        local ch=getCharacter(); local hrp=ch and ch:FindFirstChild("HumanoidRootPart"); local cam=Workspace.CurrentCamera
+        if hrp and cam then cam.CFrame=CFrame.new(cam.CFrame.Position,cam.CFrame.Position+hrp.CFrame.LookVector) end
+    end)
     task.spawn(function()
-        while true do
-            task.wait(0.25)
-            local cam = Workspace.CurrentCamera
-            if cam and math.abs(cam.FieldOfView - persistent.FOV) > 0.5 then
-                cam.FieldOfView = persistent.FOV
-            end
-        end
+        while true do task.wait(0.25); local cam=Workspace.CurrentCamera; if cam and math.abs(cam.FieldOfView-persistent.FOV)>0.5 then cam.FieldOfView=persistent.FOV end end
     end)
 end
 
@@ -2487,18 +1783,16 @@ do
 end
 
 -- ============================================================
--- PAGE: Discovery (Remote Scanner → feeds RAE)
+-- PAGE: Discovery
 -- ============================================================
 do
     local _, sScan=makeSection(pageDiscovery,"Remote Endpoint Scanner")
-    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Scans for RemoteEvents and RemoteFunctions. Discovered remotes are automatically fed into RAE's Replication channel on next scan.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sScan})
-    local scanBtn=makeButton(sScan,"Scan All Remotes",UDim2.new(1,0,0,40),"🔍")
-    scanBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Scans for RemoteEvents and RemoteFunctions. Discovered remotes feed into RAE's Replication channel on next scan.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sScan})
+    local scanBtn=makeButton(sScan,"Scan All Remotes",UDim2.new(1,0,0,40),"🔍"); scanBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
     local remoteScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,280),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sScan})
     addCorner(remoteScroll,UDim.new(0,8)); addStroke(remoteScroll,1,0.3)
     mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),Parent=remoteScroll})
     mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=remoteScroll})
-
     scanBtn.Button.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(scanBtn.Button)
         remoteScroll:ClearAllChildren()
@@ -2513,7 +1807,7 @@ do
                         local card=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,50),Parent=remoteScroll})
                         addCorner(card,UDim.new(0,6)); addStroke(card,1,0.2)
                         mk("TextLabel",{Text=v.Name,Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,10,0,8),Size=UDim2.new(1,-130,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=card})
-                        mk("TextLabel",{Text=v.ClassName.." | "..v:GetFullName(),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,10,0,26),Size=UDim2.new(1,-130,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=card})
+                        mk("TextLabel",{Text=v.ClassName.." | "..v:GetFullName(),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,10,0,26),Size=UDim2.new(1,-130,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=card})
                         local fireBtn=mk("TextButton",{Text="Fire",Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=Color3.fromRGB(230,240,230),Size=UDim2.new(0,80,0,30),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-10,0.5,0),Parent=card})
                         addCorner(fireBtn,UDim.new(0,6))
                         fireBtn.MouseButton1Click:Connect(function()
@@ -2534,17 +1828,22 @@ do
             sendNotification("Scan complete. Found "..found.." remotes.", "Success")
         end)
     end)
-
-    -- Trust vector scanner (from original Recursive tab — kept here, non-destructive only)
     local _, sTV=makeSection(pageDiscovery,"Trust Vector Analysis")
-    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Classifies remotes by semantic keyword categories. Results are informational — discovered patterns are reflected in RAE's card system.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sTV})
-    local tvBtn=makeButton(sTV,"Classify Remotes",UDim2.new(1,0,0,40),"🔎")
-    tvBtn.Button.BackgroundColor3=Color3.fromRGB(220,235,255)
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Classifies remotes by semantic keyword categories. Patterns are reflected in RAE's card system.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sTV})
+    local tvBtn=makeButton(sTV,"Classify Remotes",UDim2.new(1,0,0,40),"🔎"); tvBtn.Button.BackgroundColor3=Color3.fromRGB(220,235,255)
     local tvScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,200),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sTV})
     addCorner(tvScroll,UDim.new(0,8)); addStroke(tvScroll,1,0.3)
     mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=tvScroll})
     mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=tvScroll})
-
+    local trustVectors={
+        Economy={"addcoin","addcash","money","currency","damage","heal","cost","gems","coins","credits","balance","gold"},
+        State={"isadmin","isvip","isdead","stunned","ragdoll","god","invincible"},
+        Time={"daily","claim","reward","cooldown","timer","stamp","elapsed"},
+        Physics={"velocity","force","impulse","constraint","mass","size","scale"},
+        Combat={"hit","damage","attack","shoot","projectile","bullet","strike","melee"},
+        Movement={"teleport","tp","move","position","cframe","warp","dash"},
+        DataValidation={"submit","update","equip","hit","chat","msg"},
+    }
     tvBtn.Button.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(tvBtn.Button)
         tvScroll:ClearAllChildren()
@@ -2555,13 +1854,18 @@ do
             for _,rootObj in ipairs({ReplicatedStorage,Workspace}) do
                 for _,v in ipairs(rootObj:GetDescendants()) do
                     if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
-                        local category = ClassifyRemote(v.Name)
-                        if category ~= "General" then
-                            found=found+1
-                            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Parent=tvScroll})
-                            addCorner(row,UDim.new(0,6)); addStroke(row,1,0.25)
-                            mk("TextLabel",{Text=string.format("[%s] %s",category,v.Name),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-16,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
-                            mk("TextLabel",{Text=v:GetFullName(),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,8,0,20),Size=UDim2.new(1,-16,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=row})
+                        local nl=v.Name:lower()
+                        for vType,patterns in pairs(trustVectors) do
+                            for _,pat in ipairs(patterns) do
+                                if nl:find(pat) then
+                                    found=found+1
+                                    local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Parent=tvScroll})
+                                    addCorner(row,UDim.new(0,6)); addStroke(row,1,0.25)
+                                    mk("TextLabel",{Text=string.format("[%s] %s",vType,v.Name),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-16,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+                                    mk("TextLabel",{Text=v:GetFullName(),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(150,150,150),Position=UDim2.new(0,8,0,20),Size=UDim2.new(1,-16,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=row})
+                                    break
+                                end
+                            end
                         end
                     end
                 end
@@ -2576,11 +1880,557 @@ end
 -- PAGE: RAE (Main Control)
 -- ============================================================
 do
-    -- WorldState summary
-    local _, sWS=makeSection(pageRAE,"WorldState(T)")
-    local wsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.RobotoMono,Text="No scan yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,120),Parent=sWS})
+    local _, sWS = makeSection(pageRAE, "WorldState(T)")
+    local wsLabel = mk("TextLabel", {
+        BackgroundTransparency=1, Font=Enum.Font.Code, Text="No scan yet.",
+        TextColor3=Color3.fromRGB(72,66,60), TextSize=11, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,150), Parent=sWS
+    })
 
-    -- Controls
+    local _, sCtrl = makeSection(pageRAE, "Controls")
+    local ctrlGrid = mk("Frame", {BackgroundTransparency=1, Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=sCtrl})
+    mk("UIGridLayout", {CellSize=UDim2.new(0.48,0,0,44), CellPadding=UDim2.new(0.04,0,0,10), SortOrder=Enum.SortOrder.LayoutOrder, Parent=ctrlGrid})
+
+    local function makeRAEBtn(label, icon, color, fn)
+        local b = makeButton(ctrlGrid, label, UDim2.new(1,0,0,44), icon)
+        b.Button.BackgroundColor3 = color
+        hookHover(b.Button, color, Color3.fromRGB(255,252,248), 0.25, 0.1)
+        b.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(b.Button); fn() end)
+        return b
+    end
+
+    makeRAEBtn("Scan", "🔍", Color3.fromRGB(220,230,255), function()
+        task.spawn(function() RAE_SilentMode=false; RAE_Scan() end)
+    end)
+    makeRAEBtn("Plan (MCTS)", "🧠", Color3.fromRGB(220,255,230), function()
+        task.spawn(function()
+            RAE_SilentMode=false
+            local plan = RAE_Plan()
+            if plan and #plan>0 then sendNotification("Plan ready: "..#plan.." steps.", "Success")
+            else sendNotification("No viable plan generated.", "Warning") end
+        end)
+    end)
+    makeRAEBtn("Commit", "▶", Color3.fromRGB(230,255,230), function()
+        task.spawn(function()
+            if #RAE_State.SelectedCards==0 then sendNotification("Nothing selected. Run Plan first.", "Warning"); return end
+            RAE_SilentMode=false
+            local log = RAE_Commit()
+            if log then
+                local p=0; for _,r in ipairs(log) do if r.Success then p=p+1 end end
+                sendNotification(string.format("Cycle #%d: %d/%d passed.", RAE_State.CycleCount, p, #log), p==#log and "Success" or "Warning")
+            end
+        end)
+    end)
+    makeRAEBtn("Manual Rescan", "↺", Color3.fromRGB(245,240,230), function()
+        task.spawn(function()
+            RAE_SilentMode=false
+            sendNotification("RAE: Manual rescan started...", "Info")
+            if RAE_Scan() then
+                task.wait(0.5); local plan=RAE_Plan()
+                if plan and #plan>0 then
+                    task.wait(0.5); local log=RAE_Commit()
+                    if log then
+                        local p=0; for _,r in ipairs(log) do if r.Success then p=p+1 end end
+                        sendNotification(string.format("Rescan complete — %d cards, %d/%d passed.", #RAE_State.Cards, p, #log), p==#log and "Success" or "Warning")
+                    end
+                else sendNotification("Rescan complete. No plan generated.", "Info") end
+            else sendNotification("Rescan failed.", "Error") end
+        end)
+    end)
+
+    local _, sCards = makeSection(pageRAE, "Action Cards")
+    local cardScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(245,242,238), Size=UDim2.new(1,0,0,320),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sCards
+    })
+    addCorner(cardScroll, UDim.new(0,8)); addStroke(cardScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6), Parent=cardScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=cardScroll})
+
+    local function refreshCardBrowser()
+        cardScroll:ClearAllChildren()
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6), Parent=cardScroll})
+        mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=cardScroll})
+        if #RAE_State.Cards == 0 then
+            mk("TextLabel", {Text="No cards yet. Run Scan first.", BackgroundTransparency=1, Font=Enum.Font.GothamMedium, TextSize=12, TextColor3=Color3.fromRGB(150,150,150), Size=UDim2.new(1,0,0,24), Parent=cardScroll})
+            return
+        end
+        local currentSig = RAE_State.CurrentSig
+        for i, card in ipairs(RAE_State.Cards) do
+            local vs = ValueSystem.ScoreCard(card, RAE_State.Cards, Intel.GetMemory().CardHistory)
+            local etmProb, etmConv, etmStd = ETM.Predict(card.ID, currentSig)
+            local causalScore = CDG.GetCausalScore(card.ID)
+            local selected = false
+            for _, sc in ipairs(RAE_State.SelectedCards) do if sc.ID==card.ID then selected=true; break end end
+            local cf = mk("Frame", {
+                BackgroundColor3=selected and Color3.fromRGB(220,240,220) or Color3.fromRGB(255,255,255),
+                Size=UDim2.new(1,0,0,84), Parent=cardScroll
+            })
+            addCorner(cf, UDim.new(0,6)); addStroke(cf, 1, selected and 0.1 or 0.25)
+            mk("TextLabel", {Text=string.format("[%s] %s", card.Channel, card.Name), Font=Enum.Font.GothamBold, TextSize=12, TextColor3=Color3.fromRGB(50,50,50), Position=UDim2.new(0,10,0,6), Size=UDim2.new(1,-120,0,14), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cf})
+            mk("TextLabel", {Text=string.format("Risk:%s  Conf:%d%%  Val:%.2f", card.Metadata.Risk or "N/A", card.Metadata.Confidence or 0, vs.Total), Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(100,100,100), Position=UDim2.new(0,10,0,24), Size=UDim2.new(1,-120,0,12), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cf})
+            mk("TextLabel", {
+                Text=string.format("ETM p=%.2f σ=%.3f %s | CDG=%.3f", etmProb, etmStd, etmConv and "✓conv" or "~est", causalScore),
+                Font=Enum.Font.Code, TextSize=10,
+                TextColor3=etmConv and Color3.fromRGB(60,140,60) or Color3.fromRGB(120,100,80),
+                Position=UDim2.new(0,10,0,40), Size=UDim2.new(1,-120,0,12),
+                TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cf
+            })
+            mk("TextLabel", {Text=card.Description, Font=Enum.Font.GothamMedium, TextSize=10, TextColor3=Color3.fromRGB(130,120,110), Position=UDim2.new(0,10,0,56), Size=UDim2.new(1,-120,0,12), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, TextTruncate=Enum.TextTruncate.AtEnd, Parent=cf})
+            mk("TextLabel", {Text=string.format("Born: %.1fs ago", os.clock() - (card.Born or 0)), Font=Enum.Font.Code, TextSize=9, TextColor3=Color3.fromRGB(170,160,150), Position=UDim2.new(0,10,0,70), Size=UDim2.new(1,-120,0,10), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cf})
+            local selBtn = mk("TextButton", {
+                Text=selected and "✓ Sel" or "Select", Font=Enum.Font.GothamBold, TextSize=11,
+                BackgroundColor3=selected and Color3.fromRGB(180,230,180) or Color3.fromRGB(230,240,230),
+                Size=UDim2.new(0,80,0,30), AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,-10,0.5,0), Parent=cf
+            })
+            addCorner(selBtn, UDim.new(0,6))
+            selBtn.MouseButton1Click:Connect(function()
+                clickSound(); pulseClick(selBtn)
+                if selected then
+                    local ns={}; for _,sc in ipairs(RAE_State.SelectedCards) do if sc.ID~=card.ID then table.insert(ns,sc) end end
+                    RAE_State.SelectedCards=ns
+                else table.insert(RAE_State.SelectedCards, card) end
+                refreshCardBrowser()
+            end)
+        end
+    end
+
+    RAE_Callbacks.OnScan = function(ws, cards)
+        local totalFires = 0
+        for _, r in ipairs(ws.Latent.RemoteEvents) do totalFires = totalFires + r.FireCount end
+        local matchVarCount = 0; for _ in pairs(ws.Latent.MatchState) do matchVarCount = matchVarCount + 1 end
+        wsLabel.Text = string.format(
+            "T: %.2f  |  Sig: %s\nInstances: %d  |  Scripts: %d  |  Gravity: %.1f\nPhysics: %d  |  ClientOwned: %d  |  ServerOwned: %d\nRemotes: %d  |  Fns: %d  |  ObsFires: %d\nValue Objs: %d  |  Match Vars: %d  |  Agents: %d\nStreaming: %s  |  LWM Snaps: %d  |  CDG Edges: %d",
+            ws.T, RAE_State.CurrentSig,
+            ws.ObjectGraph.TotalInstances, ws.ObjectGraph.ScriptCount, ws.SimConfig.Gravity,
+            #ws.Physics.SimulatedAssemblies, #ws.Physics.ClientOwned, #ws.Physics.ServerOwned,
+            #ws.Latent.RemoteEvents, #ws.Latent.RemoteFunctions, totalFires,
+            #ws.Latent.ValueObjects, matchVarCount, 1+#ws.Agents.OtherPlayers,
+            tostring(ws.SimConfig.StreamingEnabled), LWM.GetSnapshotCount(), #CDG.GetStrongEdges(0.1))
+        refreshCardBrowser()
+    end
+    RAE_Callbacks.OnPlan   = function() refreshCardBrowser() end
+    RAE_Callbacks.OnCommit = function() refreshCardBrowser() end
+end
+
+-- ============================================================
+-- PAGE: Recursive (Cognitive Brain)
+-- ============================================================
+do
+    local _, sBrain = makeSection(pageRecursive, "Cognitive Brain (Thompson Sampling v3)")
+    mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
+        Text="Live cognitive state of RAE. Posteriors show Bayesian learning per card. Channel weights reflect cumulative success rates. Phase shifts show detected environment drift events. ETM convergence shows how many cards have reached reliable prediction (stddev < 0.08, n ≥ 10).",
+        TextColor3=Color3.fromRGB(92,84,76), TextSize=12, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,72), Parent=sBrain})
+
+    local refreshBtn = makeButton(sBrain, "Refresh State", UDim2.new(0,200,0,40), "↻")
+    refreshBtn.Button.BackgroundColor3 = Color3.fromRGB(220,220,255)
+
+    local stateScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(245,242,238), Size=UDim2.new(1,0,0,460),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sBrain
+    })
+    addCorner(stateScroll, UDim.new(0,8)); addStroke(stateScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6), Parent=stateScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=stateScroll})
+
+    local function refreshRecursive()
+        stateScroll:ClearAllChildren()
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6), Parent=stateScroll})
+        mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=stateScroll})
+        local mem = Intel.GetMemory()
+
+        -- Summary row
+        local cmap = ETM.GetConvergenceMap(); local gcov = cmap["_global"] or {total=0,converged=0,rate=0}
+        local brier = ComputeBrierScore()
+        local sumFrame = mk("Frame", {BackgroundColor3=Color3.fromRGB(240,250,240), Size=UDim2.new(1,0,0,68), Parent=stateScroll})
+        addCorner(sumFrame, UDim.new(0,6)); addStroke(sumFrame, 1, 0.2)
+        mk("TextLabel", {Text="INTELLIGENCE SUMMARY", Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(60,100,60), Position=UDim2.new(0,10,0,6), Size=UDim2.new(1,-20,0,14), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=sumFrame})
+        mk("TextLabel", {
+            Text=string.format("Cycles: %d  |  Overfit Streak: %d  |  Phase Shifts: %d\nETM Conv: %d/%d (%.0f%%)  |  Brier Score: %s  |  CDG Edges: %d",
+                mem.Cycles, mem.OverfitStreak, #mem.PhaseShifts,
+                gcov.converged, gcov.total, gcov.rate*100,
+                brier and string.format("%.4f",brier) or "N/A",
+                #CDG.GetStrongEdges(0.1)),
+            Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(50,50,50),
+            Position=UDim2.new(0,10,0,24), Size=UDim2.new(1,-20,0,36),
+            TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, TextWrapped=true, Parent=sumFrame
+        })
+
+        -- Channel weights with bar graphs
+        local cwFrame = mk("Frame", {BackgroundColor3=Color3.fromRGB(255,255,255), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=stateScroll})
+        addCorner(cwFrame, UDim.new(0,6)); addStroke(cwFrame, 1, 0.25)
+        mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), PaddingBottom=UDim.new(0,8), Parent=cwFrame})
+        mk("TextLabel", {Text="CHANNEL WEIGHTS", Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(80,60,40), Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cwFrame})
+        local cwHolder = mk("Frame", {BackgroundTransparency=1, Position=UDim2.new(0,0,0,22), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=cwFrame})
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=cwHolder})
+        for _, ch in ipairs({"Structural","Metabolic","Ownership","Replication","Latent","Agent","Network"}) do
+            local w = mem.ChannelWeights[ch] or 1.0
+            local pct = math.clamp((w - 0.2) / (2.0 - 0.2), 0, 1)
+            local row = mk("Frame", {BackgroundTransparency=1, Size=UDim2.new(1,0,0,20), Parent=cwHolder})
+            mk("TextLabel", {Text=ch, Font=Enum.Font.GothamMedium, TextSize=10, TextColor3=Color3.fromRGB(70,60,50), Size=UDim2.new(0,100,1,0), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=row})
+            local track = mk("Frame", {BackgroundColor3=Color3.fromRGB(235,228,218), BorderSizePixel=0, Position=UDim2.new(0,104,0,4), Size=UDim2.new(1,-170,0,12), Parent=row})
+            addCorner(track, UDim.new(0,6))
+            local fill = mk("Frame", {BackgroundColor3=w>=1.0 and Color3.fromRGB(120,180,120) or Color3.fromRGB(200,140,100), BorderSizePixel=0, Size=UDim2.new(pct,0,1,0), Parent=track})
+            addCorner(fill, UDim.new(0,6))
+            mk("TextLabel", {Text=string.format("%.3f", w), Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(80,70,60), AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,0,0.5,0), Size=UDim2.new(0,60,1,0), TextXAlignment=Enum.TextXAlignment.Right, BackgroundTransparency=1, Parent=row})
+        end
+
+        -- Value axis weights
+        local vwFrame = mk("Frame", {BackgroundColor3=Color3.fromRGB(255,255,255), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=stateScroll})
+        addCorner(vwFrame, UDim.new(0,6)); addStroke(vwFrame, 1, 0.25)
+        mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), PaddingBottom=UDim.new(0,8), Parent=vwFrame})
+        mk("TextLabel", {Text="VALUE AXIS WEIGHTS  (updates: "..ValueHistory.WeightUpdates..")", Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(60,60,100), Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=vwFrame})
+        local vwHolder = mk("Frame", {BackgroundTransparency=1, Position=UDim2.new(0,0,0,22), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=vwFrame})
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=vwHolder})
+        for axis, w in pairs(ValueWeights) do
+            local pct = math.clamp((w - 0.1) / (2.0 - 0.1), 0, 1)
+            local row = mk("Frame", {BackgroundTransparency=1, Size=UDim2.new(1,0,0,20), Parent=vwHolder})
+            mk("TextLabel", {Text=axis, Font=Enum.Font.GothamMedium, TextSize=10, TextColor3=Color3.fromRGB(60,60,80), Size=UDim2.new(0,120,1,0), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=row})
+            local track = mk("Frame", {BackgroundColor3=Color3.fromRGB(228,228,238), BorderSizePixel=0, Position=UDim2.new(0,124,0,4), Size=UDim2.new(1,-190,0,12), Parent=row})
+            addCorner(track, UDim.new(0,6))
+            local fill = mk("Frame", {BackgroundColor3=Color3.fromRGB(120,130,200), BorderSizePixel=0, Size=UDim2.new(pct,0,1,0), Parent=track})
+            addCorner(fill, UDim.new(0,6))
+            mk("TextLabel", {Text=string.format("%.3f", w), Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(60,60,80), AnchorPoint=Vector2.new(1,0.5), Position=UDim2.new(1,0,0.5,0), Size=UDim2.new(0,60,1,0), TextXAlignment=Enum.TextXAlignment.Right, BackgroundTransparency=1, Parent=row})
+        end
+
+        -- Card posteriors
+        local posteriorCount = 0
+        for _ in pairs(mem.CardHistory) do posteriorCount = posteriorCount + 1 end
+        if posteriorCount > 0 then
+            local cpFrame = mk("Frame", {BackgroundColor3=Color3.fromRGB(255,255,255), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=stateScroll})
+            addCorner(cpFrame, UDim.new(0,6)); addStroke(cpFrame, 1, 0.25)
+            mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), PaddingBottom=UDim.new(0,8), Parent=cpFrame})
+            mk("TextLabel", {Text=string.format("CARD POSTERIORS  (%d cards learned)", posteriorCount), Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(80,60,40), Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cpFrame})
+            local cpHolder = mk("Frame", {BackgroundTransparency=1, Position=UDim2.new(0,0,0,22), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=cpFrame})
+            mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,3), Parent=cpHolder})
+            local shown = 0
+            for id, h in pairs(mem.CardHistory) do
+                if shown >= 20 then break end
+                shown = shown + 1
+                local mean = h.alpha / (h.alpha + h.beta)
+                local row = mk("Frame", {BackgroundColor3=Color3.fromRGB(248,246,242), Size=UDim2.new(1,0,0,18), Parent=cpHolder})
+                addCorner(row, UDim.new(0,4))
+                mk("TextLabel", {
+                    Text=string.format("id:...%s  α=%.2f β=%.2f  μ=%.3f  σ=%.3f  n=%d",
+                        id:sub(-6), h.alpha, h.beta, mean, h.StdDev or 0, h.n),
+                    Font=Enum.Font.Code, TextSize=9, TextColor3=Color3.fromRGB(80,70,60),
+                    Size=UDim2.new(1,-8,1,0), Position=UDim2.new(0,4,0,0),
+                    TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=row
+                })
+            end
+            if posteriorCount > 20 then
+                mk("TextLabel", {Text=string.format("...and %d more cards", posteriorCount-20), Font=Enum.Font.GothamMedium, TextSize=10, TextColor3=Color3.fromRGB(140,130,120), Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cpHolder})
+            end
+        end
+
+        -- Phase shift log
+        if #mem.PhaseShifts > 0 then
+            local psFrame = mk("Frame", {BackgroundColor3=Color3.fromRGB(255,248,235), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=stateScroll})
+            addCorner(psFrame, UDim.new(0,6)); addStroke(psFrame, 1, 0.25)
+            mk("UIPadding", {PaddingTop=UDim.new(0,8), PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), PaddingBottom=UDim.new(0,8), Parent=psFrame})
+            mk("TextLabel", {Text="PHASE SHIFTS DETECTED", Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(140,100,20), Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=psFrame})
+            local psHolder = mk("Frame", {BackgroundTransparency=1, Position=UDim2.new(0,0,0,22), Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=psFrame})
+            mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,3), Parent=psHolder})
+            for _, s in ipairs(mem.PhaseShifts) do
+                mk("TextLabel", {
+                    Text=string.format("Cycle %d | %s | prior=%.3f → recent=%.3f (Δ=%.3f)",
+                        s.Cycle, s.Channel, s.PriorMean, s.RecentMean, s.PriorMean - s.RecentMean),
+                    Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(140,90,20),
+                    Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=psHolder
+                })
+            end
+        end
+    end
+
+    refreshBtn.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(refreshBtn.Button); refreshRecursive() end)
+    local _origOnCommit = RAE_Callbacks.OnCommit
+    RAE_Callbacks.OnCommit = function(log)
+        if _origOnCommit then _origOnCommit(log) end
+        refreshRecursive()
+    end
+    task.defer(refreshRecursive)
+end
+
+-- ============================================================
+-- PAGE: Bridge (Staged Execution)
+-- ============================================================
+do
+    local _, sBridge = makeSection(pageBridge, "Chain Executor — Staged Bridge")
+    mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
+        Text="Select cards in the RAE tab, then Preview to inspect the resolved dependency chain (CDG-reordered). Execute Chain runs Observe→Probe→Commit→Verify for high-risk steps, fast-path otherwise.",
+        TextColor3=Color3.fromRGB(92,84,76), TextSize=12, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,60), Parent=sBridge})
+
+    local bridgeStateLabel = mk("TextLabel", {
+        BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+        Text="State: Idle", TextColor3=Color3.fromRGB(100,90,80),
+        TextSize=13, TextXAlignment=Enum.TextXAlignment.Left,
+        Size=UDim2.new(1,0,0,20), Parent=sBridge
+    })
+
+    local previewScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(245,242,238), Size=UDim2.new(1,0,0,180),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sBridge
+    })
+    addCorner(previewScroll, UDim.new(0,8)); addStroke(previewScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=previewScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=previewScroll})
+
+    local logScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(240,238,234), Size=UDim2.new(1,0,0,200),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sBridge
+    })
+    addCorner(logScroll, UDim.new(0,8)); addStroke(logScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,3), Parent=logScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=logScroll})
+
+    local function clearScroll(s)
+        s:ClearAllChildren()
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=s})
+        mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=s})
+    end
+    local function addLogLine(scroll, text, color)
+        mk("TextLabel", {
+            Text=text, Font=Enum.Font.Code, TextSize=11,
+            TextColor3=color or Color3.fromRGB(60,55,50),
+            Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left,
+            BackgroundTransparency=1, TextWrapped=true, Parent=scroll
+        })
+    end
+
+    local btnGrid = mk("Frame", {BackgroundTransparency=1, Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=sBridge})
+    mk("UIGridLayout", {CellSize=UDim2.new(0.48,0,0,42), CellPadding=UDim2.new(0.04,0,0,8), SortOrder=Enum.SortOrder.LayoutOrder, Parent=btnGrid})
+
+    local previewBtn = makeButton(btnGrid, "Preview Chain", UDim2.new(1,0,0,42), "👁")
+    previewBtn.Button.BackgroundColor3 = Color3.fromRGB(220,225,255)
+    hookHover(previewBtn.Button, previewBtn.Button.BackgroundColor3, Color3.fromRGB(235,238,255), 0.25, 0.1)
+
+    local execBtn = makeButton(btnGrid, "Execute Chain", UDim2.new(1,0,0,42), "▶")
+    execBtn.Button.BackgroundColor3 = Color3.fromRGB(220,245,220)
+    hookHover(execBtn.Button, execBtn.Button.BackgroundColor3, Color3.fromRGB(235,255,235), 0.25, 0.1)
+
+    previewBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(previewBtn.Button)
+        clearScroll(previewScroll); clearScroll(logScroll)
+        if #RAE_State.SelectedCards == 0 then
+            bridgeStateLabel.Text = "State: No cards selected."
+            addLogLine(previewScroll, "Select cards in the RAE tab first.", Color3.fromRGB(180,100,100))
+            return
+        end
+        local chain, staged = Executor.Preview(RAE_State.SelectedCards, RAE_State.Cards)
+        bridgeStateLabel.Text = string.format("State: Previewed — %d steps (%s path)", #chain, staged and "STAGED" or "FAST")
+        for i, card in ipairs(chain) do
+            local isOrig = false
+            for _, sc in ipairs(RAE_State.SelectedCards) do if sc.ID == card.ID then isOrig = true; break end end
+            addLogLine(previewScroll,
+                string.format("[%d] %s [%s] %s  Risk:%s  Conf:%d%%  %s",
+                    i, card.Channel, isOrig and "SEL" or "DEP", card.Name,
+                    card.Metadata.Risk or "None", card.Metadata.Confidence or 0,
+                    staged and "→STAGED" or "→FAST"),
+                isOrig and Color3.fromRGB(40,120,40) or Color3.fromRGB(100,100,160))
+        end
+    end)
+
+    execBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(execBtn.Button)
+        if #RAE_State.SelectedCards == 0 then
+            sendNotification("Nothing selected. Select cards in RAE tab.", "Warning"); return
+        end
+        bridgeStateLabel.Text = "State: Executing..."
+        clearScroll(logScroll)
+        task.spawn(function()
+            local log = RAE_Commit()
+            if not log then
+                bridgeStateLabel.Text = "State: Commit failed."
+                addLogLine(logScroll, "RAE_Commit returned nil.", Color3.fromRGB(200,80,80))
+                return
+            end
+            local passed, failed = 0, 0
+            for _, r in ipairs(log) do
+                if r.Success then passed = passed + 1 else failed = failed + 1 end
+                addLogLine(logScroll,
+                    string.format("%s [%s] %s%s",
+                        r.Success and "✓" or "✗",
+                        r.Step.Channel, r.Step.Name,
+                        r.Stage and ("  stage:"..r.Stage) or ""),
+                    r.Success and Color3.fromRGB(40,140,40) or Color3.fromRGB(200,80,80))
+                if not r.Success then
+                    addLogLine(logScroll, "   ↳ "..tostring(r.Reason), Color3.fromRGB(160,100,60))
+                end
+            end
+            bridgeStateLabel.Text = string.format("State: Complete — %d passed, %d failed", passed, failed)
+        end)
+    end)
+end
+
+-- ============================================================
+-- PAGE: Analytics (NEW v2 — Deep Intelligence Dashboards)
+-- ============================================================
+do
+    local _, sHeader = makeSection(pageAnalytics, "Deep Intelligence Analytics")
+    mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
+        Text="Real-time view of RAE's learned intelligence. ETM shows convergence of state-conditional transition predictions per card. CDG shows strongest causal edges discovered between action pairs. Calibration shows Brier Score trend and predicted-vs-actual accuracy.",
+        TextColor3=Color3.fromRGB(92,84,76), TextSize=12, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,72), Parent=sHeader})
+
+    local refreshAnalyticsBtn = makeButton(sHeader, "Refresh Analytics", UDim2.new(0,220,0,40), "📊")
+    refreshAnalyticsBtn.Button.BackgroundColor3 = Color3.fromRGB(220,230,255)
+
+    -- LWM Panel
+    local _, sLWM = makeSection(pageAnalytics, "Living World Model (LWM)")
+    local lwmLabel = mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code, Text="No data yet.",
+        TextColor3=Color3.fromRGB(72,66,60), TextSize=11, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=sLWM})
+
+    -- ETM Convergence Panel
+    local _, sETM = makeSection(pageAnalytics, "ETM Convergence Map")
+    local etmScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(245,242,238), Size=UDim2.new(1,0,0,220),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sETM
+    })
+    addCorner(etmScroll, UDim.new(0,8)); addStroke(etmScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=etmScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=etmScroll})
+
+    -- CDG Edges Panel
+    local _, sCDG = makeSection(pageAnalytics, "Causal Dependency Graph — Strongest Edges")
+    local cdgScroll = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(245,242,238), Size=UDim2.new(1,0,0,220),
+        CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4, Parent=sCDG
+    })
+    addCorner(cdgScroll, UDim.new(0,8)); addStroke(cdgScroll, 1, 0.3)
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=cdgScroll})
+    mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=cdgScroll})
+
+    -- Brier Calibration Panel
+    local _, sCal = makeSection(pageAnalytics, "Brier Calibration")
+    local calLabel = mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code, Text="No calibration data yet.",
+        TextColor3=Color3.fromRGB(72,66,60), TextSize=11, TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left, Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=sCal})
+
+    local function refreshAnalytics()
+        -- LWM
+        local buf = LWM.GetBuffer()
+        if #buf == 0 then
+            lwmLabel.Text = "No LWM snapshots yet. Run a Scan first."
+        else
+            local delta = LWM.GetDelta()
+            local avgHealth = LWM.GetTemporalAverage("health", 5)
+            local avgFires  = LWM.GetTemporalAverage("remoteFires", 5)
+            lwmLabel.Text = string.format(
+                "Snapshots: %d/%d  |  Oldest: %.1fs ago  |  Latest sig: %s\nΔHealth: %s  |  ΔPhysics: %s  |  ΔFires: %s\nAvg Health (5-snap): %.1f  |  Avg RemoteFires (5-snap): %.1f",
+                #buf, 12,
+                buf[1] and (os.clock() - buf[1].timestamp) or 0,
+                LWM.GetRecentSig(),
+                delta and string.format("%+.1f", delta.healthDelta) or "N/A",
+                delta and string.format("%+d",   delta.physDelta)   or "N/A",
+                delta and string.format("%+d",   delta.firesDelta)  or "N/A",
+                avgHealth, avgFires)
+        end
+
+        -- ETM
+        etmScroll:ClearAllChildren()
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=etmScroll})
+        mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=etmScroll})
+        local cmap = ETM.GetConvergenceMap()
+        local gcov = cmap["_global"] or {total=0,converged=0,rate=0}
+        mk("TextLabel", {
+            Text=string.format("Global: %d/%d converged (%.0f%%)  |  Not yet converged: %d",
+                gcov.converged, gcov.total, gcov.rate*100, gcov.total - gcov.converged),
+            Font=Enum.Font.GothamBold, TextSize=11,
+            TextColor3=gcov.rate>=0.5 and Color3.fromRGB(40,140,40) or Color3.fromRGB(140,100,40),
+            Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=etmScroll
+        })
+        for cardID, data in pairs(cmap) do
+            if cardID ~= "_global" then
+                local row = mk("Frame", {BackgroundColor3=data.converged>0 and Color3.fromRGB(240,255,240) or Color3.fromRGB(255,252,240), Size=UDim2.new(1,0,0,18), Parent=etmScroll})
+                addCorner(row, UDim.new(0,4))
+                mk("TextLabel", {
+                    Text=string.format("...%s  sigs:%d  conv:%d  (%.0f%%)", cardID:sub(-8), data.total, data.converged, data.rate*100),
+                    Font=Enum.Font.Code, TextSize=10,
+                    TextColor3=data.converged>0 and Color3.fromRGB(40,120,40) or Color3.fromRGB(120,100,40),
+                    Size=UDim2.new(1,-8,1,0), Position=UDim2.new(0,4,0,0),
+                    TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=row
+                })
+            end
+        end
+
+        -- CDG
+        cdgScroll:ClearAllChildren()
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4), Parent=cdgScroll})
+        mk("UIPadding", {PaddingTop=UDim.new(0,6), PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=cdgScroll})
+        local edges = CDG.GetStrongEdges(0.1)
+        if #edges == 0 then
+            mk("TextLabel", {Text="No causal edges yet. Run multiple Commit cycles to build CDG.", Font=Enum.Font.GothamMedium, TextSize=11, TextColor3=Color3.fromRGB(150,140,130), Size=UDim2.new(1,0,0,20), BackgroundTransparency=1, Parent=cdgScroll})
+        else
+            mk("TextLabel", {
+                Text=string.format("%d edges (conf ≥ 0.10)  |  Showing top %d", #edges, math.min(#edges, 25)),
+                Font=Enum.Font.GothamBold, TextSize=11, TextColor3=Color3.fromRGB(60,60,100),
+                Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=cdgScroll
+            })
+            for i, e in ipairs(edges) do
+                if i > 25 then break end
+                local row = mk("Frame", {
+                    BackgroundColor3=e.EffectSize>0 and Color3.fromRGB(240,255,240) or Color3.fromRGB(255,240,240),
+                    Size=UDim2.new(1,0,0,18), Parent=cdgScroll
+                })
+                addCorner(row, UDim.new(0,4))
+                mk("TextLabel", {
+                    Text=string.format("...%s → ...%s  effect=%+.3f  conf=%.2f  co=%d  ✓=%d  ✗=%d",
+                        e.FromID:sub(-6), e.ToID:sub(-6),
+                        e.EffectSize, e.Confidence, e.CoFired, e.CoSuccess, e.CoFail),
+                    Font=Enum.Font.Code, TextSize=9,
+                    TextColor3=e.EffectSize>0 and Color3.fromRGB(40,110,40) or Color3.fromRGB(160,60,60),
+                    Size=UDim2.new(1,-8,1,0), Position=UDim2.new(0,4,0,0),
+                    TextXAlignment=Enum.TextXAlignment.Left, BackgroundTransparency=1, Parent=row
+                })
+            end
+        end
+
+        -- Brier Calibration
+        local brier = ComputeBrierScore()
+        local calLog = IntelMem.CalibrationLog
+        local totalEntries = calLog and #calLog or 0
+        local correctPredictions = 0
+        if calLog then
+            for _, e in ipairs(calLog) do
+                if (e.Predicted >= 0.5) == (e.Actual == 1) then correctPredictions = correctPredictions + 1 end
+            end
+        end
+        calLabel.Text = string.format(
+            "Brier Score: %s  (lower = better; 0.25 = random, 0.0 = perfect)\nCalibration log entries: %d  |  Correct direction: %d/%d (%.0f%%)\nMCTS λ (risk-aversion): %.2f  |  Gate threshold: %.2f",
+            brier and string.format("%.4f",brier) or "N/A",
+            totalEntries, correctPredictions, totalEntries,
+            totalEntries>0 and (correctPredictions/totalEntries*100) or 0,
+            RISK_CFG.Lambda, RISK_CFG.ConfidenceGateThreshold)
+    end
+
+    refreshAnalyticsBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(refreshAnalyticsBtn.Button); refreshAnalytics()
+    end)
+    -- Auto-refresh analytics after each commit
+    local _prevOnCommit = RAE_Callbacks.OnCommit
+    RAE_Callbacks.OnCommit = function(log)
+        if _prevOnCommit then _prevOnCommit(log) end
+        task.defer(refreshAnalytics)
+    end
+    task.defer(refreshAnalytics)
+end
+
+-- ============================================================
+-- PAGE: RAE (Main Control)
+-- ============================================================
+do
+    local _, sWS=makeSection(pageRAE,"WorldState(T)")
+    local wsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="No scan yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,148),Parent=sWS})
+
     local _, sCtrl=makeSection(pageRAE,"Controls")
     local ctrlGrid=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=sCtrl})
     mk("UIGridLayout",{CellSize=UDim2.new(0.48,0,0,44),CellPadding=UDim2.new(0.04,0,0,10),SortOrder=Enum.SortOrder.LayoutOrder,Parent=ctrlGrid})
@@ -2593,21 +2443,18 @@ do
         return b
     end
 
-    makeRAEBtn("Scan",        "🔍", Color3.fromRGB(220,230,255), function()
+    makeRAEBtn("Scan","🔍",Color3.fromRGB(220,230,255),function()
         task.spawn(function() RAE_SilentMode=false; RAE_Scan() end)
     end)
-    makeRAEBtn("Plan (MCTS)", "🧠", Color3.fromRGB(220,255,230), function()
+    makeRAEBtn("Plan (MCTS)","🧠",Color3.fromRGB(220,255,230),function()
         task.spawn(function()
             RAE_SilentMode=false
             local plan=RAE_Plan()
-            if plan and #plan>0 then
-                sendNotification("Plan ready: "..#plan.." steps.", "Success")
-            else
-                sendNotification("No plan generated.", "Warning")
-            end
+            if plan and #plan>0 then sendNotification("Plan ready: "..#plan.." steps.", "Success")
+            else sendNotification("No plan generated.", "Warning") end
         end)
     end)
-    makeRAEBtn("Commit",      "▶", Color3.fromRGB(230,255,230), function()
+    makeRAEBtn("Commit","▶",Color3.fromRGB(230,255,230),function()
         task.spawn(function()
             if #RAE_State.SelectedCards==0 then sendNotification("Nothing selected. Run Plan first.", "Warning"); return end
             RAE_SilentMode=false
@@ -2618,7 +2465,7 @@ do
             end
         end)
     end)
-    makeRAEBtn("Manual Rescan", "↺", Color3.fromRGB(245,240,230), function()
+    makeRAEBtn("Manual Rescan","↺",Color3.fromRGB(245,240,230),function()
         task.spawn(function()
             RAE_SilentMode=false
             sendNotification("RAE: Manual rescan started...", "Info")
@@ -2632,16 +2479,11 @@ do
                         local p=0; for _,r in ipairs(log) do if r.Success then p=p+1 end end
                         sendNotification(string.format("Rescan complete — %d cards, %d/%d passed.",#RAE_State.Cards,p,#log), p==#log and "Success" or "Warning")
                     end
-                else
-                    sendNotification("Rescan complete. No plan generated.", "Info")
-                end
-            else
-                sendNotification("Rescan failed.", "Error")
-            end
+                else sendNotification("Rescan complete. No plan generated.", "Info") end
+            else sendNotification("Rescan failed.", "Error") end
         end)
     end)
 
-    -- Card browser
     local _, sCards=makeSection(pageRAE,"Action Cards")
     local cardScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,300),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sCards})
     addCorner(cardScroll,UDim.new(0,8)); addStroke(cardScroll,1,0.3)
@@ -2656,15 +2498,23 @@ do
             mk("TextLabel",{Text="No cards yet. Run Scan first.",BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=cardScroll})
             return
         end
-        for i,card in ipairs(RAE_State.Cards) do
-            local vs=ValueSystem.ScoreCard(card, RAE_State.Cards, Intel.GetMemory().CardHistory)
+        local currentSig=RAE_State.CurrentSig
+        for _,card in ipairs(RAE_State.Cards) do
+            local vs=ValueSystem.ScoreCard(card,RAE_State.Cards,Intel.GetMemory().CardHistory)
+            local etmProb,etmConv,etmStd=ETM.Predict(card.ID,currentSig)
+            local causalScore=CDG.GetCausalScore(card.ID)
             local selected=false
             for _,sc in ipairs(RAE_State.SelectedCards) do if sc.ID==card.ID then selected=true; break end end
-            local cf=mk("Frame",{BackgroundColor3=selected and Color3.fromRGB(220,240,220) or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,62),Parent=cardScroll})
+            local cf=mk("Frame",{BackgroundColor3=selected and Color3.fromRGB(220,240,220) or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,80),Parent=cardScroll})
             addCorner(cf,UDim.new(0,6)); addStroke(cf,1,selected and 0.1 or 0.25)
             mk("TextLabel",{Text=string.format("[%s] %s",card.Channel,card.Name),Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,10,0,6),Size=UDim2.new(1,-120,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
-            mk("TextLabel",{Text=string.format("Risk:%s Conf:%d%% Val:%.2f",card.Metadata.Risk or "N/A",card.Metadata.Confidence or 0,vs.Total),Font=Enum.Font.RobotoMono,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),Position=UDim2.new(0,10,0,24),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
-            mk("TextLabel",{Text=card.Description,Font=Enum.Font.GothamMedium,TextSize=10,TextColor3=Color3.fromRGB(120,112,104),Position=UDim2.new(0,10,0,40),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=cf})
+            mk("TextLabel",{Text=string.format("Risk:%s  Conf:%d%%  Val:%.2f",card.Metadata.Risk or "N/A",card.Metadata.Confidence or 0,vs.Total),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),Position=UDim2.new(0,10,0,24),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
+            mk("TextLabel",{
+                Text=string.format("ETM p=%.2f σ=%.3f %s | CDG %.3f",etmProb,etmStd,etmConv and "✓" or "~",causalScore),
+                Font=Enum.Font.Code,TextSize=10,
+                TextColor3=etmConv and Color3.fromRGB(60,140,60) or Color3.fromRGB(130,110,80),
+                Position=UDim2.new(0,10,0,40),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=cf})
+            mk("TextLabel",{Text=card.Description,Font=Enum.Font.GothamMedium,TextSize=10,TextColor3=Color3.fromRGB(120,112,104),Position=UDim2.new(0,10,0,56),Size=UDim2.new(1,-120,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=cf})
             local selBtn=mk("TextButton",{Text=selected and "✓ Sel" or "Select",Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=selected and Color3.fromRGB(180,230,180) or Color3.fromRGB(230,240,230),Size=UDim2.new(0,80,0,30),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-10,0.5,0),Parent=cf})
             addCorner(selBtn,UDim.new(0,6))
             selBtn.MouseButton1Click:Connect(function()
@@ -2672,925 +2522,986 @@ do
                 if selected then
                     local ns={}; for _,sc in ipairs(RAE_State.SelectedCards) do if sc.ID~=card.ID then table.insert(ns,sc) end end
                     RAE_State.SelectedCards=ns
-                else
-                    table.insert(RAE_State.SelectedCards, card)
-                end
+                else table.insert(RAE_State.SelectedCards,card) end
                 refreshCardBrowser()
             end)
         end
     end
 
-    RAE_Callbacks.OnScan = function(ws, cards)
-        -- Update WorldState label
+    RAE_Callbacks.OnScan=function(ws,cards)
         wsLabel.Text=string.format(
-            "T: %.2f  |  Instances: %d  |  Scripts: %d\nPhysics: %d  |  Remotes: %d  |  Agents: %d\nValue Objects: %d  |  Match State: %d vars\nStreaming: %s  |  Gravity: %.1f",
-            ws.T, ws.ObjectGraph.TotalInstances, ws.ObjectGraph.ScriptCount,
+            "T:%.2f  Sig:%s\nInstances:%d  Scripts:%d\nPhysics:%d  Remotes:%d  Agents:%d\nValueObjs:%d  MatchState:%d vars\nStreaming:%s  Gravity:%.1f\nLWM Snapshots:%d  ETM Keys:%d",
+            ws.T, RAE_State.CurrentSig,
+            ws.ObjectGraph.TotalInstances, ws.ObjectGraph.ScriptCount,
             #ws.Physics.SimulatedAssemblies, #ws.Latent.RemoteEvents, 1+#ws.Agents.OtherPlayers,
             #ws.Latent.ValueObjects,
             (function() local t=0; for _ in pairs(ws.Latent.MatchState) do t=t+1 end; return t end)(),
-            tostring(ws.SimConfig.StreamingEnabled), ws.SimConfig.Gravity)
+            tostring(ws.SimConfig.StreamingEnabled), ws.SimConfig.Gravity,
+            LWM.GetSnapshotCount(),
+            (function() local t=0; for _ in pairs(ETM.GetTableRef()) do t=t+1 end; return t end)())
         refreshCardBrowser()
     end
-
-    RAE_Callbacks.OnPlan = function(plan)
-        refreshCardBrowser()
-    end
-
-    RAE_Callbacks.OnCommit = function(log)
-        refreshCardBrowser()
-    end
+    RAE_Callbacks.OnPlan   = function(_)   refreshCardBrowser() end
+    RAE_Callbacks.OnCommit = function(_)   refreshCardBrowser() end
 end
 
 -- ============================================================
--- PAGE: Recursive (RAE Cognitive State — Deep Intelligence)
+-- PAGE: Recursive (Cognitive State)
 -- ============================================================
 do
-    local _, sBrain=makeSection(pageRecursive,"Cognitive Intelligence")
+    local _, sBrain=makeSection(pageRecursive,"Cognitive State")
     mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
-        Text="Live deep cognitive state of RAE. Includes Living World Model activity, ETM convergence per card, Causal Dependency Graph, Thompson posteriors, and session persistence status.",
-        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
-        Size=UDim2.new(1,0,0,56),Parent=sBrain})
-
-    local refreshBtn=makeButton(sBrain,"Refresh State",UDim2.new(0,200,0,40),"↻")
+        Text="Live RAE cognitive state. Updates after every Commit cycle. Shows Bayesian posteriors per card, channel weights, phase shifts, value axis weights, ETM convergence summary, and Brier calibration score.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sBrain})
+    local refreshBtn=makeButton(sBrain,"Refresh",UDim2.new(0,200,0,40),"↻")
     refreshBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
 
-    local stateScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
-        Size=UDim2.new(1,0,0,520),CanvasSize=UDim2.new(0,0,0,0),
-        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBrain})
+    local stateScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,500),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBrain})
     addCorner(stateScroll,UDim.new(0,8)); addStroke(stateScroll,1,0.3)
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=stateScroll})
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),Parent=stateScroll})
     mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=stateScroll})
 
-    local function addRow(text, color)
-        local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=stateScroll})
-        addCorner(row,UDim.new(0,4))
-        mk("TextLabel",{Text=text,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
-            TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-10,1,0),
-            Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
-    end
-
-    local function refreshState()
+    local function refreshRecursive()
         stateScroll:ClearAllChildren()
-        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=stateScroll})
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),Parent=stateScroll})
         mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=stateScroll})
+        local mem=Intel.GetMemory()
+        local cmap=ETM.GetConvergenceMap(); local gcov=cmap["_global"] or {total=0,converged=0,rate=0}
+        local brier=ComputeBrierScore()
 
-        local mem = Intel.GetMemory()
+        -- Summary row
+        local summaryFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,72),Parent=stateScroll})
+        addCorner(summaryFrame,UDim.new(0,6)); addStroke(summaryFrame,1,0.2)
+        mk("TextLabel",{Text=string.format(
+            "Cycles: %d   PhaseShifts: %d   OverfitStreak: %d\nETM Converged: %d/%d (%.0f%%)   Brier Score: %s\nValueWeightUpdates: %d   CDG Edges: %d",
+            mem.Cycles, #mem.PhaseShifts, mem.OverfitStreak,
+            gcov.converged, gcov.total, gcov.rate*100,
+            brier and string.format("%.4f",brier) or "N/A",
+            ValueHistory.WeightUpdates, #CDG.GetStrongEdges(0.1)),
+            Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
+            Position=UDim2.new(0,10,0,8),Size=UDim2.new(1,-20,1,-16),
+            TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+            BackgroundTransparency=1,TextWrapped=true,Parent=summaryFrame})
 
-        -- ── Session & Layer Status ────────────────────────────
-        addRow("═══ INTELLIGENCE LAYER STATUS ═══", Color3.fromRGB(225,235,255))
-        addRow(string.format("Cycles: %d  |  LWM Age: %d  |  Session: %s",
-            mem.Cycles, LWM.Age, _sessionRestored and "RESTORED ✓" or "NEW"), Color3.fromRGB(235,245,255))
-        addRow(string.format("Phase Shifts: %d  |  Overfit Streak: %d  |  Activity: %.0f%%",
-            #mem.PhaseShifts, mem.OverfitStreak, LWM.GetActivityScore()*100), Color3.fromRGB(235,245,255))
-
-        -- ── Causal Certainty & Predictive Status ────────────
-        addRow("═══ PREDICTIVE INTELLIGENCE STATUS ═══", Color3.fromRGB(220,240,255))
-        local certaintyScore, nConv, nCards = ETM.GetCausalCertainty(RAE_State.Cards)
-        local certaintyBar = string.rep("█", math.floor(certaintyScore/10))..string.rep("░", 10-math.floor(certaintyScore/10))
-        local certaintyLabel = certaintyScore>=70 and "CONVERGING" or certaintyScore>=40 and "LEARNING" or "EXPLORING"
-        addRow(string.format("Causal Certainty: %d%%  %s  [%s]", certaintyScore, certaintyBar, certaintyLabel),
-            certaintyScore>=70 and Color3.fromRGB(220,255,220) or certaintyScore>=40 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
-        addRow(string.format("Converged: %d/%d cards  |  Layer: %s",
-            nConv, nCards,
-            certaintyScore>=70 and "Layer 4 — Predictive" or certaintyScore>=40 and "Layer 3 — Behavioral" or "Layer 2 — Interaction"))
-        local _, strategy = Intel.SelectStrategy(RAE_State.Cards)
-        addRow(string.format("Strategy: %s  |  Cycles: %d", strategy or "EXPLORE", IntelMem.Cycles),
-            strategy=="EXPLOIT" and Color3.fromRGB(220,255,220) or Color3.fromRGB(255,248,220))
-        local pred = RAE_State.LastPrediction
-        if pred and pred.StepCount > 0 then
-            addRow("─── Last Plan Prediction ───", Color3.fromRGB(235,248,255))
-            addRow(string.format("Chain P: %.0f%%  |  Steps: %d  |  Causal certainty: %.0f%%",
-                pred.ChainProbability*100, pred.StepCount, pred.CausalCertainty*100),
-                pred.ChainProbability>=0.6 and Color3.fromRGB(220,255,220) or pred.ChainProbability>=0.3 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
-            for si, step in ipairs(pred.Steps) do
-                local conv = step.Converged and "✓" or (step.ETM_N>=5 and "~" or "?")
-                addRow(string.format("  [%s] %d: %-16s %.0f%%  n=%d σ=%.3f",
-                    conv, si, step.Card.Name:sub(1,16), step.PredictedP*100, step.ETM_N, step.StdDev),
-                    step.PredictedP>=0.65 and Color3.fromRGB(230,255,230) or step.PredictedP>=0.40 and Color3.fromRGB(255,252,220) or Color3.fromRGB(255,235,235))
-            end
-        else
-            addRow("─── Last Plan Prediction ───", Color3.fromRGB(235,248,255))
-            addRow("Run Plan first to see step-by-step predictions.", Color3.fromRGB(235,235,235))
+        -- Channel weights
+        local chFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=stateScroll})
+        addCorner(chFrame,UDim.new(0,6)); addStroke(chFrame,1,0.2)
+        mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingBottom=UDim.new(0,8),Parent=chFrame})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,4),Parent=chFrame})
+        mk("TextLabel",{Text="Channel Weights",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=chFrame})
+        for _,ch in ipairs({"Structural","Metabolic","Ownership","Replication","Latent","Agent","Network"}) do
+            local w=mem.ChannelWeights[ch] or 1.0
+            local barRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,22),Parent=chFrame})
+            mk("TextLabel",{Text=string.format("%-12s  %.3f",ch,w),Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(70,70,70),Size=UDim2.new(0,180,1,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=barRow})
+            local barBg=mk("Frame",{BackgroundColor3=Color3.fromRGB(235,230,225),Size=UDim2.new(1,-190,0,10),Position=UDim2.new(0,190,0.5,-5),Parent=barRow}); addCorner(barBg,UDim.new(0,5))
+            local pct=math.clamp((w-0.2)/(2.0-0.2),0,1)
+            local barFill=mk("Frame",{BackgroundColor3=Color3.fromRGB(160,200,160),Size=UDim2.new(pct,0,1,0),Parent=barBg}); addCorner(barFill,UDim.new(0,5))
         end
 
-        -- ── Living World Model ────────────────────────────────
-        addRow("─── Living World Model ───", Color3.fromRGB(240,248,255))
-        addRow(string.format("Snapshots: %d/%d  |  Deltas recorded: %d",
-            #LWM.Snapshots, LWM_MAXSNAP, #LWM.Deltas))
-        local latestDelta = LWM.GetLatestDelta()
-        if latestDelta then
-            addRow(string.format("Last Δ: Instances%+d  Physics%+d  ClientOwned%+d  Remotes%+d",
-                latestDelta.InstanceDelta, latestDelta.PhysicsDelta,
-                latestDelta.ClientOwnedDelta, latestDelta.RemoteEventDelta))
-            local fireNames = {}
-            for name, _ in pairs(latestDelta.RemoteFireDelta or {}) do table.insert(fireNames, name) end
-            if #fireNames > 0 then
-                addRow("Active fires: "..table.concat(fireNames, ", "), Color3.fromRGB(255,250,235))
-            end
-        end
-        local regCount = 0; for _ in pairs(LWM.RemoteRegistry) do regCount=regCount+1 end
-        local tmCount  = 0; for _ in pairs(LWM.TemporalMap) do tmCount=tmCount+1 end
-        addRow(string.format("Remote registry: %d entries  |  Temporal map nodes: %d", regCount, tmCount))
-
-        -- ── ETM Convergence ───────────────────────────────────
-        addRow("─── ETM Convergence Map ───", Color3.fromRGB(240,255,240))
-        local convMap = ETM.GetConvergenceMap()
-        local convergedCount, totalETM = 0, 0
-        for _, cv in pairs(convMap) do
-            totalETM = totalETM + 1
-            if cv.converged then convergedCount = convergedCount + 1 end
-        end
-        addRow(string.format("Cards learned: %d/%d converged  (n≥10, σ<0.08)", convergedCount, totalETM),
-            convergedCount == totalETM and totalETM > 0 and Color3.fromRGB(220,255,220) or Color3.fromRGB(255,252,220))
-        for cardID, cv in pairs(convMap) do
-            local bar = cv.converged and "✓" or (cv.n >= 5 and "~" or "?")
-            addRow(string.format("[%s] %-12s mean=%.0f%%  σ=%.3f  n=%d",
-                bar, cardID:sub(1,12), cv.mean*100, cv.stddev, cv.n),
-                cv.converged and Color3.fromRGB(230,255,230) or nil)
+        -- Value axis weights
+        local vwFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=stateScroll})
+        addCorner(vwFrame,UDim.new(0,6)); addStroke(vwFrame,1,0.2)
+        mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingBottom=UDim.new(0,8),Parent=vwFrame})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,4),Parent=vwFrame})
+        mk("TextLabel",{Text="Value Axis Weights",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=vwFrame})
+        for _,axis in ipairs({"Reliability","InformationGain","Cost","Reversibility","Optionality","Stability"}) do
+            local w=ValueWeights[axis] or 1.0
+            local axRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,22),Parent=vwFrame})
+            mk("TextLabel",{Text=string.format("%-16s %.3f",axis,w),Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(70,70,70),Size=UDim2.new(0,200,1,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=axRow})
+            local axBg=mk("Frame",{BackgroundColor3=Color3.fromRGB(235,230,225),Size=UDim2.new(1,-210,0,10),Position=UDim2.new(0,210,0.5,-5),Parent=axRow}); addCorner(axBg,UDim.new(0,5))
+            local pct=math.clamp((w-0.1)/(2.0-0.1),0,1)
+            local axFill=mk("Frame",{BackgroundColor3=Color3.fromRGB(180,160,220),Size=UDim2.new(pct,0,1,0),Parent=axBg}); addCorner(axFill,UDim.new(0,5))
         end
 
-        -- ── Causal Dependency Graph ───────────────────────────
-        addRow("─── Causal Dependency Graph ───", Color3.fromRGB(255,245,235))
-        local cdgCount = 0; for _ in pairs(CDG.Nodes) do cdgCount=cdgCount+1 end
-        addRow(string.format("CDG nodes: %d", cdgCount))
-        for cardID, node in pairs(CDG.Nodes) do
-            if node.totalFires > 0 then
-                local scr = CDG.GetStateChangeRate(cardID)
-                local bar = string.rep("█", math.floor(scr*10))..string.rep("░", 10-math.floor(scr*10))
-                addRow(string.format("%-14s fires=%d  scr=%.0f%%  %s",
-                    node.Name:sub(1,14), node.totalFires, scr*100, bar),
-                    scr > 0.5 and Color3.fromRGB(220,255,235) or nil)
+        -- Card posteriors (top 20 most active)
+        local sortedCards={}
+        for id,h in pairs(mem.CardHistory) do table.insert(sortedCards,{ID=id,H=h}) end
+        table.sort(sortedCards,function(a,b) return a.H.n>b.H.n end)
+        if #sortedCards>0 then
+            local postFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=stateScroll})
+            addCorner(postFrame,UDim.new(0,6)); addStroke(postFrame,1,0.2)
+            mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingBottom=UDim.new(0,8),Parent=postFrame})
+            mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,3),Parent=postFrame})
+            mk("TextLabel",{Text="Card Posteriors (top 20 by n)",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=postFrame})
+            mk("TextLabel",{Text=string.format("%-18s %5s %5s %5s %5s  %4s","ID[:8]","α","β","mean","σ","n"),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(120,120,120),Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=postFrame})
+            for i=1,math.min(20,#sortedCards) do
+                local entry=sortedCards[i]; local h=entry.H
+                local mean=h.alpha/(h.alpha+h.beta)
+                mk("TextLabel",{
+                    Text=string.format("%-18s %5.2f %5.2f %5.3f %5.3f %4d",
+                        entry.ID:sub(1,8), h.alpha, h.beta, mean, h.StdDev or 0, h.n),
+                    Font=Enum.Font.Code,TextSize=10,
+                    TextColor3=mean>=0.6 and Color3.fromRGB(60,140,60) or Color3.fromRGB(140,80,80),
+                    Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=postFrame})
             end
         end
 
-        -- ── Channel Weights ───────────────────────────────────
-        addRow("─── Channel Weights ───", Color3.fromRGB(245,240,235))
-        for ch, w in pairs(mem.ChannelWeights) do
-            local bar = string.rep("█", math.floor(w*5))..string.rep("░", 10-math.floor(w*5))
-            addRow(string.format("%-14s %.3f  %s", ch, w, bar))
-        end
-
-        -- ── Value Axis Weights ────────────────────────────────
-        addRow("─── Value Axis Weights ───", Color3.fromRGB(245,240,235))
-        for axis, w in pairs(ValueWeights) do
-            addRow(string.format("%-18s %.3f", axis, w))
-        end
-
-        -- ── Card Posteriors ───────────────────────────────────
-        if next(mem.CardHistory) then
-            addRow("─── Card Posteriors (Bayesian) ───", Color3.fromRGB(245,240,235))
-            for id, h in pairs(mem.CardHistory) do
-                addRow(string.format("%-10s α=%.2f β=%.2f mean=%.0f%% σ=%.3f n=%d",
-                    id:sub(1,10), h.alpha, h.beta, h.Confidence, h.StdDev, h.n))
+        -- Phase shift log
+        if #mem.PhaseShifts>0 then
+            local psFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=stateScroll})
+            addCorner(psFrame,UDim.new(0,6)); addStroke(psFrame,1,0.2)
+            mk("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingBottom=UDim.new(0,8),Parent=psFrame})
+            mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,3),Parent=psFrame})
+            mk("TextLabel",{Text="Phase Shift Log",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=psFrame})
+            local shown=math.min(8,#mem.PhaseShifts)
+            for i=#mem.PhaseShifts-shown+1,#mem.PhaseShifts do
+                local ps=mem.PhaseShifts[i]
+                mk("TextLabel",{
+                    Text=string.format("Cycle %d  [%s]  prior=%.3f → recent=%.3f",ps.Cycle,ps.Channel,ps.PriorMean,ps.RecentMean),
+                    Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(180,100,50),
+                    Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=psFrame})
             end
         end
-
-        -- ── Phase Shifts ──────────────────────────────────────
-        if #mem.PhaseShifts > 0 then
-            addRow("─── Phase Shifts ───", Color3.fromRGB(255,245,235))
-            for _, s in ipairs(mem.PhaseShifts) do
-                addRow(string.format("Cycle %d: %s %.0f%%→%.0f%%",
-                    s.Cycle, s.Channel, s.PriorMean*100, s.RecentMean*100),
-                    Color3.fromRGB(255,240,220))
-            end
-        end
-
-        addRow(string.format("Value Weight Updates: %d", ValueHistory.WeightUpdates), Color3.fromRGB(240,255,240))
     end
 
-    refreshBtn.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(refreshBtn.Button); refreshState() end)
-    local origOnCommit = RAE_Callbacks.OnCommit
-    RAE_Callbacks.OnCommit = function(log)
-        if origOnCommit then origOnCommit(log) end
-        refreshState()
+    refreshBtn.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(refreshBtn.Button); refreshRecursive() end)
+    local prevOnCommit=RAE_Callbacks.OnCommit
+    RAE_Callbacks.OnCommit=function(log)
+        if prevOnCommit then prevOnCommit(log) end
+        refreshRecursive()
     end
 end
 
 -- ============================================================
--- PAGE: Bridge (RAE Staged Execution + Telemetry)
+-- PAGE: Bridge (Staged Execution)
 -- ============================================================
 do
-    local _, sLink=makeSection(pageBridge,"Staged Chain Execution")
-    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Execute RAE chains through the staged path: Observe → Probe → Commit → Verify → Rollback. High-risk chains use staged path automatically.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sLink})
+    local _, sBridge=makeSection(pageBridge,"Staged Chain Execution")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Preview then execute the selected card chain. Chains containing Medium/High risk cards follow the Staged path: Observe → Probe → Commit → Verify. CDG causal reordering is applied automatically.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,64),Parent=sBridge})
 
-    local bridgeStatusLabel=mk("TextLabel",{Text="Bridge State: Idle",Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Color3.fromRGB(100,100,160),Size=UDim2.new(1,0,0,24),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=sLink})
+    local bridgeStateLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="State: Idle",TextColor3=Color3.fromRGB(92,84,76),TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sBridge})
+    local previewScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,200),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBridge})
+    addCorner(previewScroll,UDim.new(0,8)); addStroke(previewScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=previewScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=previewScroll})
 
-    local previewBtn=makeButton(sLink,"Preview Selected Chain",UDim2.new(1,0,0,40),"👁")
-    local commitBtn=makeButton(sLink,"Execute Chain",UDim2.new(1,0,0,40),"▶")
-    commitBtn.Button.BackgroundColor3=Color3.fromRGB(220,240,220)
-
-    local logScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,220),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sLink})
+    local logScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,160),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sBridge})
     addCorner(logScroll,UDim.new(0,8)); addStroke(logScroll,1,0.3)
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=logScroll})
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=logScroll})
     mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=logScroll})
 
-    local function addLogRow(text, color)
-        local row=mk("Frame",{BackgroundColor3=color or Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,20),Parent=logScroll})
-        addCorner(row,UDim.new(0,4))
-        mk("TextLabel",{Text=text,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-8,1,0),Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,Parent=row})
+    local function clearScroller(s)
+        s:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=s})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=s})
     end
+
+    local btnRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sBridge})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=btnRow})
+    local previewBtn=makeButton(btnRow,"Preview Chain",UDim2.new(0,200,0,40),"👁")
+    previewBtn.Button.BackgroundColor3=Color3.fromRGB(220,230,255)
+    local execBtn=makeButton(btnRow,"Execute Chain",UDim2.new(0,200,0,40),"▶")
+    execBtn.Button.BackgroundColor3=Color3.fromRGB(220,255,220)
 
     previewBtn.Button.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(previewBtn.Button)
-        logScroll:ClearAllChildren()
-        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=logScroll})
-        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=logScroll})
-        if #RAE_State.SelectedCards==0 then addLogRow("No cards selected. Use RAE tab to select."); return end
+        if #RAE_State.SelectedCards==0 then sendNotification("No cards selected. Use the RAE tab to select.", "Warning"); return end
+        clearScroller(previewScroll)
         local chain,staged=Executor.Preview(RAE_State.SelectedCards, RAE_State.Cards)
-        addLogRow(string.format("Path: %s  |  %d steps",staged and "STAGED" and "⚠ STAGED" or "FAST",#chain), staged and Color3.fromRGB(255,245,225) or Color3.fromRGB(225,245,255))
-        local selIDs={}; for _,c in ipairs(RAE_State.SelectedCards) do selIDs[c.ID]=true end
+        bridgeStateLabel.Text=string.format("State: Previewed  |  %d steps  |  Path: %s  |  CDG reordered",#chain,staged and "STAGED" or "FAST")
         for i,card in ipairs(chain) do
-            local mark=selIDs[card.ID] and "← SELECTED" or "← DEPENDENCY"
-            addLogRow(string.format("[%d] [%s] %s | Risk:%s | %s",i,card.Channel,card.Name,card.Metadata.Risk or "N/A",mark))
+            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,38),Parent=previewScroll})
+            addCorner(row,UDim.new(0,5)); addStroke(row,1,0.25)
+            local risk=card.Metadata.Risk or "None"
+            local riskColor=risk=="High" and Color3.fromRGB(200,80,80) or risk=="Medium" and Color3.fromRGB(200,160,60) or Color3.fromRGB(80,180,80)
+            mk("TextLabel",{Text=string.format("%d. [%s] %s",i,card.Channel,card.Name),Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-110,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+            mk("TextLabel",{Text=string.format("Risk:%s Conf:%d%% CDG:%.2f",risk,card.Metadata.Confidence or 0,CDG.GetCausalScore(card.ID)),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),Position=UDim2.new(0,8,0,22),Size=UDim2.new(1,-110,0,12),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+            local tag=mk("TextLabel",{Text=(staged and risk~="None") and "STAGED" or "FAST",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Color3.fromRGB(255,255,255),BackgroundColor3=riskColor,AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-8,0.5,0),Size=UDim2.new(0,56,0,22),Parent=row})
+            addCorner(tag,UDim.new(0,5))
         end
-        bridgeStatusLabel.Text="Bridge State: Previewed ("..#chain.." steps)"
-        sendNotification("Chain preview loaded.", "Info")
     end)
 
-    commitBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(commitBtn.Button)
+    execBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(execBtn.Button)
         if #RAE_State.SelectedCards==0 then sendNotification("No cards selected.", "Warning"); return end
-        bridgeStatusLabel.Text="Bridge State: Executing..."
+        bridgeStateLabel.Text="State: Executing..."
+        clearScroller(logScroll)
         task.spawn(function()
             local log=RAE_Commit()
-            if not log then bridgeStatusLabel.Text="Bridge State: Failed"; return end
-            logScroll:ClearAllChildren()
-            mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=logScroll})
-            mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=logScroll})
-            local passed=0
+            if not log then bridgeStateLabel.Text="State: Error — no log returned."; return end
+            local passed,failed=0,0
             for _,r in ipairs(log) do
-                if r.Success then passed=passed+1 end
-                addLogRow(
-                    string.format("%s [%s] %s | %s",r.Success and "✓" or "✗",r.Step.Channel,r.Step.Name,r.Reason),
-                    r.Success and Color3.fromRGB(230,250,230) or Color3.fromRGB(255,230,230))
+                if r.Success then passed=passed+1 else failed=failed+1 end
+                local row=mk("Frame",{BackgroundColor3=r.Success and Color3.fromRGB(240,255,240) or Color3.fromRGB(255,235,235),Size=UDim2.new(1,0,0,32),Parent=logScroll})
+                addCorner(row,UDim.new(0,5)); addStroke(row,1,0.2)
+                mk("TextLabel",{Text=string.format("%s  [%s] %s — %s%s",r.Success and "✓" or "✕",r.Step.Channel,r.Step.Name,r.Reason or "?",r.Stage and (" ["..r.Stage.."]") or ""),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-16,1,-8),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextWrapped=true,Parent=row})
             end
-            bridgeStatusLabel.Text=string.format("Bridge State: Complete — %d/%d passed (Cycle #%d)",passed,#log,RAE_State.CycleCount)
+            bridgeStateLabel.Text=string.format("State: Complete  |  ✓ %d  ✕ %d  |  Cycle #%d",passed,failed,RAE_State.CycleCount)
         end)
     end)
+end
+
+-- ============================================================
+-- PAGE: Analytics (NEW v2 — Deep Intelligence Dashboard)
+-- ============================================================
+do
+    local _, sHdr=makeSection(pageAnalytics,"Deep Intelligence Analytics")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Live view of ETM convergence map, CDG causal dependency edges, LWM temporal deltas, and Brier calibration score. Data accumulates across Commit cycles and persists in _G between sessions.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sHdr})
+    local refreshAnalytics=makeButton(sHdr,"Refresh Analytics",UDim2.new(0,220,0,40),"📊")
+    refreshAnalytics.Button.BackgroundColor3=Color3.fromRGB(220,240,255)
+
+    -- ETM Convergence
+    local _, sETM=makeSection(pageAnalytics,"ETM Convergence Map")
+    local etmScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,200),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sETM})
+    addCorner(etmScroll,UDim.new(0,8)); addStroke(etmScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=etmScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=etmScroll})
+
+    -- CDG Edges
+    local _, sCDG=makeSection(pageAnalytics,"Causal Dependency Graph — Strong Edges")
+    local cdgScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,220),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sCDG})
+    addCorner(cdgScroll,UDim.new(0,8)); addStroke(cdgScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=cdgScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=cdgScroll})
+
+    -- LWM Temporal
+    local _, sLWM=makeSection(pageAnalytics,"Living World Model — Temporal Deltas")
+    local lwmLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="No snapshots yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,96),Parent=sLWM})
+
+    -- Calibration
+    local _, sCal=makeSection(pageAnalytics,"Brier Score Calibration")
+    local calLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="No calibration data yet.",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,64),Parent=sCal})
+
+    local function doRefreshAnalytics()
+        -- ETM
+        etmScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=etmScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=etmScroll})
+        local cmap=ETM.GetConvergenceMap()
+        local gcov=cmap["_global"] or {total=0,converged=0,rate=0}
+        local sumRow=mk("Frame",{BackgroundColor3=Color3.fromRGB(230,240,255),Size=UDim2.new(1,0,0,26),Parent=etmScroll})
+        addCorner(sumRow,UDim.new(0,5))
+        mk("TextLabel",{Text=string.format("GLOBAL: %d/%d converged (%.0f%%)  — threshold: σ<%.2f, n≥%d",
+            gcov.converged,gcov.total,gcov.rate*100,ETM_CFG.ConvergenceStdDev,ETM_CFG.MinCount),
+            Font=Enum.Font.Code,TextSize=11,TextColor3=Color3.fromRGB(50,50,90),
+            Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,8,0,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=sumRow})
+        for cardID,stats in pairs(cmap) do
+            if cardID~="_global" then
+                local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=etmScroll})
+                addCorner(row,UDim.new(0,4)); addStroke(row,1,0.3)
+                local convColor=stats.converged>0 and Color3.fromRGB(60,160,60) or Color3.fromRGB(160,100,60)
+                mk("TextLabel",{Text=string.format("Card %s  |  sigs: %d  |  conv: %d  |  rate: %.0f%%",cardID:sub(1,8),stats.total,stats.converged,stats.rate*100),
+                    Font=Enum.Font.Code,TextSize=10,TextColor3=convColor,
+                    Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,8,0,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=row})
+            end
+        end
+        if gcov.total==0 then mk("TextLabel",{Text="No ETM data yet. Run Scan → Plan → Commit to populate.",BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=etmScroll}) end
+
+        -- CDG
+        cdgScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=cdgScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=cdgScroll})
+        local hdr=mk("TextLabel",{Text=string.format("%-10s  %-10s  %6s  %5s  %5s  %5s","FromID[:8]","ToID[:8]","Effect","Conf","CoSuc","CoFai"),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(120,120,120),Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=cdgScroll})
+        local edges=CDG.GetStrongEdges(0.10)
+        if #edges==0 then
+            mk("TextLabel",{Text="No causal edges with confidence ≥ 0.10 yet. Run more cycles.",BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=cdgScroll})
+        else
+            for _,e in ipairs(edges) do
+                local effColor=e.EffectSize>0 and Color3.fromRGB(60,140,60) or Color3.fromRGB(160,60,60)
+                local eRow=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Parent=cdgScroll})
+                addCorner(eRow,UDim.new(0,4)); addStroke(eRow,1,0.3)
+                mk("TextLabel",{Text=string.format("%-10s  %-10s  %+6.3f  %5.2f  %5d  %5d",e.FromID:sub(1,8),e.ToID:sub(1,8),e.EffectSize,e.Confidence,e.CoSuccess,e.CoFail),
+                    Font=Enum.Font.Code,TextSize=10,TextColor3=effColor,
+                    Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,8,0,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=eRow})
+            end
+        end
+
+        -- LWM
+        local buf=LWM.GetBuffer()
+        if #buf<2 then lwmLabel.Text="Less than 2 snapshots — run more cycles to see deltas."
+        else
+            local delta=LWM.GetDelta()
+            local avgHealth=LWM.GetTemporalAverage("health",5)
+            local avgPhys=LWM.GetTemporalAverage("physCount",5)
+            local avgFires=LWM.GetTemporalAverage("remoteFires",5)
+            lwmLabel.Text=string.format(
+                "Snapshots: %d  |  Current sig: %s\nΔ health: %+.1f  Δ physics: %+d  Δ fires: %+d  Δ elapsed: %.2fs\nAvg health (5): %.1f  Avg physics: %.1f  Avg fires: %.1f\nRemote registry: %d tracked",
+                #buf, LWM.GetRecentSig(),
+                delta and delta.healthDelta or 0, delta and delta.physDelta or 0,
+                delta and delta.firesDelta or 0, delta and delta.elapsed or 0,
+                avgHealth, avgPhys, avgFires,
+                (function() local t=0; for _ in pairs(LWM.GetRemoteRegistry()) do t=t+1 end; return t end)())
+        end
+
+        -- Calibration
+        local calLog=Intel.GetMemory().CalibrationLog
+        local brier=ComputeBrierScore()
+        if not brier or #calLog==0 then calLabel.Text="No calibration data yet. Run Commit cycles to populate."
+        else
+            local buckets={}; local bN=10
+            for i=1,bN do buckets[i]={predicted=0,actual=0,count=0} end
+            for _,e in ipairs(calLog) do
+                local b=math.clamp(math.floor(e.Predicted*bN)+1,1,bN)
+                buckets[b].predicted=buckets[b].predicted+e.Predicted
+                buckets[b].actual=buckets[b].actual+e.Actual
+                buckets[b].count=buckets[b].count+1
+            end
+            local lines={}
+            table.insert(lines,string.format("Brier Score: %.4f  (last %d entries)  |  0.0=perfect, 1.0=worst",brier,math.min(#calLog,100)))
+            table.insert(lines,"Calibration buckets (predicted prob → actual freq):")
+            for i=1,bN do
+                local b=buckets[i]
+                if b.count>0 then
+                    local avgPred=b.predicted/b.count; local avgAct=b.actual/b.count
+                    local bar=string.rep("█",math.floor(avgAct*20))..string.rep("░",20-math.floor(avgAct*20))
+                    table.insert(lines,string.format("[%.1f-%.1f] pred=%.2f act=%.2f n=%d  %s",
+                        (i-1)/bN, i/bN, avgPred, avgAct, b.count, bar))
+                end
+            end
+            calLabel.Text=table.concat(lines,"\n")
+            calLabel.Size=UDim2.new(1,0,0,math.max(64,#lines*14+8))
+        end
+    end
+
+    refreshAnalytics.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(refreshAnalytics.Button); doRefreshAnalytics() end)
+    local prevOnCommit2=RAE_Callbacks.OnCommit
+    RAE_Callbacks.OnCommit=function(log)
+        if prevOnCommit2 then prevOnCommit2(log) end
+        doRefreshAnalytics()
+    end
+end
+
+-- ============================================================
+-- PAGE: Chain (Visual Node Editor)
+-- ============================================================
+do
+    local _, sChain=makeSection(pageChain,"Visual Chain Editor")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Drag and connect nodes to build execution chains. Supported node types: Start, Wait, Fire Remote, Check Inventory, RAE Scan, RAE Plan, RAE Commit. Run executes the chain sequentially.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sChain})
+
+    local canvas=mk("Frame",{BackgroundColor3=Color3.fromRGB(240,237,232),Size=UDim2.new(1,0,0,340),Parent=sChain})
+    addCorner(canvas,UDim.new(0,10)); addStroke(canvas,1,0.3)
+    local canvasNodes={}; local connections={}
+
+    local nodeTypes={
+        {Name="Start",      Color=Color3.fromRGB(180,230,180), Icon="▶"},
+        {Name="Wait",       Color=Color3.fromRGB(220,220,180), Icon="⏱"},
+        {Name="Fire Remote",Color=Color3.fromRGB(200,220,255), Icon="🔥"},
+        {Name="Check Inv",  Color=Color3.fromRGB(255,220,200), Icon="🎒"},
+        {Name="RAE Scan",   Color=Color3.fromRGB(220,200,255), Icon="🔍"},
+        {Name="RAE Plan",   Color=Color3.fromRGB(200,255,220), Icon="🧠"},
+        {Name="RAE Commit", Color=Color3.fromRGB(255,230,200), Icon="▶"},
+    }
+
+    local nodeActions={
+        ["Start"]       = function() return true end,
+        ["Wait"]        = function() task.wait(1); return true end,
+        ["Fire Remote"] = function()
+            local ws=RAE_State.WorldState
+            if ws and #ws.Latent.RemoteEvents>0 then
+                local r=ws.Latent.RemoteEvents[1]; pcall(function() r.Instance:FireServer() end); return true
+            end; return false
+        end,
+        ["Check Inv"]   = function() local char=player.Character; return char and char:FindFirstChildOfClass("Tool")~=nil end,
+        ["RAE Scan"]    = function() return RAE_Scan() end,
+        ["RAE Plan"]    = function() return RAE_Plan()~=nil end,
+        ["RAE Commit"]  = function() return RAE_Commit()~=nil end,
+    }
+
+    local paletteRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sChain})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=paletteRow})
+
+    local function addNode(nodeType, posX, posY)
+        posX=posX or math.random(30,200); posY=posY or math.random(20,260)
+        local nodeFrame=mk("Frame",{BackgroundColor3=nodeType.Color,Size=UDim2.new(0,110,0,44),Position=UDim2.new(0,posX,0,posY),Parent=canvas})
+        addCorner(nodeFrame,UDim.new(0,8)); addStroke(nodeFrame,1,0.2)
+        local nodeLabel=mk("TextLabel",{Text=nodeType.Icon.." "..nodeType.Name,Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,-8,0,16),Position=UDim2.new(0,4,0,4),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=nodeFrame})
+        local inDot=mk("Frame",{BackgroundColor3=Color3.fromRGB(100,100,200),Size=UDim2.new(0,12,0,12),Position=UDim2.new(0,-6,0.5,-6),Parent=nodeFrame}); addCorner(inDot,UDim.new(0,999))
+        local outDot=mk("Frame",{BackgroundColor3=Color3.fromRGB(200,100,100),Size=UDim2.new(0,12,0,12),Position=UDim2.new(1,-6,0.5,-6),Parent=nodeFrame}); addCorner(outDot,UDim.new(0,999))
+        local idLabel=mk("TextLabel",{Text="id:"..tostring(#canvasNodes+1),Font=Enum.Font.Code,TextSize=9,TextColor3=Color3.fromRGB(120,120,120),Size=UDim2.new(1,-8,0,12),Position=UDim2.new(0,4,1,-16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=nodeFrame})
+        local node={Frame=nodeFrame,Type=nodeType.Name,Action=nodeActions[nodeType.Name],dragging=false,dragOffset=Vector2.new()}
+        table.insert(canvasNodes,node)
+        nodeFrame.InputBegan:Connect(function(i)
+            if i.UserInputType==Enum.UserInputType.MouseButton1 then
+                node.dragging=true; node.dragOffset=i.Position-Vector2.new(nodeFrame.AbsolutePosition.X,nodeFrame.AbsolutePosition.Y)
+            end
+        end)
+        nodeFrame.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then node.dragging=false end end)
+        UserInputService.InputChanged:Connect(function(i)
+            if node.dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
+                local newPos=Vector2.new(i.Position.X,i.Position.Y)-node.dragOffset
+                local relX=newPos.X-canvas.AbsolutePosition.X; local relY=newPos.Y-canvas.AbsolutePosition.Y
+                nodeFrame.Position=UDim2.new(0,math.clamp(relX,0,canvas.AbsoluteSize.X-114),0,math.clamp(relY,0,canvas.AbsoluteSize.Y-48))
+            end
+        end)
+        return node
+    end
+
+    for i,nt in ipairs(nodeTypes) do
+        local pb=mk("TextButton",{Text=nt.Icon.." "..nt.Name,Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=nt.Color,Size=UDim2.new(0,100,0,36),Parent=paletteRow})
+        addCorner(pb,UDim.new(0,8)); addStroke(pb,1,0.3)
+        local ntCapture=nt
+        pb.MouseButton1Click:Connect(function() clickSound(); addNode(ntCapture) end)
+    end
+
+    local ctrlRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sChain})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=ctrlRow})
+    local runBtn=makeButton(ctrlRow,"Run Chain",UDim2.new(0,160,0,40),"▶"); runBtn.Button.BackgroundColor3=Color3.fromRGB(220,255,220)
+    local clearBtn=makeButton(ctrlRow,"Clear",UDim2.new(0,120,0,40),"✕"); clearBtn.Button.BackgroundColor3=Color3.fromRGB(255,230,230)
+    local chainStatusLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Chain idle.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sChain})
+
+    runBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(runBtn.Button)
+        if #canvasNodes==0 then sendNotification("No nodes in chain.", "Warning"); return end
+        task.spawn(function()
+            chainStatusLabel.Text="Running chain..."
+            local passed,failed=0,0
+            for i,node in ipairs(canvasNodes) do
+                local prevBg=node.Frame.BackgroundColor3
+                tween(node.Frame,TweenInfo.new(0.1),{BackgroundColor3=Color3.fromRGB(255,255,180)})
+                local ok,result=pcall(function() return node.Action and node.Action() end)
+                local success=ok and result~=false
+                if success then passed=passed+1 else failed=failed+1 end
+                tween(node.Frame,TweenInfo.new(0.2),{BackgroundColor3=success and Color3.fromRGB(180,255,180) or Color3.fromRGB(255,180,180)})
+                task.wait(0.35)
+                tween(node.Frame,TweenInfo.new(0.2),{BackgroundColor3=prevBg})
+                task.wait(0.1)
+            end
+            chainStatusLabel.Text=string.format("Chain complete. ✓ %d  ✕ %d",passed,failed)
+        end)
+    end)
+    clearBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(clearBtn.Button)
+        for _,node in ipairs(canvasNodes) do node.Frame:Destroy() end
+        canvasNodes={}; connections={}; chainStatusLabel.Text="Chain cleared."
+    end)
+    -- Seed with Start node
+    addNode(nodeTypes[1], 20, 140)
 end
 
 -- ============================================================
 -- PAGE: Utilities
 -- ============================================================
-local fpsLabel, netLabel
 do
-    -- Performance Monitor
-    local _, s=makeSection(pageUtils,"Performance")
-    fpsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="FPS: --",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,16),Parent=s})
-    netLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Frame time: -- ms",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,16),Parent=s})
+    -- Performance
+    local _, sPerf=makeSection(pageUtils,"Performance Monitor")
+    local fpsLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="FPS: --  Frame: --ms",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,Size=UDim2.new(1,0,0,20),Parent=sPerf})
+    local fpsAccum=0; local fpsFrames=0; local fpsLast=os.clock()
+    RunService.RenderStepped:Connect(function(dt)
+        fpsAccum=fpsAccum+dt; fpsFrames=fpsFrames+1
+        if os.clock()-fpsLast>=0.5 then
+            local fps=fpsFrames/(os.clock()-fpsLast)
+            fpsLabel.Text=string.format("FPS: %.0f  Frame: %.2fms",fps,1000/math.max(fps,0.001))
+            fpsAccum=0; fpsFrames=0; fpsLast=os.clock()
+        end
+    end)
 
     -- System Overrides
-    local _, sOverrides=makeSection(pageUtils,"System Overrides")
-    local purgeBtn=makeButton(sOverrides,"Purge Event Hooks",UDim2.new(0,200,0,40),"⚠")
-    purgeBtn.Button.BackgroundColor3=Color3.fromRGB(255,235,235)
+    local _, sSys=makeSection(pageUtils,"System Overrides")
+    local purgeBtn=makeButton(sSys,"Purge Event Hooks",UDim2.new(0,240,0,40),"🗑")
+    purgeBtn.Button.BackgroundColor3=Color3.fromRGB(255,230,230)
     purgeBtn.Button.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(purgeBtn.Button)
-        if not getconnections then sendNotification("getconnections() missing.", "Error"); return end
-        local count=0
-        for _,sig in ipairs({RunService.RenderStepped,RunService.Stepped,RunService.Heartbeat}) do
-            for _,conn in ipairs(getconnections(sig)) do if conn.Disable then conn:Disable() else conn:Disconnect() end count=count+1 end
+        local purged=0
+        local function tryPurge(sig)
+            if sig and type(getconnections)=="function" then
+                pcall(function() for _,c in ipairs(getconnections(sig)) do c:Disconnect(); purged=purged+1 end end)
+            end
         end
-        local hum=getHumanoid()
-        if hum then
-            for _,conn in ipairs(getconnections(hum.HealthChanged)) do if conn.Disable then conn:Disable() else conn:Disconnect() end count=count+1 end
-        end
-        sendNotification("Purged "..count.." hooks.", "Success")
+        tryPurge(RunService.RenderStepped); tryPurge(RunService.Stepped)
+        tryPurge(RunService.Heartbeat)
+        local char=player.Character; local hum=char and char:FindFirstChildOfClass("Humanoid")
+        if hum then tryPurge(hum.HealthChanged) end
+        sendNotification(string.format("Purged %d event hooks.",purged), "Success")
     end)
 
     -- Network Utilities
-    local _, sNetwork=makeSection(pageUtils,"Network Utilities")
-    local MetricSpoofEnabled=false; local ReplayAmplifierEnabled=false; local CloneAmount=1
-    local SanitizeTablesEnabled=false; local AutoDecryptEnabled=false; local DecryptedLogsCount=0
-    local ReplayAmplifierToggleRef
-    makeToggle(sNetwork,"Spoof Metrics (Anti-Cheat)",false,function(on) MetricSpoofEnabled=on; if on then sendNotification("Metrics spoofing: 60FPS/45ms","Info") end end)
-    local rAt=makeToggle(sNetwork,"Amplify Next Packet",false,function(on) ReplayAmplifierEnabled=on; if on then sendNotification("Listening for next remote...","Info") end end)
-    ReplayAmplifierToggleRef=rAt
-    makeSlider(sNetwork,"Replay Count",1,10,1,function(v) CloneAmount=math.floor(v) end)
-    makeToggle(sNetwork,"Sanitize Outbound Tables",false,function(on) SanitizeTablesEnabled=on; if on then sendNotification("Table sanitizer active.","Success") end end)
-
-    -- Callback Capture
-    local _, sCallback=makeSection(pageUtils,"Callback Capture (Invoke Hijacker)")
-    local CallbackCaptureEnabled=false; local CallbackLogsCount=0
-    makeToggle(sCallback,"Enable OnClientInvoke Capture",false,function(on) CallbackCaptureEnabled=on; if on then sendNotification("Capturing Server->Client Invokes.","Info") end end)
-    local cbListFrame=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,120),ClipsDescendants=true,Parent=sCallback})
-    local cbScroll=mk("ScrollingFrame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=cbListFrame})
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=cbScroll})
-    local function logCallback(rName,args)
-        if CallbackLogsCount>30 then for _,v in ipairs(cbScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy(); break end end else CallbackLogsCount=CallbackLogsCount+1 end
-        task.defer(function()
-            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(235,240,245),Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,Parent=cbScroll})
-            addCorner(row,UDim.new(0,6)); addStroke(row,1,0.4)
-            mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6),Parent=row})
-            mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=row})
-            mk("TextLabel",{Text="[INVOKE] "..rName,Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(80,100,150),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,Parent=row})
-            local ca={}; for i,v in ipairs(args) do ca[i]=cleanTable(v) end
-            local s,ds=pcall(function() return HttpService:JSONEncode(ca) end); if not s then ds=tostring(ca) end
-            mk("TextBox",{Text=ds,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
-        end)
-    end
-    local clearCbBtn=makeButton(sCallback,"Clear Logs",UDim2.new(1,0,0,30),"✕")
-    clearCbBtn.Button.MouseButton1Click:Connect(function() clickSound(); cbScroll:ClearAllChildren(); mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=cbScroll}); CallbackLogsCount=0 end)
+    local _, sNet=makeSection(pageUtils,"Network Utilities")
+    local SpoofMetrics=false; local ReplayAmplifier=false; local SanitizeTables=false; local CallbackCapture=false; local CloneAmount=1
+    makeToggle(sNet,"Metric Spoof (60fps / 45ms)",false,function(on) SpoofMetrics=on end)
+    makeToggle(sNet,"Sanitize Tables",false,function(on) SanitizeTables=on end)
+    makeToggle(sNet,"Callback Capture",false,function(on) CallbackCapture=on end)
+    makeSlider(sNet,"Replay Clone Amount",1,10,1,function(v) CloneAmount=math.floor(v); ReplayAmplifier=CloneAmount>1 end)
 
     -- Cipher Decrypter
-    local _, sCipher=makeSection(pageUtils,"Payload Cipher Decrypter")
-    makeToggle(sCipher,"Auto-Decrypt Network Strings",false,function(on) AutoDecryptEnabled=on; if on then sendNotification("Decryptor Active.","Success") end end)
-    local cipherList=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,120),ClipsDescendants=true,Parent=sCipher})
-    local cipherScroll=mk("ScrollingFrame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=cipherList})
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=cipherScroll})
-    local function logDecrypted(rName,cType,orig,dec)
-        if DecryptedLogsCount>30 then for _,v in ipairs(cipherScroll:GetChildren()) do if v:IsA("Frame") then v:Destroy(); break end end else DecryptedLogsCount=DecryptedLogsCount+1 end
-        task.defer(function()
-            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(240,235,230),Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,Parent=cipherScroll})
-            addCorner(row,UDim.new(0,6)); addStroke(row,1,0.4)
-            mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6),Parent=row})
-            mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=row})
-            mk("TextLabel",{Text=string.format("[%s] %s",cType,rName),Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(150,80,80),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,Parent=row})
-            local dd=type(dec)=="table" and HttpService:JSONEncode(dec) or tostring(dec)
-            mk("TextBox",{Text=dd,Font=Enum.Font.RobotoMono,TextSize=11,TextColor3=Color3.fromRGB(40,40,40),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,ClearTextOnFocus=false,TextEditable=false,MultiLine=true,Parent=row})
-        end)
-    end
-    local clearCipherBtn=makeButton(sCipher,"Clear Logs",UDim2.new(1,0,0,30),"✕")
-    clearCipherBtn.Button.MouseButton1Click:Connect(function() clickSound(); cipherScroll:ClearAllChildren(); mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=cipherScroll}); DecryptedLogsCount=0 end)
+    local _, sCipher=makeSection(pageUtils,"Cipher Decrypter")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Paste a Base64 or JSON string to decode.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sCipher})
+    local cipherInput=mk("TextBox",{PlaceholderText="Paste encoded string here...",Text="",BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Font=Enum.Font.Code,TextSize=12,Parent=sCipher})
+    addCorner(cipherInput,UDim.new(0,8)); addStroke(cipherInput,1,0.3)
+    local cipherBtn=makeButton(sCipher,"Decode",UDim2.new(0,160,0,36),"🔓"); cipherBtn.Button.BackgroundColor3=Color3.fromRGB(220,255,220)
+    local cipherOut=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="",TextColor3=Color3.fromRGB(60,60,60),TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sCipher})
+    cipherBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(cipherBtn.Button)
+        local t,result=tryDecode(cipherInput.Text)
+        if t then
+            local disp=type(result)=="table" and (function() local s,j=pcall(function() return HttpService:JSONEncode(result) end); return s and j or "[table]" end)() or tostring(result)
+            cipherOut.Text=string.format("[%s] %s",t,disp)
+        else cipherOut.Text="Could not decode. Not Base64 or JSON." end
+    end)
 
     -- Hidden UI Inspector
-    local _, sUIExploits=makeSection(pageUtils,"UI Inspector (Hidden Interface Revealer)")
-    local scanUIBtn=makeButton(sUIExploits,"Scan for Hidden UI",UDim2.new(1,0,0,40),"👁")
-    local uiListFrame=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,140),ClipsDescendants=true,Parent=sUIExploits})
-    local uiListScroll=mk("ScrollingFrame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=uiListFrame})
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=uiListScroll})
-    scanUIBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(scanUIBtn.Button); uiListScroll:ClearAllChildren(); mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=uiListScroll})
-        local fc=0
-        local function addEntry(obj,prop)
-            fc=fc+1
-            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(240,235,230),Size=UDim2.new(1,0,0,30),Parent=uiListScroll})
-            addCorner(row,UDim.new(0,6))
-            mk("TextLabel",{Text=obj.Name,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(60,60,60),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(0.6,0,1,0),Position=UDim2.new(0,8,0,0),BackgroundTransparency=1,Parent=row})
-            local tb=mk("TextButton",{Text=obj[prop] and "ON" or "OFF",Font=Enum.Font.GothamBold,TextSize=11,BackgroundColor3=obj[prop] and Color3.fromRGB(200,230,200) or Color3.fromRGB(230,200,200),Size=UDim2.new(0,40,0,22),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-6,0.5,0),Parent=row})
-            addCorner(tb,UDim.new(0,4))
-            tb.MouseButton1Click:Connect(function() clickSound(); obj[prop]=not obj[prop]; tb.Text=obj[prop] and "ON" or "OFF"; tb.BackgroundColor3=obj[prop] and Color3.fromRGB(200,230,200) or Color3.fromRGB(230,200,200) end)
-        end
-        for _,sg in ipairs(playerGui:GetChildren()) do
-            if sg:IsA("ScreenGui") and sg.Name~="PaperClayUI" then
-                if not sg.Enabled then addEntry(sg,"Enabled")
-                else for _,f in ipairs(sg:GetChildren()) do if f:IsA("GuiObject") and not f.Visible then addEntry(f,"Visible") end end end
+    local _, sUI=makeSection(pageUtils,"Hidden UI Inspector")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Scans PlayerGui for hidden ScreenGui / GuiObjects.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sUI})
+    local uiScanBtn=makeButton(sUI,"Scan Hidden UI",UDim2.new(0,200,0,36),"👁"); uiScanBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
+    local uiScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,160),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sUI})
+    addCorner(uiScroll,UDim.new(0,8)); addStroke(uiScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=uiScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=uiScroll})
+    uiScanBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(uiScanBtn.Button)
+        uiScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=uiScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=uiScroll})
+        local found=0
+        for _,obj in ipairs(playerGui:GetDescendants()) do
+            local hidden=(obj:IsA("ScreenGui") and not obj.Enabled) or (obj:IsA("GuiObject") and not obj.Visible)
+            if hidden then
+                found=found+1
+                local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Parent=uiScroll})
+                addCorner(row,UDim.new(0,5)); addStroke(row,1,0.25)
+                mk("TextLabel",{Text=obj.ClassName..": "..obj:GetFullName(),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(60,60,60),Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-90,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextTruncate=Enum.TextTruncate.AtEnd,Parent=row})
+                local showBtn=mk("TextButton",{Text="Show",Font=Enum.Font.GothamBold,TextSize=10,BackgroundColor3=Color3.fromRGB(220,240,220),Size=UDim2.new(0,68,0,24),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-8,0.5,0),Parent=row})
+                addCorner(showBtn,UDim.new(0,5))
+                local objCapture=obj
+                showBtn.MouseButton1Click:Connect(function()
+                    clickSound(); pulseClick(showBtn)
+                    if objCapture:IsA("ScreenGui") then objCapture.Enabled=not objCapture.Enabled; showBtn.Text=objCapture.Enabled and "Hide" or "Show"
+                    elseif objCapture:IsA("GuiObject") then objCapture.Visible=not objCapture.Visible; showBtn.Text=objCapture.Visible and "Hide" or "Show" end
+                end)
             end
         end
-        if fc==0 then mk("TextLabel",{Text="No hidden interfaces found.",Size=UDim2.new(1,0,0,20),BackgroundTransparency=1,TextColor3=Color3.fromRGB(150,150,150),Font=Enum.Font.GothamMedium,TextSize=12,Parent=uiListScroll}) end
-        sendNotification("Scan Complete. Found: "..fc, "Success")
+        if found==0 then mk("TextLabel",{Text="No hidden UI found.",BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=uiScroll}) end
+        sendNotification("UI scan complete. Found "..found.." hidden elements.", found>0 and "Warning" or "Info")
     end)
 
-    -- Tool Dropper
-    local _, sTools=makeSection(pageUtils,"Tool Dropper")
-    local dropBtn=makeButton(sTools,"Force Drop Equipped",UDim2.new(0,220,0,40),"▼")
+    -- Tool Utilities
+    local _, sTool=makeSection(pageUtils,"Tool Utilities")
+    local dropBtn=makeButton(sTool,"Force Drop Tool",UDim2.new(0,200,0,36),"🗑")
     dropBtn.Button.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(dropBtn.Button)
-        local ch=getCharacter(); local tool=ch and ch:FindFirstChildOfClass("Tool")
-        if tool then tool.CanBeDropped=true; tool.Parent=Workspace; sendNotification("Dropped: "..tool.Name,"Success")
-        else sendNotification("No tool equipped.","Warning") end
+        local char=player.Character; local tool=char and char:FindFirstChildOfClass("Tool")
+        if tool then pcall(function() tool.Parent=player.Backpack end); sendNotification("Tool unequipped: "..tool.Name, "Success")
+        else sendNotification("No tool equipped.", "Warning") end
     end)
-    local unlockBtn=makeButton(sTools,"Unlock All Tools",UDim2.new(0,220,0,40),"🔓")
+    local unlockBtn=makeButton(sTool,"Unlock All Droppable",UDim2.new(0,200,0,36),"🔓")
     unlockBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(unlockBtn.Button); local count=0; local list={}
-        if player.Character then table.insert(list,player.Character) end
-        if player.Backpack then table.insert(list,player.Backpack) end
-        for _,parent in ipairs(list) do for _,t in ipairs(parent:GetChildren()) do if t:IsA("Tool") then t.CanBeDropped=true; count=count+1 end end end
-        sendNotification("Unlocked "..count.." tools.","Success")
+        clickSound(); pulseClick(unlockBtn.Button)
+        local count=0
+        for _,obj in ipairs(player.Backpack:GetChildren()) do
+            if obj:IsA("Tool") then pcall(function() obj.CanBeDropped=true; count=count+1 end) end
+        end
+        sendNotification(string.format("Unlocked %d tools.",count), "Success")
+    end)
+    local ghostBtn=makeButton(sTool,"Ghost Equip",UDim2.new(0,200,0,36),"👻")
+    ghostBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(ghostBtn.Button)
+        local char=player.Character; local tool=char and char:FindFirstChildOfClass("Tool")
+        if not tool then sendNotification("No tool equipped.", "Warning"); return end
+        local count=0
+        for _,part in ipairs(tool:GetDescendants()) do
+            if part:IsA("BasePart") then pcall(function() part:Destroy(); count=count+1 end) end
+        end
+        sendNotification(string.format("Ghost equip: destroyed %d parts in '%s'.",count,tool.Name), "Success")
     end)
 
-    -- Ghost Equip
-    local _, sFake=makeSection(pageUtils,"Fake Equip (Ghost Mode)")
-    local GhostEquipEnabled=false
-    makeToggle(sFake,"Enable Ghost Equip",false,function(on) GhostEquipEnabled=on; if on then sendNotification("Ghost Mode Active","Success") end end)
-    local function onCharAdded(char)
-        char.ChildAdded:Connect(function(child)
-            if GhostEquipEnabled and child:IsA("Tool") then
-                task.wait()
-                for _,desc in ipairs(child:GetDescendants()) do if desc:IsA("BasePart") or desc:IsA("MeshPart") or desc:IsA("UnionOperation") then desc:Destroy() end end
-                sendNotification("Ghost Equipped: "..child.Name,"Info")
+    -- Chrono Bypass
+    local _, sChrono=makeSection(pageUtils,"Chrono-Bypass")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Hooks tick/os.time/time to return modified values for cooldown bypass.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,36),Parent=sChrono})
+    local ChronoMode="off"
+    local function makeChronoBtn(label, mode, color)
+        local b=makeButton(sChrono,label,UDim2.new(0,180,0,36),"⏱"); b.Button.BackgroundColor3=color
+        b.Button.MouseButton1Click:Connect(function()
+            clickSound(); pulseClick(b.Button); ChronoMode=mode
+            if hookfunction and type(hookfunction)=="function" then
+                if mode=="past" then
+                    pcall(function() hookfunction(tick, function() return 1 end) end)
+                    pcall(function() hookfunction(os.time, function() return 1 end) end)
+                    pcall(function() hookfunction(time, function() return 1 end) end)
+                elseif mode=="future" then
+                    pcall(function() hookfunction(tick, function() return 1000000 end) end)
+                    pcall(function() hookfunction(os.time, function() return 1000000 end) end)
+                    pcall(function() hookfunction(time, function() return 1000000 end) end)
+                end
             end
+            sendNotification("Chrono mode: "..mode, "Info")
         end)
     end
-    if player.Character then onCharAdded(player.Character) end
-    player.CharacterAdded:Connect(onCharAdded)
-
-    -- Chrono-Bypass
-    local _, sChrono=makeSection(pageUtils,"Chrono-Bypass (Cooldown Freezer)")
-    local ChronoEnabled=false; local ChronoMode="Past"
-    makeToggle(sChrono,"Enable Time Hook",false,function(on) ChronoEnabled=on; if on then sendNotification("Chrono Active: "..ChronoMode,"Success") end end)
-    makeToggle(sChrono,"Future Mode",false,function(on) ChronoMode=on and "Future" or "Past"; if ChronoEnabled then sendNotification("Chrono Mode: "..ChronoMode,"Info") end end)
-    if not _G.ChronoHookInstalled and hookfunction and checkcaller then
-        _G.ChronoHookInstalled=true
-        local ot,oos,otm
-        ot=hookfunction(tick,function(...) if ChronoEnabled and not checkcaller() then return ChronoMode=="Past" and 1 or ot()+1000000 end return ot(...) end)
-        oos=hookfunction(os.time,function(...) if ChronoEnabled and not checkcaller() then return ChronoMode=="Past" and 1 or oos()+1000000 end return oos(...) end)
-        otm=hookfunction(time,function(...) if ChronoEnabled and not checkcaller() then return ChronoMode=="Past" and 1 or otm()+1000000 end return otm(...) end)
-    end
+    local chronoRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,40),Parent=sChrono})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=chronoRow})
+    makeChronoBtn("Past (freeze)",  "past",   Color3.fromRGB(200,220,255))
+    makeChronoBtn("Future (unlock)","future", Color3.fromRGB(220,255,200))
 
     -- Physics & Fling
-    local _, sPhysics=makeSection(pageUtils,"Physics & Fling")
-    local FlingEnabled=false; local FlingConnection=nil; local FlingTool=nil; local FlingNoCols={}
-    makeToggle(sPhysics,"Tool Fling Aura (Equip First)",false,function(on)
-        FlingEnabled=on
-        if on then
-            local char=getCharacter(); local tool=char and char:FindFirstChildOfClass("Tool")
-            local handle=tool and (tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart"))
-            if not tool or not handle then sendNotification("Equip a tool first.","Error"); FlingEnabled=false; return end
-            FlingTool=tool; sendNotification("Fling Aura Active!","Success")
-            local rg=char:FindFirstChild("RightGrip",true); if rg then rg:Destroy() end
-            for _,part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then local nc=Instance.new("NoCollisionConstraint"); nc.Part0=handle; nc.Part1=part; nc.Parent=handle; table.insert(FlingNoCols,nc) end
+    local _, sPhys=makeSection(pageUtils,"Physics & Fling")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Tool Fling Aura: removes RightGrip, adds NoCollisionConstraints, applies extreme velocity.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,36),Parent=sPhys})
+    local flingBtn=makeButton(sPhys,"Tool Fling Aura",UDim2.new(0,200,0,36),"💥"); flingBtn.Button.BackgroundColor3=Color3.fromRGB(255,220,220)
+    flingBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(flingBtn.Button)
+        local char=player.Character; local tool=char and char:FindFirstChildOfClass("Tool")
+        if not tool then sendNotification("No tool equipped for fling.", "Warning"); return end
+        local count=0
+        pcall(function()
+            local grip=char:FindFirstChild("RightGrip"); if grip then grip:Destroy() end
+            for _,part in ipairs(tool:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local nc=Instance.new("NoCollisionConstraint"); nc.Part0=part
+                    local hrp=char:FindFirstChild("HumanoidRootPart"); if hrp then nc.Part1=hrp end
+                    nc.Parent=part; part.AssemblyLinearVelocity=Vector3.new(50000,50000,50000); count=count+1
+                end
             end
-            FlingConnection=RunService.Heartbeat:Connect(function()
-                if char and char:FindFirstChild("HumanoidRootPart") and handle and handle.Parent then
-                    handle.CFrame=char.HumanoidRootPart.CFrame
-                    handle.AssemblyLinearVelocity=Vector3.new(50000,50000,50000)
-                    handle.AssemblyAngularVelocity=Vector3.new(50000,50000,50000)
-                    handle.CanCollide=true
-                else if FlingConnection then FlingConnection:Disconnect() end end
-            end)
-        else
-            if FlingConnection then FlingConnection:Disconnect(); FlingConnection=nil end
-            for _,nc in ipairs(FlingNoCols) do nc:Destroy() end; FlingNoCols={}
-            if FlingTool and FlingTool.Parent then FlingTool.Parent=player.Backpack end
-            sendNotification("Fling Aura Disabled.","Info")
-        end
+        end)
+        sendNotification(string.format("Fling aura applied to %d parts.",count), "Warning")
     end)
 
     -- Signal Viewer
-    local _, sSignals=makeSection(pageUtils,"Signal Viewer")
-    local SelectorEnabled=false
-    local SelectionBox=mk("SelectionBox",{LineThickness=0.05,Color3=Color3.fromRGB(255,100,100),SurfaceTransparency=0.8,Parent=playerGui})
-    local signalList=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,120),Parent=sSignals,ClipsDescendants=true})
-    local signalScroll=mk("ScrollingFrame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,0),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=signalList})
-    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=signalScroll})
-    local function analyzeSignals(target)
-        signalScroll:ClearAllChildren(); mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=signalScroll})
-        if not getconnections then mk("TextLabel",{Text="getconnections() missing",Size=UDim2.new(1,0,0,20),BackgroundTransparency=1,TextColor3=Color3.fromRGB(150,50,50),Font=Enum.Font.GothamBold,TextSize=12,Parent=signalScroll}); return end
-        local found=0
-        local function check(obj,eventName)
-            if not obj then return end; local ev=obj[eventName]
-            for _,conn in ipairs(getconnections(ev)) do
-                found=found+1; local func=conn.Function; local scriptName="Unknown"; local scriptObj=nil
-                if func then local env=getfenv(func); if env and env.script then scriptName=env.script.Name; scriptObj=env.script else scriptName=debug.info(func,"s") end end
-                local row=mk("TextButton",{Text="",AutoButtonColor=false,BackgroundColor3=Color3.fromRGB(240,235,230),Size=UDim2.new(1,0,0,22),Parent=signalScroll})
-                addCorner(row,UDim.new(0,4))
-                mk("TextLabel",{Text=string.format("  %s -> %s",eventName,scriptName),TextColor3=Color3.fromRGB(60,60,60),Font=Enum.Font.RobotoMono,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-30,1,0),BackgroundTransparency=1,Parent=row})
-                hookHover(row,Color3.fromRGB(240,235,230),Color3.fromRGB(230,225,220),1,1)
-                row.MouseButton1Click:Connect(function() clickSound(); if scriptObj then displayDecompiledScript(scriptObj) else sendNotification("Cannot locate Script for decompilation.","Warning") end end)
-            end
-        end
-        check(target,"Touched"); check(target,"TouchEnded"); check(target,"MouseClick")
-        for _,c in ipairs(target:GetChildren()) do
-            if c:IsA("ClickDetector") then check(c,"MouseClick") end
-            if c:IsA("ProximityPrompt") then check(c,"Triggered") end
-        end
-        if found==0 then mk("TextLabel",{Text="No local connections found.",Size=UDim2.new(1,0,0,20),BackgroundTransparency=1,TextColor3=Color3.fromRGB(150,150,150),Font=Enum.Font.GothamMedium,TextSize=12,Parent=signalScroll}) end
-    end
-    makeToggle(sSignals,"Enable Selector",false,function(on) SelectorEnabled=on; SelectionBox.Adornee=nil; if on then sendNotification("Click a part to view signals.","Info") end end)
-    RunService.RenderStepped:Connect(function()
-        if not SelectorEnabled then return end
-        local mouse=player:GetMouse(); local target=mouse.Target
-        if target then SelectionBox.Adornee=target else SelectionBox.Adornee=nil end
-    end)
-    UserInputService.InputBegan:Connect(function(input,processed)
-        if processed then return end
-        if SelectorEnabled and input.UserInputType==Enum.UserInputType.MouseButton1 then
-            local target=SelectionBox.Adornee; if target then clickSound(); analyzeSignals(target) end
-        end
+    local _, sSig=makeSection(pageUtils,"Signal Viewer")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,Text="Click a part in the workspace to view its connected signals. Requires getconnections.",TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,36),Parent=sSig})
+    local sigListening=false; local sigToggle=makeButton(sSig,"Start Listening",UDim2.new(0,200,0,36),"👂"); sigToggle.Button.BackgroundColor3=Color3.fromRGB(220,240,220)
+    local sigScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,140),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sSig})
+    addCorner(sigScroll,UDim.new(0,8)); addStroke(sigScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=sigScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=sigScroll})
+    local sigConn=nil
+    sigToggle.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(sigToggle.Button)
+        sigListening=not sigListening; sigToggle.Label.Text=sigListening and "Stop Listening" or "Start Listening"
+        if sigListening then
+            sigConn=UserInputService.InputBegan:Connect(function(i)
+                if not sigListening then return end
+                if i.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+                local cam=Workspace.CurrentCamera; local mouse=player:GetMouse()
+                local ray=cam:ScreenPointToRay(mouse.X, mouse.Y)
+                local result=Workspace:Raycast(ray.Origin, ray.Direction*500)
+                if result and result.Instance then
+                    local part=result.Instance
+                    sigScroll:ClearAllChildren()
+                    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=sigScroll})
+                    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=sigScroll})
+                    local titleRow=mk("TextLabel",{Text="Signals for: "..part.Name,Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(50,50,50),Size=UDim2.new(1,0,0,16),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=sigScroll})
+                    local signals={"Touched","TouchEnded","Changed"}
+                    for _,sigName in ipairs(signals) do
+                        local sig=part[sigName]
+                        if sig and type(getconnections)=="function" then
+                            local conns; pcall(function() conns=getconnections(sig) end)
+                            if conns and #conns>0 then
+                                for ci,conn in ipairs(conns) do
+                                    local connRow=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,26),Parent=sigScroll})
+                                    addCorner(connRow,UDim.new(0,4)); addStroke(connRow,1,0.3)
+                                    mk("TextLabel",{Text=string.format("[%s] conn%d",sigName,ci),Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(60,60,60),Size=UDim2.new(1,-80,1,0),Position=UDim2.new(0,6,0,0),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=connRow})
+                                    local decompBtn=mk("TextButton",{Text="Decompile",Font=Enum.Font.GothamBold,TextSize=9,BackgroundColor3=Color3.fromRGB(220,220,255),Size=UDim2.new(0,72,0,20),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-4,0.5,0),Parent=connRow})
+                                    addCorner(decompBtn,UDim.new(0,4))
+                                    local connCapture=conn
+                                    decompBtn.MouseButton1Click:Connect(function()
+                                        clickSound()
+                                        local src; pcall(function() src=connCapture.Function end)
+                                        if src and getfenv then
+                                            local env; pcall(function() env=getfenv(src) end)
+                                            if env and env.script then displayDecompiledScript(env.script); return end
+                                        end
+                                        sendNotification("Could not resolve script for this connection.", "Warning")
+                                    end)
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        else if sigConn then sigConn:Disconnect(); sigConn=nil end end
     end)
 
     -- UI Scale
-    local _, s2=makeSection(pageUtils,"UI Scale")
-    makeSlider(s2,"Scale",0.7,1.3,1.0,function(v) local scale=screenGui:FindFirstChild("UIScale") or mk("UIScale",{Parent=screenGui}); scale.Scale=v end)
-
-    -- MASTER HOOK
-    local SpoofedItems={}; local FakeCache={}
-    local TokenForgerEnabled=false; local TokenCache={}; local TokenCacheLabel=nil
-    if not _G.PaperClayHookInstalled and getrawmetatable and hookmetamethod and checkcaller and setreadonly and newcclosure then
-        _G.PaperClayHookInstalled=true
-        local mt=getrawmetatable(game)
-        local old_nc,old_idx=mt.__namecall,mt.__index
-        local old_nidx=mt.__newindex
-        setreadonly(mt,false)
-        mt.__newindex=newcclosure(function(self,idx,val)
-            if not checkcaller() and typeof(self)=="Instance" and self:IsA("RemoteFunction") and idx=="OnClientInvoke" and type(val)=="function" then
-                local orig=val
-                val=newcclosure(function(...)
-                    if CallbackCaptureEnabled then local args={...}; logCallback(self.Name,args) end
-                    return orig(...)
-                end)
-            end
-            return old_nidx(self,idx,val)
-        end)
-        mt.__namecall=newcclosure(function(self,...)
-            local method=getnamecallmethod(); local args={...}
-            if not checkcaller() then
-                if method=="FindFirstChild" or method=="WaitForChild" then
-                    local name=args[1]
-                    if SpoofedItems[name] and (self==player.Backpack or self==player.Character) then
-                        local real=old_nc(self,...)
-                        if real then return real end
-                        if not FakeCache[name] then local f=Instance.new("Tool"); f.Name=name; FakeCache[name]=f end
-                        return FakeCache[name]
-                    end
-                end
-                if method=="FireServer" then
-                    local rName=self.Name
-                    if SanitizeTablesEnabled then local ca={}; for i,v in ipairs(args) do ca[i]=cleanTable(v) end; args=ca end
-                    if AutoDecryptEnabled then
-                        for _,v in ipairs(args) do if type(v)=="string" and #v>5 then local ct,dec=tryDecode(v); if ct then logDecrypted(rName,ct,v,dec) end end end
-                    end
-                    if TokenForgerEnabled then
-                        local lt=nil; for i=#args,1,-1 do if type(args[i])=="string" and #args[i]>5 then lt=args[i]; break end end
-                        if lt then TokenCache[rName]=lt; if TokenCacheLabel then TokenCacheLabel.Text="Cached: "..rName.." ("..lt:sub(1,6).."...)" end end
-                    end
-                    if ReplayAmplifierEnabled then
-                        ReplayAmplifierEnabled=false; if ReplayAmplifierToggleRef then ReplayAmplifierToggleRef.Set(false) end
-                        if CloneAmount>1 then for i=1,CloneAmount-1 do old_nc(self,unpack(args)) end end
-                        return old_nc(self,unpack(args))
-                    end
-                    if MetricSpoofEnabled then
-                        local n=self.Name:lower()
-                        if n:find("ping") or n:find("fps") or n:find("heartbeat") or n:find("analytic") then
-                            local na={}; for i,v in ipairs(args) do if type(v)=="number" then if v>65 then table.insert(na,60) elseif v<40 then table.insert(na,45) else table.insert(na,v) end else table.insert(na,v) end end
-                            return old_nc(self,unpack(na))
-                        end
-                    end
-                    if SanitizeTablesEnabled then return old_nc(self,unpack(args)) end
-                end
-            end
-            return old_nc(self,...)
-        end)
-        mt.__index=newcclosure(function(self,index)
-            if not checkcaller() and SpoofedItems[index] and (self==player.Backpack or self==player.Character) then
-                local real=old_idx(self,index); if real then return real end
-                if not FakeCache[index] then local f=Instance.new("Tool"); f.Name=index; FakeCache[index]=f end
-                return FakeCache[index]
-            end
-            return old_idx(self,index)
-        end)
-    end
-end
-
--- FPS counter
-do
-    local acc,frames=0,0
-    RunService.RenderStepped:Connect(function(dt)
-        acc=acc+dt; frames=frames+1
-        if acc>=0.5 then
-            if fpsLabel then fpsLabel.Text=string.format("FPS: %d",math.floor(frames/acc+0.5)) end
-            if netLabel then netLabel.Text=string.format("Frame time: %.1f ms",dt*1000) end
-            acc=0; frames=0
-        end
+    local _, sScale=makeSection(pageUtils,"UI Scale")
+    makeSlider(sScale,"Window Scale",0.7,1.3,1.0,function(v)
+        local sz=window.Size; window.Size=UDim2.new(0,math.floor(960*v),0,math.floor(580*v))
     end)
-end
-
--- ============================================================
--- PAGE: Chain Builder (Visual Node Editor — powered by RAE)
--- ============================================================
-local pageChain = makePage("Chain")
-pageChain.ScrollingEnabled = false
-
-do
-    local editorFrame=mk("Frame",{Name="EditorCanvas",BackgroundColor3=Color3.fromRGB(242,238,232),BorderSizePixel=0,ClipsDescendants=true,Size=UDim2.new(1,0,1,-50),Position=UDim2.new(0,0,0,50),Parent=pageChain})
-    addCorner(editorFrame,UDim.new(0,12)); addStroke(editorFrame,1,0.2)
-    local container=mk("Frame",{Name="Container",BackgroundTransparency=1,Size=UDim2.new(0,0,0,0),Position=UDim2.new(0.5,0,0.5,0),Parent=editorFrame})
-    local linesFolder=mk("Folder",{Name="Lines",Parent=container})
-    local toolbar=mk("Frame",{Name="Toolbar",BackgroundTransparency=1,Size=UDim2.new(1,0,0,40),Parent=pageChain})
-    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,HorizontalAlignment=Enum.HorizontalAlignment.Left,VerticalAlignment=Enum.VerticalAlignment.Center,Padding=UDim.new(0,10),Parent=toolbar})
-
-    local nodes,connections,draggingNode,activeConnectionLine,connectingFrom={},{},nil,nil,nil
-    local function generateId() return HttpService:GenerateGUID(false) end
-
-    local function drawLine(p1,p2,parent,existingLine)
-        local v=p2-p1; local center=(p1+p2)/2; local length=v.Magnitude; local angle=math.atan2(v.Y,v.X)
-        local line=existingLine
-        if not line then line=mk("Frame",{BackgroundColor3=Color3.fromRGB(100,90,80),BorderSizePixel=0,AnchorPoint=Vector2.new(0.5,0.5),ZIndex=1,Parent=parent}) end
-        line.Size=UDim2.new(0,length,0,2); line.Position=UDim2.new(0,center.X,0,center.Y); line.Rotation=math.deg(angle)
-        return line
-    end
-
-    local function updateConnections()
-        for _,conn in ipairs(connections) do
-            local n1,n2=nodes[conn.From],nodes[conn.To]
-            if n1 and n2 and n1.UI and n2.UI then
-                local outDot,inDot=n1.UI:FindFirstChild("OutDot",true),n2.UI:FindFirstChild("InDot",true)
-                if outDot and inDot then
-                    local p1,p2=outDot.AbsolutePosition+outDot.AbsoluteSize/2,inDot.AbsolutePosition+inDot.AbsoluteSize/2
-                    local cAbs=container.AbsolutePosition
-                    conn.LineUI=drawLine(p1-cAbs,p2-cAbs,linesFolder,conn.LineUI)
-                end
-            end
-        end
-    end
-
-    local function spawnNode(nType, posOffset)
-        local id=generateId(); local nodeWidth=150
-        local nodeFrame=mk("Frame",{Name="Node_"..nType,BackgroundColor3=Color3.fromRGB(250,248,245),Size=UDim2.new(0,nodeWidth,0,0),AutomaticSize=Enum.AutomaticSize.Y,Position=posOffset or UDim2.new(0,-70,0,-50),ZIndex=5,Parent=container})
-        addCorner(nodeFrame,UDim.new(0,8)); addStroke(nodeFrame,1,0.4); addShadow(nodeFrame,4)
-        local header=mk("TextButton",{Text="  "..nType,AutoButtonColor=false,BackgroundColor3=Color3.fromRGB(235,230,222),Size=UDim2.new(1,0,0,24),Font=Enum.Font.GothamBold,TextColor3=Color3.fromRGB(60,55,50),TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,Parent=nodeFrame})
-        addCorner(header,UDim.new(0,8)); mk("Frame",{BackgroundColor3=header.BackgroundColor3,BorderSizePixel=0,Position=UDim2.new(0,0,1,-4),Size=UDim2.new(1,0,0,4),Parent=header})
-        local content=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,0,0,28),Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=nodeFrame})
-        mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,8),Parent=content})
-        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,6),Parent=content})
-
-        local data={}
-        if nType~="Start" then
-            local inp=mk("TextBox",{Text="",PlaceholderText=nType=="Fire Remote" and "Remote name..." or nType=="Wait" and "Seconds..." or "Item name...",BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,22),Font=Enum.Font.GothamMedium,TextSize=12,Parent=content})
-            addCorner(inp,UDim.new(0,6)); addStroke(inp,1,0.4)
-            data.Input=inp; data.Value=inp.Text
-            inp:GetPropertyChangedSignal("Text"):Connect(function() data.Value=inp.Text end)
-        end
-
-        local dotRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,16),Parent=content})
-        local inDot=mk("Frame",{Name="InDot",BackgroundColor3=Color3.fromRGB(160,140,120),Size=UDim2.new(0,12,0,12),AnchorPoint=Vector2.new(0,0.5),Position=UDim2.new(0,-4,0.5,0),ZIndex=6,Parent=dotRow})
-        addCorner(inDot,UDim.new(0,999))
-        local outDot=mk("TextButton",{Name="OutDot",Text="",AutoButtonColor=false,BackgroundColor3=Color3.fromRGB(120,160,120),Size=UDim2.new(0,12,0,12),AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,4,0.5,0),ZIndex=6,Parent=dotRow})
-        addCorner(outDot,UDim.new(0,999))
-
-        local node={ID=id,Type=nType,UI=nodeFrame,Data=data,Next=nil}
-        nodes[id]=node
-
-        outDot.InputBegan:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 then
-                connectingFrom=id
-                activeConnectionLine=mk("Frame",{BackgroundColor3=Color3.fromRGB(100,90,80),BorderSizePixel=0,AnchorPoint=Vector2.new(0.5,0.5),ZIndex=1,Parent=linesFolder})
-            end
-        end)
-
-        inDot.InputBegan:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 and connectingFrom and connectingFrom~=id then
-                nodes[connectingFrom].Next=id
-                table.insert(connections,{From=connectingFrom,To=id})
-                connectingFrom=nil
-                if activeConnectionLine then activeConnectionLine:Destroy(); activeConnectionLine=nil end
-                updateConnections()
-            end
-        end)
-
-        header.InputBegan:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 then draggingNode=id end
-        end)
-        header.InputEnded:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 then draggingNode=nil end
-        end)
-
-        return node
-    end
-
-    RunService.RenderStepped:Connect(function()
-        if draggingNode and nodes[draggingNode] then
-            local mouse=player:GetMouse(); local cAbs=container.AbsolutePosition
-            nodes[draggingNode].UI.Position=UDim2.new(0,mouse.X-cAbs.X-75,0,mouse.Y-cAbs.Y-12)
-            updateConnections()
-        end
-        if connectingFrom and activeConnectionLine and nodes[connectingFrom] then
-            local mouse=player:GetMouse(); local outDot=nodes[connectingFrom].UI:FindFirstChild("OutDot",true)
-            if outDot then
-                local cAbs=container.AbsolutePosition
-                local p1=outDot.AbsolutePosition+outDot.AbsoluteSize/2-cAbs
-                local p2=Vector2.new(mouse.X-cAbs.X,mouse.Y-cAbs.Y)
-                drawLine(p1,p2,linesFolder,activeConnectionLine)
-            end
-        end
-    end)
-
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType==Enum.UserInputType.MouseButton1 then
-            if connectingFrom and not activeConnectionLine then connectingFrom=nil end
-        end
-    end)
-
-    -- RAE-powered chain execution
-    local function runChain()
-        local current=nil
-        for _,n in pairs(nodes) do if n.Type=="Start" then current=n; break end end
-        if not current then sendNotification("No Start node found!","Warning"); return end
-        sendNotification("Running Chain...","Info")
-        task.spawn(function()
-            while current do
-                local oldColor=current.UI.BackgroundColor3
-                tween(current.UI,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(200,255,200)})
-                if current.Type=="Wait" then task.wait(tonumber(current.Data.Value) or 1)
-                elseif current.Type=="Fire Remote" then
-                    local rName=current.Data.Value
-                    local rem=ReplicatedStorage:FindFirstChild(rName,true)
-                    if rem and rem:IsA("RemoteEvent") then
-                        rem:FireServer(); sendNotification("Fired: "..rName,"Success")
-                    else sendNotification("Remote not found: "..(rName or ""),"Error") end
-                elseif current.Type=="Check Inventory" then
-                    local item=current.Data.Value
-                    if not(player.Backpack:FindFirstChild(item) or (player.Character and player.Character:FindFirstChild(item))) then
-                        sendNotification("Missing: "..item,"Warning")
-                        tween(current.UI,TweenInfo.new(0.5),{BackgroundColor3=oldColor}); break
-                    end
-                elseif current.Type=="RAE Scan" then
-                    sendNotification("Chain: RAE Scan","Info")
-                    RAE_Scan(); task.wait(0.5)
-                elseif current.Type=="RAE Plan" then
-                    sendNotification("Chain: RAE Plan","Info")
-                    RAE_Plan(); task.wait(0.5)
-                elseif current.Type=="RAE Commit" then
-                    sendNotification("Chain: RAE Commit","Info")
-                    if #RAE_State.SelectedCards>0 then RAE_Commit(); task.wait(1) end
-                end
-                tween(current.UI,TweenInfo.new(0.5),{BackgroundColor3=oldColor})
-                current=current.Next and nodes[current.Next] or nil
-            end
-            sendNotification("Chain Finished.","Success")
-        end)
-    end
-
-    local function addToolBtn(txt,func)
-        local b=makeButton(toolbar,txt,UDim2.new(0,110,0,32),"＋")
-        b.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(b.Button); func() end)
-    end
-
-    addToolBtn("Wait",         function() spawnNode("Wait") end)
-    addToolBtn("Fire Remote",  function() spawnNode("Fire Remote") end)
-    addToolBtn("Check Inv.",   function() spawnNode("Check Inventory") end)
-    addToolBtn("RAE Scan",     function() spawnNode("RAE Scan") end)
-    addToolBtn("RAE Plan",     function() spawnNode("RAE Plan") end)
-    addToolBtn("RAE Commit",   function() spawnNode("RAE Commit") end)
-
-    local runBtn=makeButton(toolbar,"Run",UDim2.new(0,90,0,32),"▶")
-    runBtn.Button.BackgroundColor3=Color3.fromRGB(220,235,220)
-    runBtn.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(runBtn.Button); runChain() end)
-
-    local clearBtn=makeButton(toolbar,"Clear",UDim2.new(0,80,0,32),"✕")
-    clearBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(clearBtn.Button)
-        for _,n in pairs(nodes) do if n.Type~="Start" then n.UI:Destroy() end end
-        nodes={}; connections={}; linesFolder:ClearAllChildren()
-        spawnNode("Start",UDim2.new(0.5,-70,0.5,-150))
-    end)
-
-    spawnNode("Start",UDim2.new(0.5,-70,0.5,-150))
 end
 
 -- ============================================================
 -- PAGE: About
 -- ============================================================
 do
-    local _, s=makeSection(pageAbout,"About")
+    local _, sAbout=makeSection(pageAbout,"About")
     mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
-        Text="Paper & Clay + RAE Combined Edition.\n\nRAE: Recursive Autonomous Engine — a 7-layer autonomous AI agent that discovers the game environment, generates action cards, plans with Monte Carlo Tree Search, executes with causal dependency resolution, and learns through Bayesian inference.\n\nBuilt from the ground up. Every cycle it gets smarter.",
-        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,120),Parent=s})
-    local _, s2=makeSection(pageAbout,"Quick Links")
-    local b1=makeButton(s2,"Open RAE",UDim2.new(0,220,0,40),"🧠"); b1.Button.Name="GoRAE"
-    local b2=makeButton(s2,"Toggle Minimize",UDim2.new(0,220,0,40),"—"); b2.Button.Name="DoMinimize"
+        Text="Paper & Clay + RAE v2.0 — Deep Intelligence Edition\n\nRAE (Recursive Autonomous Engine) is a 7-layer autonomous agent extended with four new deep intelligence modules:\n\n• StateSignature φ(S): Compact, canonical, hash-stable state token enabling state-conditional learning.\n• LWM (Living World Model): Ring-buffer temporal model with delta tracking and remote co-firing registry.\n• ETM (Empirical Transition Model): State-conditional Bayesian P(success|card, φ(S)) with Welford variance and convergence detection.\n• CDG (Causal Dependency Graph): Co-execution effect size and confidence tracking for causal chain reordering.\n• Risk-Adjusted MCTS: E[U(π)] − λ·Var[U(π)] planning criterion with ETM-blended rollouts.\n• Session Persistence: IntelMem, ETM, CDG tables stored in _G across sessions.\n• Brier Calibration: Predicted probability vs actual outcome tracking.",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,200),Parent=sAbout})
+    local _, sLinks=makeSection(pageAbout,"Quick Nav")
+    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"}}
+    for _,nl in ipairs(navLinks) do
+        local nb=makeButton(sLinks,nl[1],UDim2.new(0,220,0,36),"→"); nb.Button.BackgroundColor3=Color3.fromRGB(220,230,255)
+        local targetName=nl[2]
+        nb.Button.MouseButton1Click:Connect(function()
+            clickSound(); pulseClick(nb.Button)
+            for _, page in ipairs(pagesFolder:GetChildren()) do page.Visible=false end
+            local pages={
+                Overview=pageOverview, Player=pagePlayer, Camera=pageCamera, World=pageWorld,
+                Discovery=pageDiscovery, RAE=pageRAE, Recursive=pageRecursive, Bridge=pageBridge,
+                Analytics=pageAnalytics, Chain=pageChain, Utilities=pageUtils, About=pageAbout
+            }
+            if pages[targetName] then pages[targetName].Visible=true; panelTitle.Text=targetName end
+        end)
+    end
 end
 
 -- ============================================================
--- NAVIGATION
+-- NAVIGATION SYSTEM
 -- ============================================================
-local pagesByName={
-    Overview=pageOverview, Player=pagePlayer, Camera=pageCamera, World=pageWorld,
-    Discovery=pageDiscovery, RAE=pageRAE, Recursive=pageRecursive,
-    Bridge=pageBridge, Chain=pageChain, Utilities=pageUtils, About=pageAbout,
+local TAB_DEFS = {
+    { Name="Overview",   Page=pageOverview,  Icon="⊙" },
+    { Name="Player",     Page=pagePlayer,    Icon="♟" },
+    { Name="Camera",     Page=pageCamera,    Icon="📷" },
+    { Name="World",      Page=pageWorld,     Icon="🌍" },
+    { Name="Discovery",  Page=pageDiscovery, Icon="🔍" },
+    { Name="RAE",        Page=pageRAE,       Icon="⚡" },
+    { Name="Recursive",  Page=pageRecursive, Icon="🧠" },
+    { Name="Bridge",     Page=pageBridge,    Icon="🔗" },
+    { Name="Analytics",  Page=pageAnalytics, Icon="📊" },
+    { Name="Chain",      Page=pageChain,     Icon="⛓" },
+    { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
+    { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
-local navButtons={}; local currentPage
+local activeTab=nil
 
-local function setActive(name)
-    if currentPage==name then return end
-    for n,p in pairs(pagesByName) do p.Visible=(n==name) end
-    panelTitle.Text=name
-    for n,btn in pairs(navButtons) do
-        if n==name then
-            tween(btn,TweenInfo.new(0.15,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{BackgroundColor3=Color3.fromRGB(252,249,244)})
-            local st=btn:FindFirstChildOfClass("UIStroke"); if st then tween(st,TweenInfo.new(0.15,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Transparency=0.1}) end
-        else
-            tween(btn,TweenInfo.new(0.15,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{BackgroundColor3=Color3.fromRGB(246,242,236)})
-            local st=btn:FindFirstChildOfClass("UIStroke"); if st then tween(st,TweenInfo.new(0.15,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Transparency=0.25}) end
+local function switchTab(tabDef)
+    if activeTab == tabDef then return end
+    for _, page in ipairs(pagesFolder:GetChildren()) do page.Visible=false end
+    tabDef.Page.Visible=true
+    panelTitle.Text=tabDef.Name
+    for _, td in ipairs(TAB_DEFS) do
+        if td._btn then
+            local isActive = (td == tabDef)
+            tween(td._btn, TweenInfo.new(0.12), {BackgroundColor3=isActive and Color3.fromRGB(236,229,219) or Color3.fromRGB(245,239,231)})
+            if td._stroke then tween(td._stroke, TweenInfo.new(0.12), {Transparency=isActive and 0.0 or 0.6}) end
         end
     end
-    contentCard.Position=contentCard.Position+UDim2.fromOffset(0,6)
-    tween(contentCard,TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Position=contentCard.Position-UDim2.fromOffset(0,6)})
-    currentPage=name
+    activeTab=tabDef
 end
 
-local function addNav(name,icon)
-    local ui=makeButton(navHolder,name,UDim2.new(1,0,0,36),icon)
-    navButtons[name]=ui.Button
-    ui.Button.MouseButton1Click:Connect(function() clickSound(); pulseClick(ui.Button); setActive(name) end)
+for _, tabDef in ipairs(TAB_DEFS) do
+    local btn=mk("TextButton",{
+        AutoButtonColor=false, BackgroundColor3=Color3.fromRGB(245,239,231),
+        BorderSizePixel=0, Size=UDim2.new(1,0,0,34), Font=Enum.Font.GothamSemibold,
+        Text=tabDef.Icon.."  "..tabDef.Name, TextColor3=Color3.fromRGB(52,47,42),
+        TextSize=12, TextXAlignment=Enum.TextXAlignment.Left, Parent=navHolder,
+    })
+    mk("UIPadding",{PaddingLeft=UDim.new(0,10),Parent=btn})
+    addCorner(btn,UDim.new(0,10))
+    local st=addStroke(btn,1,0.6); tabDef._btn=btn; tabDef._stroke=st
+    hookHover(btn,btn.BackgroundColor3,Color3.fromRGB(252,246,238),0.6,0.35)
+    btn.MouseButton1Click:Connect(function() clickSound(); switchTab(tabDef) end)
 end
 
-addNav("Overview","◫"); addNav("Player","☻"); addNav("Camera","⌁"); addNav("World","☼")
-addNav("Discovery","🔍"); addNav("RAE","⊕"); addNav("Recursive","🧠")
-addNav("Bridge","🌉"); addNav("Chain","☍"); addNav("Utilities","▦"); addNav("About","ℹ")
-setActive("Overview")
+-- Default to Overview
+switchTab(TAB_DEFS[1])
 
--- About page link wiring
-for _,d in ipairs(pageAbout:GetDescendants()) do
-    if d:IsA("TextButton") and d.Name=="GoRAE" then d.MouseButton1Click:Connect(function() clickSound(); pulseClick(d); setActive("RAE") end) end
-    if d:IsA("TextButton") and d.Name=="DoMinimize" then d.MouseButton1Click:Connect(function() clickSound(); pulseClick(d); minimize() end) end
+-- ============================================================
+-- WINDOW DRAG / RESIZE
+-- ============================================================
+do
+    local dragging=false; local dragStart; local startPos
+    topbar.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            dragging=true; dragStart=i.Position
+            startPos=Vector2.new(window.Position.X.Offset, window.Position.Y.Offset)
+        end
+    end)
+    topbar.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
+    UserInputService.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local delta=Vector2.new(i.Position.X-dragStart.X, i.Position.Y-dragStart.Y)
+            window.AnchorPoint=Vector2.new(0,0)
+            window.Position=UDim2.new(0,startPos.X+delta.X,0,startPos.Y+delta.Y)
+        end
+    end)
+end
+do
+    local grip=mk("TextButton",{Text="↘",Font=Enum.Font.GothamBold,TextSize=12,TextColor3=Color3.fromRGB(160,150,140),BackgroundColor3=Color3.fromRGB(240,235,228),AnchorPoint=Vector2.new(1,1),Position=UDim2.new(1,0,1,0),Size=UDim2.new(0,28,0,28),ZIndex=20,Parent=window})
+    addCorner(grip,UDim.new(0,8)); addStroke(grip,1,0.5)
+    local resizing=false; local resStart; local resStartSz
+    grip.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            resizing=true; resStart=Vector2.new(i.Position.X,i.Position.Y)
+            resStartSz=Vector2.new(window.AbsoluteSize.X,window.AbsoluteSize.Y)
+        end
+    end)
+    grip.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then resizing=false end end)
+    UserInputService.InputChanged:Connect(function(i)
+        if resizing and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local delta=Vector2.new(i.Position.X-resStart.X,i.Position.Y-resStart.Y)
+            local nw=math.clamp(resStartSz.X+delta.X,720,1200)
+            local nh=math.clamp(resStartSz.Y+delta.Y,440,820)
+            window.Size=UDim2.new(0,nw,0,nh)
+        end
+    end)
 end
 
 -- ============================================================
--- WINDOW: Drag, Resize, Minimize, Close
+-- MINIMIZE / CLOSE
 -- ============================================================
-local dragging,dragStart,startPos=false,nil,nil
-topbar.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=true; dragStart=input.Position; startPos=window.Position end end)
-topbar.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then dragging=false end end)
-UserInputService.InputChanged:Connect(function(input)
-    if dragging and input.UserInputType==Enum.UserInputType.MouseMovement then
-        window.Position=startPos+UDim2.fromOffset((input.Position-dragStart).X,(input.Position-dragStart).Y)
-    end
+local isMinimized=false
+btnMin.MouseButton1Click:Connect(function()
+    clickSound(); pulseClick(btnMin)
+    isMinimized=not isMinimized
+    tween(body, TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {Size=isMinimized and UDim2.new(1,0,0,0) or UDim2.new(1,0,1,-56)})
 end)
-
-local resizeGrip=mk("TextButton",{Name="ResizeGrip",AutoButtonColor=false,BackgroundTransparency=1,Size=UDim2.new(0,22,0,22),AnchorPoint=Vector2.new(1,1),Position=UDim2.new(1,-8,1,-8),Text="⤢",Font=Enum.Font.GothamBold,TextSize=14,TextColor3=Color3.fromRGB(140,130,120),Parent=window,ZIndex=20})
-local resizing,resizeStartMouse,resizeStartSize
-resizeGrip.InputBegan:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then clickSound(); resizing=true; resizeStartMouse=input.Position; resizeStartSize=window.AbsoluteSize end end)
-resizeGrip.InputEnded:Connect(function(input) if input.UserInputType==Enum.UserInputType.MouseButton1 then resizing=false end end)
-UserInputService.InputChanged:Connect(function(input)
-    if resizing and input.UserInputType==Enum.UserInputType.MouseMovement then
-        local delta=input.Position-resizeStartMouse
-        local newW,newH=resizeStartSize.X+delta.X,resizeStartSize.Y+delta.Y
-        local c=window:FindFirstChildOfClass("UISizeConstraint")
-        if c then newW=math.clamp(newW,c.MinSize.X,c.MaxSize.X); newH=math.clamp(newH,c.MinSize.Y,c.MaxSize.Y) end
-        window.Size=UDim2.new(0,newW,0,newH)
-    end
+btnClose.MouseButton1Click:Connect(function()
+    clickSound(); pulseClick(btnClose)
+    tween(window, TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.In), {BackgroundTransparency=1,Size=window.Size+UDim2.fromOffset(0,-20)})
+    task.delay(0.25, function() screenGui:Destroy() end)
 end)
-
-local minimized=false; local windowOpenSize=window.Size; local windowOpenPos=window.Position
-local function minimize()
-    if minimized then
-        minimized=false; window.Size=UDim2.new(windowOpenSize.X.Scale,windowOpenSize.X.Offset,0,56); window.Position=windowOpenPos; body.Visible=true
-        tween(window,TweenInfo.new(0.22,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Size=windowOpenSize})
-    else
-        minimized=true; windowOpenSize=window.Size; windowOpenPos=window.Position
-        tween(window,TweenInfo.new(0.22,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Size=UDim2.new(0,window.AbsoluteSize.X,0,56)})
-        task.delay(0.12,function() body.Visible=false end)
-    end
-end
-
-local function close()
-    clickSound()
-    tween(window,TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.In),{Size=UDim2.new(0,math.max(540,window.AbsoluteSize.X-120),0,math.max(360,window.AbsoluteSize.Y-80))})
-    tween(window,TweenInfo.new(0.18,Enum.EasingStyle.Quad,Enum.EasingDirection.In),{Position=window.Position+UDim2.fromOffset(0,10)})
-    task.delay(0.18,function() if screenGui then screenGui:Destroy() end end)
-end
-
-btnMin.MouseButton1Click:Connect(function() clickSound(); pulseClick(btnMin); minimize() end)
-btnClose.MouseButton1Click:Connect(function() pulseClick(btnClose); close() end)
 
 -- ============================================================
 -- INTRO ANIMATION
 -- ============================================================
-do
-    local startSize=window.Size
-    window.Size=UDim2.new(0,window.AbsoluteSize.X-60,0,window.AbsoluteSize.Y-50)
-    window.Position=UDim2.new(0.5,0,0.5,8)
-    tween(window,TweenInfo.new(0.22,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{Size=startSize,Position=UDim2.new(0.5,0,0.5,0)})
-    task.defer(function() task.wait(0.15); setActive("Overview") end)
-    task.defer(function() task.wait(0.4); sendNotification("Paper & Clay + RAE Loaded.","Success") end)
+window.AnchorPoint=Vector2.new(0.5,0.5)
+window.Position=UDim2.new(0.5,0,0.5,0)
+window.Size=UDim2.new(0,0,0,0)
+window.BackgroundTransparency=1
+tween(window, TweenInfo.new(0.35,Enum.EasingStyle.Back,Enum.EasingDirection.Out), {
+    Size=UDim2.new(0,960,0,580), BackgroundTransparency=0,
+})
+
+-- ============================================================
+-- MASTER METATABLE HOOK
+-- ============================================================
+local SpoofedItems={}; local FakeCache={}; local TokenForge={}
+local SpoofMetrics=false; local ReplayAmplifier=false; local SanitizeTables=false
+local CallbackCaptureEnabled=false; local CloneAmount=1
+
+if getrawmetatable and hookmetamethod and checkcaller then
+    local mt=getrawmetatable(game)
+    local oldNewindex=mt.__newindex
+    local oldNamecall=mt.__namecall
+    local oldIndex=mt.__index
+
+    hookmetamethod(game,"__newindex",function(self,key,value)
+        if not checkcaller() then
+            if type(value)=="function" and key=="OnClientInvoke" then
+                if CallbackCaptureEnabled then
+                    local orig=value
+                    value=function(...)
+                        local args={...}
+                        local disp={}
+                        for i,v in ipairs(args) do disp[i]=type(v)=="table" and "[table]" or type(v)=="userdata" and "[instance]" or tostring(v) end
+                        sendNotification("CB Capture ["..tostring(self).."] args: "..table.concat(disp,", "),"Info")
+                        return orig(...)
+                    end
+                end
+            end
+        end
+        return oldNewindex(self,key,value)
+    end)
+
+    hookmetamethod(game,"__namecall",function(self,...)
+        if not checkcaller() then
+            local method=getnamecallmethod()
+            local args={...}
+
+            if method=="FindFirstChild" or method=="WaitForChild" then
+                local name=args[1]
+                if SpoofedItems[name] then
+                    local parent=self
+                    if parent==player.Backpack or parent==player.Character then
+                        if not FakeCache[name] then
+                            local ft=Instance.new("Tool"); ft.Name=name; FakeCache[name]=ft
+                        end
+                        return FakeCache[name]
+                    end
+                end
+            end
+
+            if method=="FireServer" then
+                local remote=self
+                local fireArgs={...}
+                if SanitizeTables then
+                    local cleaned={}; for i,a in ipairs(fireArgs) do cleaned[i]=type(a)=="table" and cleanTable(a) or a end
+                    fireArgs=cleaned
+                end
+                for i,a in ipairs(fireArgs) do
+                    if type(a)=="string" and #a>3 then
+                        local t,decoded=tryDecode(a)
+                        if t then TokenForge[remote]=a end
+                    end
+                end
+                if ReplayAmplifier and CloneAmount>1 then
+                    for _=2,CloneAmount do
+                        pcall(function() oldNamecall(remote,"FireServer",table.unpack(fireArgs)) end)
+                    end
+                end
+                if SpoofMetrics then
+                    local rname=tostring(remote.Name):lower()
+                    if rname:find("ping") or rname:find("fps") or rname:find("heartbeat") or rname:find("analytic") then
+                        local cleaned={}
+                        for i,a in ipairs(fireArgs) do
+                            if type(a)=="number" then
+                                if rname:find("fps") then cleaned[i]=math.min(a,60)
+                                elseif rname:find("ping") or rname:find("heartbeat") then cleaned[i]=math.max(a,45)
+                                else cleaned[i]=a end
+                            else cleaned[i]=a end
+                        end
+                        fireArgs=cleaned
+                    end
+                end
+                return oldNamecall(remote,"FireServer",table.unpack(fireArgs))
+            end
+        end
+        return oldNamecall(self,...)
+    end)
+
+    hookmetamethod(game,"__index",function(self,key)
+        if not checkcaller() then
+            if SpoofedItems[key] then
+                local parent=self
+                if parent==player.Backpack or parent==player.Character then
+                    if not FakeCache[key] then
+                        local ft=Instance.new("Tool"); ft.Name=key; FakeCache[key]=ft
+                    end
+                    return FakeCache[key]
+                end
+            end
+        end
+        return oldIndex(self,key)
+    end)
 end
 
 -- ============================================================
--- RAE AUTO-START (one-shot boot scan, then manual-only)
+-- GLOBAL RAE API
 -- ============================================================
 _G.RAE_Engine = {
-    Scan     = RAE_Scan,
-    Plan     = RAE_Plan,
-    Commit   = RAE_Commit,
-    State    = RAE_State,
-    LWM      = LWM,
-    CDG      = CDG,
-    ETM      = ETM,
-    SessionSave = SessionSave,
-    SessionLoad = SessionLoad,
+    Scan   = RAE_Scan,
+    Plan   = RAE_Plan,
+    Commit = RAE_Commit,
+    State  = RAE_State,
+    ETM    = ETM,
+    CDG    = CDG,
+    LWM    = LWM,
+    Intel  = Intel,
+    StateSignature = StateSignature,
+    SaveSession    = SaveSession,
+    LoadSession    = LoadSession,
+    ComputeBrierScore = ComputeBrierScore,
 }
 
-task.spawn(function()
-    if not player.Character then player.CharacterAdded:Wait() end
+-- ============================================================
+-- SESSION LOAD + AUTO-START
+-- ============================================================
+-- Restore any previously learned state from _G
+LoadSession()
+
+-- Boot scan: fires 3 seconds after character is available
+local function bootRAE()
     task.wait(3)
-
-    -- Full boot scan — fully visible, player sees every step
-    RAE_SilentMode = false
-    sendNotification("RAE: Initializing full boot scan...", "Info")
-    task.wait(0.5)
-
+    RAE_SilentMode=true
     if RAE_Scan() then
         task.wait(0.5)
-        local plan = RAE_Plan()
-        if plan and #plan > 0 then
+        local plan=RAE_Plan()
+        if plan and #plan>0 then
             task.wait(0.5)
-            local log = RAE_Commit()
+            local log=RAE_Commit()
+            RAE_SilentMode=false
             if log then
-                local p = 0
-                for _, r in ipairs(log) do if r.Success then p = p + 1 end end
-                sendNotification(
-                    string.format("RAE: Boot complete — %d cards, %d/%d passed.", #RAE_State.Cards, p, #log),
-                    p == #log and "Success" or "Warning"
-                )
+                local p=0; for _,r in ipairs(log) do if r.Success then p=p+1 end end
+                sendNotification(string.format("Boot complete — %d cards, %d/%d passed.",#RAE_State.Cards,p,#log),"Success")
             end
-        else
-            sendNotification("RAE: Boot scan complete. No plan generated.", "Info")
-        end
-    else
-        sendNotification("RAE: Boot scan failed. Try Manual Rescan.", "Error")
-    end
+        else RAE_SilentMode=false; sendNotification("Boot scan complete. No plan generated.","Info") end
+    else RAE_SilentMode=false; sendNotification("Boot scan — insufficient confidence.","Warning") end
+end
 
-    -- RAE is now idle. All future cycles are user-initiated via the RAE tab.
-end)
+if player.Character then task.spawn(bootRAE)
+else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
+
+-- END OF SCRIPT
