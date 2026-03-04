@@ -1791,6 +1791,7 @@ local pageChain     = makePage("Chain")
 local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
+local pageSARP      = makePage("SARP")
 
 -- ============================================================
 -- PAGE: Overview
@@ -3311,7 +3312,7 @@ do
         Text="Paper & Clay + RAE v2.0 — Deep Intelligence Edition\n\nRAE (Recursive Autonomous Engine) is a 7-layer autonomous agent extended with four new deep intelligence modules:\n\n• StateSignature φ(S): Compact, canonical, hash-stable state token enabling state-conditional learning.\n• LWM (Living World Model): Ring-buffer temporal model with delta tracking and remote co-firing registry.\n• ETM (Empirical Transition Model): State-conditional Bayesian P(success|card, φ(S)) with Welford variance and convergence detection.\n• CDG (Causal Dependency Graph): Co-execution effect size and confidence tracking for causal chain reordering.\n• Risk-Adjusted MCTS: E[U(π)] − λ·Var[U(π)] planning criterion with ETM-blended rollouts.\n• Session Persistence: IntelMem, ETM, CDG tables stored in _G across sessions.\n• Brier Calibration: Predicted probability vs actual outcome tracking.",
         TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,200),Parent=sAbout})
     local _, sLinks=makeSection(pageAbout,"Quick Nav")
-    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"}}
+    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"},{"Open SARP Tab","SARP"}}
     for _,nl in ipairs(navLinks) do
         local nb=makeButton(sLinks,nl[1],UDim2.new(0,220,0,36),"→"); nb.Button.BackgroundColor3=Color3.fromRGB(220,230,255)
         local targetName=nl[2]
@@ -4405,6 +4406,839 @@ end
 LoadForge()
 
 -- ============================================================
+-- SARP — Self Autonomous Replication Protocol
+-- Wraps, times, and delivers payloads at targets using desync
+-- windows, ownership handoffs, and attribute injection.
+-- Hooks: ETM · CDG · LWM · RAE_State · PayloadForge
+-- ============================================================
+
+local SARP = {}
+local SARP_PERSIST_VER      = "v1"
+local SARP_PERSIST_LOG      = "SARP_Log_"      .. SARP_PERSIST_VER
+local SARP_PERSIST_PROFILES = "SARP_Profiles_" .. SARP_PERSIST_VER
+local SARP_Log      = {}
+local SARP_Profiles = {}
+
+local function SaveSARP()
+    pcall(function()
+        _G[SARP_PERSIST_LOG]      = SARP_Log
+        _G[SARP_PERSIST_PROFILES] = SARP_Profiles
+    end)
+end
+local function LoadSARP()
+    pcall(function()
+        if type(_G[SARP_PERSIST_LOG])      == "table" then SARP_Log      = _G[SARP_PERSIST_LOG]      end
+        if type(_G[SARP_PERSIST_PROFILES]) == "table" then SARP_Profiles = _G[SARP_PERSIST_PROFILES] end
+    end)
+end
+
+local SARP_State = {
+    PrimaryTarget  = nil,
+    FallbackTarget = nil,
+    WrappedPayload = nil,
+    DeliveryChain  = {},
+    Phase          = "IDLE",
+    LastOutcome    = nil,
+    ACAlertLevel   = 0.0,
+}
+
+local function HumanDelay(baseSeconds)
+    local shape = 2.0; local rate = shape / math.max(baseSeconds, 0.05)
+    local sample = SampleGamma(shape) / rate
+    return math.clamp(sample, 0.05, baseSeconds * 3)
+end
+
+-- MODULE 1: TARGET SELECTOR
+SARP.TargetSelector = {}
+local function ScoreTarget(playerName)
+    local profile = SARP_Profiles[playerName]
+    local histScore = 0.5
+    if profile and profile.attempts > 0 then histScore = profile.successes / profile.attempts end
+    local lwmBonus = 0.0
+    if #LWM.GetBuffer() >= 2 then
+        local delta = LWM.GetDelta()
+        if delta then lwmBonus = math.clamp(math.abs(delta.ownedDelta) * 0.05, 0, 0.15) end
+    end
+    local etmBonus = 0.0
+    for _, card in ipairs(RAE_State.Cards or {}) do
+        if card.Metadata.TargetName == playerName then
+            local p = ETM.Predict(card.ID, RAE_State.CurrentSig)
+            etmBonus = math.max(etmBonus, p * 0.10)
+        end
+    end
+    return math.clamp(histScore + lwmBonus + etmBonus - SARP_State.ACAlertLevel * 0.25, 0.01, 0.99)
+end
+
+function SARP.TargetSelector.GetTargetList()
+    local list = {}
+    table.insert(list, { Name="self", Display="Self (safe default)", Score=1.0, IsLocal=true, Risk="Low" })
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= Players.LocalPlayer then
+            local score = ScoreTarget(p.Name)
+            local etmVar = 0.0
+            for _, card in ipairs(RAE_State.Cards or {}) do
+                if card.Metadata.TargetName == p.Name then
+                    local _, _, stddev = ETM.Predict(card.ID, RAE_State.CurrentSig)
+                    etmVar = math.max(etmVar, stddev or 0)
+                end
+            end
+            local risk = etmVar > 0.10 and "High" or etmVar > 0.05 and "Medium" or "Low"
+            local pChar = p.Character; local pHRP = pChar and pChar:FindFirstChild("HumanoidRootPart")
+            local myChar = Players.LocalPlayer.Character; local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local dist = (pHRP and myHRP) and (pHRP.Position - myHRP.Position).Magnitude or 9999
+            table.insert(list, { Name=p.Name, Display=string.format("%s  (%.0fm)", p.Name, dist),
+                Score=score, IsLocal=false, Risk=risk, ETMVar=etmVar, Distance=dist })
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.IsLocal then return true end
+        if b.IsLocal then return false end
+        return a.Score > b.Score
+    end)
+    return list
+end
+
+function SARP.TargetSelector.AutoSelect()
+    local list = SARP.TargetSelector.GetTargetList()
+    for _, entry in ipairs(list) do if not entry.IsLocal then return entry end end
+    return list[1]
+end
+
+-- MODULE 2: PAYLOAD WRAPPER
+SARP.PayloadWrapper = {}
+local function WrapWithAttributes(rawPayload, targetName)
+    local attrName = "sarp_" .. string.format("%06x", math.random(0, 0xFFFFFF))
+    local desyncDelay = HumanDelay(0.15)
+    local repProb = 0.65
+    for _, card in ipairs(RAE_State.Cards or {}) do
+        if card.Channel == "Ownership" then
+            local p, c = ETM.Predict(card.ID, RAE_State.CurrentSig)
+            if c then repProb = p; break end
+        end
+    end
+    local lwmDelta = LWM.GetDelta()
+    local projectedLinger = lwmDelta and math.max(1, math.floor(lwmDelta.elapsed * 10)) or 2
+    return { Type="AttributeInject", AttrName=attrName, RawPayload=rawPayload, Target=targetName,
+        DesyncDelay=desyncDelay, RepProb=repProb, ProjectedLinger=projectedLinger,
+        OwnershipFlip=false, Wrapped=os.clock() }
+end
+
+local function WrapWithAttachment(rawPayload, targetName)
+    local desyncDelay = HumanDelay(0.20)
+    local ws = RAE_State.WorldState
+    local ownedPart = nil
+    if ws then
+        for _, entry in ipairs(ws.Physics.ClientOwned or {}) do
+            if entry.Instance and pcall(function() return entry.Instance.Parent ~= nil end) then
+                ownedPart = entry.Instance; break
+            end
+        end
+    end
+    if not ownedPart then
+        local char = Players.LocalPlayer.Character
+        ownedPart = char and char:FindFirstChild("HumanoidRootPart")
+    end
+    local etmConf = 0.50
+    for _, card in ipairs(RAE_State.Cards or {}) do
+        if card.Channel == "Replication" then
+            local p = ETM.Predict(card.ID, RAE_State.CurrentSig)
+            etmConf = math.max(etmConf, p)
+        end
+    end
+    return { Type="AttachmentWrap", OwnedPart=ownedPart, RawPayload=rawPayload, Target=targetName,
+        DesyncDelay=desyncDelay, ETMConf=etmConf, OwnershipFlip=true, Wrapped=os.clock() }
+end
+
+local function InfuseWithRAE(scriptText, sigThreshold)
+    sigThreshold = sigThreshold or 0.60
+    local header = string.format(
+        "-- [SARP:RAE-INFUSED] ETM gate %.0f%% | Sig: %s\n" ..
+        "local _sarp_ok=false\n" ..
+        "for _,_c in ipairs(RAE_State and RAE_State.Cards or {}) do\n" ..
+        "  local _p=ETM.Predict(_c.ID,\"%s\")\n" ..
+        "  if _p>=%s then _sarp_ok=true; break end\n" ..
+        "end\n" ..
+        "if not _sarp_ok then sendNotification(\"[SARP] ETM gate blocked.\",\"Warning\"); return end\n",
+        sigThreshold*100, RAE_State.CurrentSig, RAE_State.CurrentSig,
+        string.format("%.2f", sigThreshold))
+    return header .. "\n" .. scriptText
+end
+
+function SARP.PayloadWrapper.Wrap(rawPayload, wrapModeStr, targetName, infuse, sigThreshold)
+    local descriptor
+    if wrapModeStr == "attribute" then descriptor = WrapWithAttributes(rawPayload, targetName)
+    else descriptor = WrapWithAttachment(rawPayload, targetName) end
+    if infuse and type(rawPayload) == "string" then
+        descriptor.InfusedScript = InfuseWithRAE(rawPayload, sigThreshold)
+    end
+    local lwmDelta = LWM.GetDelta()
+    local cmap = ETM.GetConvergenceMap(); local gcov = cmap["_global"] or {rate=0}
+    descriptor.SimPreview = {
+        RepProb       = descriptor.RepProb or descriptor.ETMConf or 0.5,
+        DesyncDelay   = descriptor.DesyncDelay,
+        Linger        = descriptor.ProjectedLinger or 2,
+        ETMConvRate   = gcov.rate,
+        LWMFiresDelta = lwmDelta and lwmDelta.firesDelta or 0,
+        ACLevel       = SARP_State.ACAlertLevel,
+    }
+    SARP_State.WrappedPayload = descriptor
+    return descriptor
+end
+
+-- MODULE 3: DELIVERY ENGINE
+SARP.DeliveryEngine = {}
+local DELIVERY_STEPS = {
+    {ID="throttle", Label="Throttle (desync window)", Cost=0.05},
+    {ID="ownpart",  Label="Claim part ownership",      Cost=0.10},
+    {ID="inject",   Label="Inject payload",            Cost=0.15},
+    {ID="handoff",  Label="Ownership handoff",         Cost=0.08},
+    {ID="verify",   Label="Replication verify",        Cost=0.03},
+}
+
+function SARP.DeliveryEngine.PlanChain(descriptor)
+    local chain = {}
+    local ws = RAE_State.WorldState
+    local hasOwned = ws and #ws.Physics.ClientOwned > 0
+    table.insert(chain, DELIVERY_STEPS[1])
+    if hasOwned or descriptor.OwnershipFlip then table.insert(chain, DELIVERY_STEPS[2]) end
+    table.insert(chain, DELIVERY_STEPS[3])
+    if hasOwned or descriptor.OwnershipFlip then table.insert(chain, DELIVERY_STEPS[4]) end
+    table.insert(chain, DELIVERY_STEPS[5])
+    local totalCost = 0; for _, s in ipairs(chain) do totalCost = totalCost + s.Cost end
+    local etmConf = descriptor.RepProb or descriptor.ETMConf or 0.5
+    local variance = (1 - etmConf) * 0.3
+    local chainScore = etmConf - RISK_CFG.Lambda * math.sqrt(variance) - RISK_CFG.Mu * totalCost
+    SARP_State.DeliveryChain = chain
+    return chain, chainScore
+end
+
+local function ExecStep(step, descriptor, targetName)
+    task.wait(HumanDelay(descriptor.DesyncDelay or 0.15))
+    if step.ID == "throttle" then
+        task.wait(HumanDelay(0.08)); return true, "Desync window opened."
+    elseif step.ID == "ownpart" then
+        local ws = RAE_State.WorldState
+        if ws and #ws.Physics.ClientOwned > 0 then
+            local ok = pcall(function() ws.Physics.ClientOwned[1].Instance:SetNetworkOwner(Players.LocalPlayer) end)
+            return ok, ok and "Ownership confirmed." or "Claim failed."
+        end
+        return false, "No client-owned part."
+    elseif step.ID == "inject" then
+        local target = targetName == "self" and Players.LocalPlayer.Character or
+            (Players:FindFirstChild(targetName) and Players:FindFirstChild(targetName).Character)
+        if descriptor.Type == "AttributeInject" then
+            if target then
+                local ok, err = pcall(function()
+                    if type(descriptor.RawPayload) == "string" then
+                        local fn, compErr = loadstring(descriptor.InfusedScript or descriptor.RawPayload)
+                        if fn then fn() else error(tostring(compErr)) end
+                    elseif type(descriptor.RawPayload) == "function" then descriptor.RawPayload() end
+                    target:SetAttribute(descriptor.AttrName, Vector3.new(0,0,0))
+                end)
+                return ok, ok and "Injected via attribute." or ("Error: "..tostring(err))
+            end
+            return false, "Target not found."
+        elseif descriptor.Type == "AttachmentWrap" then
+            local ok, err = pcall(function()
+                if type(descriptor.RawPayload) == "string" then
+                    local fn, compErr = loadstring(descriptor.InfusedScript or descriptor.RawPayload)
+                    if fn then fn() else error(tostring(compErr)) end
+                elseif type(descriptor.RawPayload) == "function" then descriptor.RawPayload() end
+                if descriptor.OwnedPart and descriptor.OwnedPart.Parent then
+                    local att = Instance.new("Attachment"); att.Name="sarp_attach"; att.Parent=descriptor.OwnedPart
+                end
+            end)
+            return ok, ok and "Injected via attachment." or ("Error: "..tostring(err))
+        end
+        return false, "Unknown wrap type."
+    elseif step.ID == "handoff" then
+        local ws = RAE_State.WorldState
+        if ws and #ws.Physics.ClientOwned > 0 then
+            local ok = pcall(function() ws.Physics.ClientOwned[1].Instance:SetNetworkOwnershipAuto() end)
+            return ok, ok and "Ownership returned." or "Handoff skipped."
+        end
+        return true, "No owned part — skipped."
+    elseif step.ID == "verify" then
+        task.wait(HumanDelay(0.25))
+        local ws2 = WorldState.Capture()
+        local newSig = StateSignature.Compute(ws2)
+        local changed = StateSignature.Diff(RAE_State.CurrentSig, newSig) > 0.0
+        return true, changed and ("State changed: "..newSig) or "No state change."
+    end
+    return false, "Unknown step: "..step.ID
+end
+
+function SARP.DeliveryEngine.SimFirst(descriptor)
+    local chain, score = SARP.DeliveryEngine.PlanChain(descriptor)
+    local steps = {}
+    for _, step in ipairs(chain) do
+        local prob = descriptor.RepProb or 0.5
+        table.insert(steps, { Step=step.Label, Prob=prob,
+            Risk=SARP_State.ACAlertLevel>0.5 and "High" or prob<0.5 and "Medium" or "Low" })
+    end
+    return { Chain=steps, ChainScore=score,
+        ETMConf=descriptor.RepProb or descriptor.ETMConf or 0.5,
+        Variance=(1-(descriptor.RepProb or 0.5))*0.3,
+        ACLevel=SARP_State.ACAlertLevel,
+        Summary=string.format("Chain: %d steps  Score: %.2f  AC: %.0f%%  Conf: %.0f%%",
+            #chain, score, SARP_State.ACAlertLevel*100, (descriptor.RepProb or 0.5)*100) }
+end
+
+function SARP.DeliveryEngine.Fly(descriptor, targetName, onStep)
+    SARP_State.Phase = "FLYING"
+    local chain = SARP_State.DeliveryChain
+    if #chain == 0 then chain, _ = SARP.DeliveryEngine.PlanChain(descriptor) end
+    local stepLog = {}; local allPass = true
+    for i, step in ipairs(chain) do
+        local ok, msg = ExecStep(step, descriptor, targetName)
+        table.insert(stepLog, {Step=step.Label, Success=ok, Msg=msg, T=os.clock()})
+        if onStep then onStep(i, #chain, step.Label, ok, msg) end
+        if not ok then allPass = false end
+        if not ok and msg:lower():find("error") then
+            SARP_State.ACAlertLevel = math.min(SARP_State.ACAlertLevel + 0.18, 1.0)
+        end
+    end
+    SARP_State.Phase = "COMPLETE"
+    return stepLog, allPass
+end
+
+-- MODULE 4: STEALTH LAYER
+SARP.StealthLayer = {}
+function SARP.StealthLayer.Monitor()
+    local delta = LWM.GetDelta(); if not delta then return end
+    if delta.firesDelta < -3 and math.abs(delta.physDelta) > 2 then
+        SARP_State.ACAlertLevel = math.min(SARP_State.ACAlertLevel + 0.12, 1.0)
+    end
+    if delta.firesDelta >= 0 then
+        SARP_State.ACAlertLevel = math.max(SARP_State.ACAlertLevel - 0.03, 0.0)
+    end
+end
+function SARP.StealthLayer.GetRetryDelay()
+    return HumanDelay(0.5 + SARP_State.ACAlertLevel * 2.0)
+end
+function SARP.StealthLayer.SuggestVariant(stepLog, descriptor)
+    local suggestions = {}
+    for _, entry in ipairs(stepLog) do
+        if not entry.Success then
+            if entry.Step:find("ownership") or entry.Step:find("handoff") then
+                local edges = CDG.GetStrongEdges(0.20)
+                if #edges > 0 then
+                    table.insert(suggestions, string.format("CDG lift +%.2f: try [%s->%s] order",
+                        edges[1].EffectSize, edges[1].FromID:sub(1,6), edges[1].ToID:sub(1,6)))
+                end
+            end
+            if entry.Step:find("desync") or entry.Step:find("throttle") then
+                table.insert(suggestions, string.format("Retry with +%.2fs desync delay.", HumanDelay(0.10)))
+            end
+            if entry.Step:find("inject") then
+                table.insert(suggestions, "Switch wrap mode (attribute <-> attachment) and retry.")
+            end
+        end
+    end
+    return #suggestions > 0 and suggestions or {"Increase desync delay and retry."}
+end
+
+-- MODULE 5: FEEDBACK BRIDGE
+SARP.FeedbackBridge = {}
+function SARP.FeedbackBridge.Record(targetName, stepLog, allPass, descriptor)
+    if not SARP_Profiles[targetName] then SARP_Profiles[targetName]={successes=0,attempts=0} end
+    local profile = SARP_Profiles[targetName]
+    profile.attempts = profile.attempts + 1
+    profile.lastSig  = RAE_State.CurrentSig
+    if allPass then profile.successes = profile.successes + 1 end
+    profile.repScore = profile.successes / profile.attempts
+    for _, card in ipairs(RAE_State.Cards or {}) do
+        if card.Channel == "Ownership" or card.Channel == "Replication" then
+            ETM.Update(card.ID, RAE_State.CurrentSig, allPass)
+        end
+    end
+    local syntheticLog = {}
+    for i, entry in ipairs(stepLog) do
+        table.insert(syntheticLog, { Step={ID="sarp_"..i, Channel="Replication"}, Success=entry.Success })
+    end
+    CDG.UpdateFromLog(syntheticLog)
+    table.insert(SARP_Log, { Target=targetName, AllPass=allPass, StepCount=#stepLog,
+        WrapType=descriptor and descriptor.Type or "?",
+        Sig=RAE_State.CurrentSig, ACLevel=SARP_State.ACAlertLevel, T=os.clock() })
+    if #SARP_Log > 100 then table.remove(SARP_Log, 1) end
+    SaveSARP()
+end
+
+-- MODULE 6: AUTO-GENERATE
+SARP.AutoGenerate = {}
+local GOAL_SCRIPTS = {
+    ["Attribute Persistence Test"] = function()
+        return string.format(
+            "-- [SARP:Auto] Attribute Persistence Test | Sig: %s\n"..
+            "local char = Players.LocalPlayer.Character\n"..
+            "if not char then return end\n"..
+            "local attrName = \"sarp_test_\"..tostring(math.random(1000,9999))\n"..
+            "local ok,err = pcall(function() char:SetAttribute(attrName,Vector3.new(1,0,0)) end)\n"..
+            "if ok then\n"..
+            "  task.wait(0.5)\n"..
+            "  local rb = char:GetAttribute(attrName)\n"..
+            "  print(\"[SARP] Persisted:\", rb~=nil, rb)\n"..
+            "  char:SetAttribute(attrName,nil)\n"..
+            "else warn(\"[SARP] Failed:\",err) end",
+            RAE_State.CurrentSig)
+    end,
+    ["Ownership Window Probe"] = function()
+        local ws = RAE_State.WorldState
+        local partName = ws and ws.Physics.ClientOwned[1] and ws.Physics.ClientOwned[1].Name or "BasePart"
+        return string.format(
+            "-- [SARP:Auto] Ownership Window Probe | Part: %s\n"..
+            "local part = workspace:FindFirstChild(\"%s\",true)\n"..
+            "if not part then warn(\"[SARP] Part not found.\"); return end\n"..
+            "local ok1 = pcall(function() part:SetNetworkOwner(Players.LocalPlayer) end)\n"..
+            "print(\"[SARP] Ownership claimed:\",ok1)\n"..
+            "task.wait(0.18)\n"..
+            "local ok2 = pcall(function() part:SetNetworkOwnershipAuto() end)\n"..
+            "print(\"[SARP] Ownership returned:\",ok2)",
+            partName, partName)
+    end,
+    ["Economy Remote Craft"] = function()
+        local ws = RAE_State.WorldState
+        local remName = "UnknownRemote"
+        if ws then
+            for _, r in ipairs(ws.Latent.RemoteEvents or {}) do
+                if ClassifyRemote(r.Name) == "Economy" then remName = r.Name; break end
+            end
+        end
+        return string.format(
+            "-- [SARP:Auto] Economy Remote Craft | Remote: %s\n"..
+            "local remote = game:FindFirstChild(\"%s\",true)\n"..
+            "if not remote then warn(\"[SARP] Remote not found.\"); return end\n"..
+            "local amount = 1000  -- edit as needed\n"..
+            "remote:FireServer(amount)\n"..
+            "print(\"[SARP] Fired with amount:\",amount)",
+            remName, remName)
+    end,
+    ["FE Sound Bypass"] = function()
+        local vol = LWM.GetTemporalAverage("remoteFires",5)
+        return string.format(
+            "-- [SARP:Auto] FE Sound Bypass | Avg fires: %.1f\n"..
+            "local snd = Instance.new(\"Sound\")\n"..
+            "snd.SoundId = \"rbxassetid://0\"\n"..
+            "snd.Volume = math.clamp(%.1f/100,0,10)\n"..
+            "snd.Parent = workspace\n"..
+            "task.wait(0.12)\n"..
+            "snd:Play()\n"..
+            "task.wait(snd.TimeLength+0.12)\n"..
+            "snd:Destroy()\n"..
+            "print(\"[SARP] Sound bypass complete.\")",
+            vol, vol)
+    end,
+    ["Custom Script"] = function()
+        return "-- [SARP:Auto] Custom Script Template\n"..
+               "-- Edit freely. Use Infuse with RAE for ETM gating.\n"..
+               "local char = Players.LocalPlayer.Character\n"..
+               "if not char then warn(\"[SARP] No character.\"); return end\n"..
+               "print(\"[SARP] Custom script executed.\")"
+    end,
+}
+function SARP.AutoGenerate.Generate(goalName)
+    local factory = GOAL_SCRIPTS[goalName]
+    if factory then local ok,result=pcall(factory); return ok and result or ("-- Error: "..tostring(result)) end
+    return GOAL_SCRIPTS["Custom Script"]()
+end
+function SARP.AutoGenerate.GetGoals()
+    local goals={}; for name in pairs(GOAL_SCRIPTS) do table.insert(goals,name) end
+    table.sort(goals); return goals
+end
+
+-- ============================================================
+-- PAGE: SARP (UI)
+-- ============================================================
+do
+    local _, sHdr = makeSection(pageSARP, "SARP — Self Autonomous Replication Protocol")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Craft, wrap, and deliver payloads at targets using desync windows and ownership handoffs. Review Sim before flying. ETM/CDG/LWM inform every decision in real time.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,48),Parent=sHdr})
+
+    -- Status bar
+    local statusRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,24),Parent=sHdr})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,14),Parent=statusRow})
+    local phaseLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+        Text="Phase: IDLE",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,
+        Size=UDim2.new(0,180,1,0),TextXAlignment=Enum.TextXAlignment.Left,Parent=statusRow})
+    local acLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="AC Alert: 0%",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,
+        Size=UDim2.new(0,120,1,0),TextXAlignment=Enum.TextXAlignment.Left,Parent=statusRow})
+    local acBarBg=mk("Frame",{BackgroundColor3=Color3.fromRGB(235,230,225),Size=UDim2.new(0,180,0,10),Parent=statusRow})
+    addCorner(acBarBg,UDim.new(0,5))
+    local acBarFill=mk("Frame",{BackgroundColor3=Color3.fromRGB(80,180,80),Size=UDim2.new(0,0,1,0),Parent=acBarBg})
+    addCorner(acBarFill,UDim.new(0,5))
+    task.spawn(function()
+        while phaseLabel and phaseLabel.Parent do
+            phaseLabel.Text="Phase: "..SARP_State.Phase
+            SARP.StealthLayer.Monitor()
+            acLabel.Text=string.format("AC Alert: %.0f%%",SARP_State.ACAlertLevel*100)
+            local fw=math.clamp(SARP_State.ACAlertLevel,0,1)
+            local alertColor=fw>0.6 and Color3.fromRGB(200,60,60) or fw>0.3 and Color3.fromRGB(200,160,60) or Color3.fromRGB(80,180,80)
+            tween(acBarFill,TweenInfo.new(0.3),{Size=UDim2.new(fw,0,1,0),BackgroundColor3=alertColor})
+            task.wait(0.5)
+        end
+    end)
+
+    -- ── Primary Target ───────────────────────────────────────
+    local _, sTarget = makeSection(pageSARP, "Primary Target")
+    local tBtnRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sTarget})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=tBtnRow})
+    local autoSelBtn=makeButton(tBtnRow,"Auto-Select",UDim2.new(0,160,0,40),"[A]")
+    autoSelBtn.Button.BackgroundColor3=Color3.fromRGB(220,235,255)
+    local refreshTBtn=makeButton(tBtnRow,"Refresh",UDim2.new(0,140,0,40),"[R]")
+    refreshTBtn.Button.BackgroundColor3=Color3.fromRGB(240,240,240)
+    local targetScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
+        Size=UDim2.new(1,0,0,130),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4,Parent=sTarget})
+    addCorner(targetScroll,UDim.new(0,8)); addStroke(targetScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,5),Parent=targetScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=targetScroll})
+    local selectedTargetLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+        Text="Selected: self",TextColor3=Color3.fromRGB(60,120,60),TextSize=12,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,18),Parent=sTarget})
+
+    local function refreshTargetList()
+        targetScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,5),Parent=targetScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=targetScroll})
+        local list=SARP.TargetSelector.GetTargetList()
+        for _, entry in ipairs(list) do
+            local riskColor=entry.Risk=="High" and Color3.fromRGB(255,200,200) or entry.Risk=="Medium" and Color3.fromRGB(255,240,200) or Color3.fromRGB(220,255,220)
+            local row=mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,36),Parent=targetScroll})
+            addCorner(row,UDim.new(0,5)); addStroke(row,1,0.2)
+            mk("TextLabel",{Text=(entry.IsLocal and "[Self] " or "[Player] ")..entry.Display,Font=Enum.Font.GothamBold,TextSize=11,
+                TextColor3=Color3.fromRGB(50,50,50),Position=UDim2.new(0,8,0,4),
+                Size=UDim2.new(1,-180,0,14),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+            mk("TextLabel",{Text=string.format("Score: %.0f%%  Risk: %s",entry.Score*100,entry.Risk),
+                Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(100,100,100),
+                Position=UDim2.new(0,8,0,20),Size=UDim2.new(1,-180,0,12),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+            local rb=mk("TextLabel",{Text=entry.Risk,Font=Enum.Font.GothamBold,TextSize=9,
+                TextColor3=Color3.fromRGB(50,50,50),BackgroundColor3=riskColor,
+                AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-90,0.5,0),
+                Size=UDim2.new(0,52,0,20),TextXAlignment=Enum.TextXAlignment.Center,Parent=row})
+            addCorner(rb,UDim.new(0,4))
+            local selBtn=mk("TextButton",{Text="Select",Font=Enum.Font.GothamBold,TextSize=10,
+                BackgroundColor3=Color3.fromRGB(220,235,255),Size=UDim2.new(0,68,0,26),
+                AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-6,0.5,0),Parent=row})
+            addCorner(selBtn,UDim.new(0,5))
+            local eCapture=entry
+            selBtn.MouseButton1Click:Connect(function()
+                clickSound(); pulseClick(selBtn)
+                SARP_State.PrimaryTarget=eCapture.Name
+                selectedTargetLabel.Text="Selected: "..eCapture.Name
+                selectedTargetLabel.TextColor3=eCapture.IsLocal and Color3.fromRGB(60,120,60) or Color3.fromRGB(100,80,180)
+            end)
+        end
+    end
+
+    refreshTBtn.Button.MouseButton1Click:Connect(function() clickSound(); refreshTargetList() end)
+    autoSelBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(autoSelBtn.Button)
+        local best=SARP.TargetSelector.AutoSelect()
+        SARP_State.PrimaryTarget=best.Name
+        selectedTargetLabel.Text="Auto: "..best.Name
+        selectedTargetLabel.TextColor3=best.IsLocal and Color3.fromRGB(60,120,60) or Color3.fromRGB(100,80,180)
+        sendNotification("SARP auto-selected: "..best.Name.." ("..string.format("%.0f",best.Score*100).."%)", "Info")
+        refreshTargetList()
+    end)
+
+    -- ── Script Editor ────────────────────────────────────────
+    local _, sEditor = makeSection(pageSARP, "Script / Payload Editor")
+    local goalRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,34),Parent=sEditor})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=goalRow})
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Generate:",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=12,Size=UDim2.new(0,80,1,0),
+        TextXAlignment=Enum.TextXAlignment.Left,Parent=goalRow})
+    local editorFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(28,28,32),Size=UDim2.new(1,0,0,220),Parent=sEditor})
+    addCorner(editorFrame,UDim.new(0,8)); addStroke(editorFrame,1,0.5)
+    local lineNumFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(38,38,44),Size=UDim2.new(0,32,1,0),Parent=editorFrame})
+    addCorner(lineNumFrame,UDim.new(0,8))
+    local lineNumLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="",
+        TextColor3=Color3.fromRGB(100,100,120),TextSize=12,
+        Position=UDim2.new(0,0,0,4),Size=UDim2.new(1,0,1,-8),
+        TextXAlignment=Enum.TextXAlignment.Center,TextYAlignment=Enum.TextYAlignment.Top,Parent=lineNumFrame})
+    local editorBox=mk("TextBox",{PlaceholderText="-- Paste or auto-generate a script here...",
+        Text=SARP.AutoGenerate.Generate("Custom Script"),BackgroundTransparency=1,
+        Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(220,220,200),
+        TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+        MultiLine=true,ClearTextOnFocus=false,
+        Position=UDim2.new(0,36,0,4),Size=UDim2.new(1,-40,1,-8),Parent=editorFrame})
+    local function updateLineNums()
+        local lc=0; for _ in (editorBox.Text.."\n"):gmatch("[^\n]+") do lc=lc+1 end
+        lc=math.max(lc,15); local nums={}; for i=1,lc do nums[i]=tostring(i) end
+        lineNumLabel.Text=table.concat(nums,"\n")
+    end
+    editorBox:GetPropertyChangedSignal("Text"):Connect(updateLineNums); updateLineNums()
+
+    local goals=SARP.AutoGenerate.GetGoals()
+    for _, goalName in ipairs(goals) do
+        local gb=mk("TextButton",{Text=goalName,Font=Enum.Font.GothamBold,TextSize=10,
+            BackgroundColor3=Color3.fromRGB(50,50,80),TextColor3=Color3.fromRGB(200,200,255),
+            Size=UDim2.new(0,0,0,26),AutomaticSize=Enum.AutomaticSize.X,Parent=goalRow})
+        addCorner(gb,UDim.new(0,6)); addStroke(gb,1,0.4)
+        mk("UIPadding",{PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),Parent=gb})
+        local gn=goalName
+        gb.MouseButton1Click:Connect(function()
+            clickSound(); pulseClick(gb)
+            editorBox.Text=SARP.AutoGenerate.Generate(gn)
+            sendNotification("Generated: "..gn,"Info")
+        end)
+    end
+
+    -- RAE Infuse
+    local raeRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,40),Parent=sEditor})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=raeRow})
+    local infuseBtn=makeButton(raeRow,"Infuse with RAE",UDim2.new(0,190,0,38),"RAE")
+    infuseBtn.Button.BackgroundColor3=Color3.fromRGB(220,200,255)
+    local sigSliderVal={v=0.60}
+    local sigThreshLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="ETM gate: 60%",TextColor3=Color3.fromRGB(92,84,76),TextSize=11,
+        Size=UDim2.new(0,110,1,0),TextXAlignment=Enum.TextXAlignment.Left,Parent=raeRow})
+    makeSlider(raeRow,"",0.30,0.95,0.60,function(v)
+        sigSliderVal.v=v; sigThreshLabel.Text=string.format("ETM gate: %.0f%%",v*100)
+    end)
+    infuseBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(infuseBtn.Button)
+        editorBox.Text=InfuseWithRAE(editorBox.Text, sigSliderVal.v)
+        sendNotification(string.format("RAE infused — ETM gate %.0f%%",sigSliderVal.v*100),"Success")
+    end)
+
+    -- ── Wrap Mode & Args ─────────────────────────────────────
+    local _, sArgs = makeSection(pageSARP, "Wrap Mode & Arguments")
+    local wmRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,36),Parent=sArgs})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=wmRow})
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Wrap:",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=12,Size=UDim2.new(0,52,1,0),
+        TextXAlignment=Enum.TextXAlignment.Left,Parent=wmRow})
+    local wrapMode={v="attribute"}
+    local wAttrBtn=mk("TextButton",{Text="Attribute",Font=Enum.Font.GothamBold,TextSize=11,
+        BackgroundColor3=Color3.fromRGB(180,210,255),Size=UDim2.new(0,110,0,30),Parent=wmRow})
+    addCorner(wAttrBtn,UDim.new(0,8)); addStroke(wAttrBtn,1,0.2)
+    local wAttachBtn=mk("TextButton",{Text="Attachment",Font=Enum.Font.GothamBold,TextSize=11,
+        BackgroundColor3=Color3.fromRGB(245,240,230),Size=UDim2.new(0,110,0,30),Parent=wmRow})
+    addCorner(wAttachBtn,UDim.new(0,8)); addStroke(wAttachBtn,1,0.3)
+    wAttrBtn.MouseButton1Click:Connect(function() clickSound(); wrapMode.v="attribute"; wAttrBtn.BackgroundColor3=Color3.fromRGB(180,210,255); wAttachBtn.BackgroundColor3=Color3.fromRGB(245,240,230) end)
+    wAttachBtn.MouseButton1Click:Connect(function() clickSound(); wrapMode.v="attachment"; wAttachBtn.BackgroundColor3=Color3.fromRGB(180,255,210); wAttrBtn.BackgroundColor3=Color3.fromRGB(245,240,230) end)
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Payload Args:",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,15),Parent=sArgs})
+    local argsBox1=mk("TextBox",{PlaceholderText="e.g. amount=1000, force=true",Text="",
+        BackgroundColor3=Color3.fromRGB(252,249,244),BorderSizePixel=0,Font=Enum.Font.Code,TextSize=11,
+        TextColor3=Color3.fromRGB(60,60,60),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,30),Parent=sArgs})
+    addCorner(argsBox1,UDim.new(0,6)); addStroke(argsBox1,1,0.3)
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Delivery Params (blank = ETM defaults):",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,15),Parent=sArgs})
+    local argsBox2=mk("TextBox",{PlaceholderText="e.g. desyncDelay=0.2, ownershipFlip=true",Text="",
+        BackgroundColor3=Color3.fromRGB(252,249,244),BorderSizePixel=0,Font=Enum.Font.Code,TextSize=11,
+        TextColor3=Color3.fromRGB(60,60,60),TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,30),Parent=sArgs})
+    addCorner(argsBox2,UDim.new(0,6)); addStroke(argsBox2,1,0.3)
+
+    -- ── Payload Preview ──────────────────────────────────────
+    local _, sPreview = makeSection(pageSARP, "Payload Preview")
+    local previewLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Wrap a payload to see preview.",TextColor3=Color3.fromRGB(72,66,60),
+        TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        Size=UDim2.new(1,0,0,80),Parent=sPreview})
+
+    local function updatePreview(descriptor)
+        if not descriptor then previewLabel.Text="No payload wrapped yet."; return end
+        local sp=descriptor.SimPreview or {}
+        previewLabel.Text=string.format(
+            "Type: %s  |  Target: %s  |  Mode: %s\nID: %s  |  Desync: %.3fs  |  Linger: %d ticks\nETM conf: %.0f%%  |  Conv: %.0f%%  |  AC: %.0f%%\nFires D (LWM): %+d  |  Infused: %s",
+            descriptor.Type or "?", descriptor.Target or "?", wrapMode.v,
+            descriptor.AttrName or (descriptor.OwnedPart and descriptor.OwnedPart.Name) or "N/A",
+            sp.DesyncDelay or 0, sp.Linger or 0,
+            (sp.RepProb or 0)*100, (sp.ETMConvRate or 0)*100, (sp.ACLevel or 0)*100,
+            sp.LWMFiresDelta or 0, descriptor.InfusedScript and "Yes" or "No")
+    end
+
+    -- ── Step Workflow ────────────────────────────────────────
+    local _, sSteps = makeSection(pageSARP, "Execution Workflow")
+    local stepBarFrame=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,242,238),Size=UDim2.new(1,0,0,46),Parent=sSteps})
+    addCorner(stepBarFrame,UDim.new(0,8)); addStroke(stepBarFrame,1,0.3)
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,HorizontalAlignment=Enum.HorizontalAlignment.Center,
+        VerticalAlignment=Enum.VerticalAlignment.Center,Padding=UDim.new(0,0),Parent=stepBarFrame})
+    local stepDefs2={{ID="wrap",Label="WRAP",Color=Color3.fromRGB(220,220,255)},{ID="sim",Label="SIM",Color=Color3.fromRGB(220,255,220)},{ID="fly",Label="FLY",Color=Color3.fromRGB(255,240,200)}}
+    local stepFrames2={}
+    for i, sd in ipairs(stepDefs2) do
+        local sf=mk("Frame",{BackgroundColor3=sd.Color,Size=UDim2.new(0,0,1,0),AutomaticSize=Enum.AutomaticSize.X,Parent=stepBarFrame})
+        mk("UIPadding",{PaddingLeft=UDim.new(0,20),PaddingRight=UDim.new(0,20),Parent=sf})
+        mk("TextLabel",{Text=sd.Label,Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Color3.fromRGB(50,50,50),
+            Size=UDim2.new(0,0,1,0),AutomaticSize=Enum.AutomaticSize.X,BackgroundTransparency=1,
+            TextXAlignment=Enum.TextXAlignment.Center,Parent=sf})
+        if i<#stepDefs2 then mk("TextLabel",{Text="->",Font=Enum.Font.GothamBold,TextSize=14,
+            TextColor3=Color3.fromRGB(160,150,140),BackgroundTransparency=1,
+            Size=UDim2.new(0,24,1,0),TextXAlignment=Enum.TextXAlignment.Center,Parent=stepBarFrame}) end
+        stepFrames2[sd.ID]=sf
+    end
+    local function highlightStep(stepID,success)
+        for _,sf in pairs(stepFrames2) do tween(sf,TweenInfo.new(0.15),{BackgroundColor3=Color3.fromRGB(245,242,238)}) end
+        if stepFrames2[stepID] then
+            local c=success==nil and Color3.fromRGB(255,255,160) or success and Color3.fromRGB(180,255,180) or Color3.fromRGB(255,180,180)
+            tween(stepFrames2[stepID],TweenInfo.new(0.15),{BackgroundColor3=c})
+        end
+    end
+    local chainDetailLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="",TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,60),Parent=sSteps})
+    local simFirstToggle=makeToggle(sSteps,"Sim First (dry-run before flying)",true,function(_) end)
+    local workflowRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sSteps})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=workflowRow})
+    local wrapBtn=makeButton(workflowRow,"1. Wrap", UDim2.new(0,150,0,40),"[W]")
+    local simBtn =makeButton(workflowRow,"2. Sim",  UDim2.new(0,150,0,40),"[S]")
+    local flyBtn =makeButton(workflowRow,"3. Fly",  UDim2.new(0,150,0,40),"[F]")
+    wrapBtn.Button.BackgroundColor3=Color3.fromRGB(220,220,255)
+    simBtn.Button.BackgroundColor3=Color3.fromRGB(220,255,220)
+    flyBtn.Button.BackgroundColor3=Color3.fromRGB(255,240,200)
+
+    -- ── Outcome Log ──────────────────────────────────────────
+    local _, sOut = makeSection(pageSARP, "Delivery Outcome Log")
+    local outScroll=mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
+        Size=UDim2.new(1,0,0,190),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=4,Parent=sOut})
+    addCorner(outScroll,UDim.new(0,8)); addStroke(outScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=outScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=outScroll})
+
+    local function appendSARPLog(target,stepLog,allPass,suggestions)
+        local row=mk("Frame",{BackgroundColor3=allPass and Color3.fromRGB(230,255,230) or Color3.fromRGB(255,235,235),
+            Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=outScroll})
+        addCorner(row,UDim.new(0,5)); addStroke(row,1,0.2)
+        mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,4),Parent=row})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,Padding=UDim.new(0,2),Parent=row})
+        local passed=0; for _,s in ipairs(stepLog) do if s.Success then passed=passed+1 end end
+        mk("TextLabel",{Text=string.format("%s Target:%s | %d/%d passed | AC:%.0f%%",
+            allPass and "PASS" or "FAIL",target,passed,#stepLog,SARP_State.ACAlertLevel*100),
+            Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Color3.fromRGB(50,50,50),
+            Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=row})
+        for _,s in ipairs(stepLog) do
+            mk("TextLabel",{Text=string.format("  %s %s -- %s",s.Success and "OK" or "FAIL",s.Step,s.Msg or ""),
+                Font=Enum.Font.Code,TextSize=10,
+                TextColor3=s.Success and Color3.fromRGB(60,140,60) or Color3.fromRGB(160,60,60),
+                Size=UDim2.new(1,0,0,13),BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=row})
+        end
+        if not allPass and suggestions and #suggestions>0 then
+            mk("TextLabel",{Text="Hint: "..suggestions[1],Font=Enum.Font.GothamMedium,TextSize=10,
+                TextColor3=Color3.fromRGB(140,100,40),Size=UDim2.new(1,0,0,13),
+                BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=row})
+        end
+    end
+
+    -- ── Fallback Target ──────────────────────────────────────
+    local _, sFallback=makeSection(pageSARP,"Fallback / Echo Target")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="When primary fails, SARP retries here. 'Broadcast' lets RAE pick nearby players via LWM.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,32),Parent=sFallback})
+    local fbRow=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,36),Parent=sFallback})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=fbRow})
+    local fbSelfBtn=mk("TextButton",{Text="Self",Font=Enum.Font.GothamBold,TextSize=11,
+        BackgroundColor3=Color3.fromRGB(180,210,255),Size=UDim2.new(0,90,0,30),Parent=fbRow})
+    addCorner(fbSelfBtn,UDim.new(0,8)); addStroke(fbSelfBtn,1,0.3)
+    local fbBroadBtn=mk("TextButton",{Text="Broadcast",Font=Enum.Font.GothamBold,TextSize=11,
+        BackgroundColor3=Color3.fromRGB(245,240,230),Size=UDim2.new(0,110,0,30),Parent=fbRow})
+    addCorner(fbBroadBtn,UDim.new(0,8)); addStroke(fbBroadBtn,1,0.3)
+    local fbLabel=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+        Text="Fallback: self",TextColor3=Color3.fromRGB(72,66,60),TextSize=12,
+        Size=UDim2.new(0,160,0,30),TextXAlignment=Enum.TextXAlignment.Left,Parent=fbRow})
+    SARP_State.FallbackTarget="self"
+    fbSelfBtn.MouseButton1Click:Connect(function()
+        clickSound(); SARP_State.FallbackTarget="self"; fbLabel.Text="Fallback: self"
+        fbSelfBtn.BackgroundColor3=Color3.fromRGB(180,210,255); fbBroadBtn.BackgroundColor3=Color3.fromRGB(245,240,230)
+    end)
+    fbBroadBtn.MouseButton1Click:Connect(function()
+        clickSound(); SARP_State.FallbackTarget="broadcast"; fbLabel.Text="Fallback: broadcast"
+        fbBroadBtn.BackgroundColor3=Color3.fromRGB(180,255,210); fbSelfBtn.BackgroundColor3=Color3.fromRGB(245,240,230)
+    end)
+
+    -- ── Wire workflow buttons ────────────────────────────────
+    wrapBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(wrapBtn.Button); highlightStep("wrap",nil)
+        local target=SARP_State.PrimaryTarget or "self"
+        task.spawn(function()
+            local descriptor=SARP.PayloadWrapper.Wrap(editorBox.Text,wrapMode.v,target,false,sigSliderVal.v)
+            updatePreview(descriptor)
+            local chain,score=SARP.DeliveryEngine.PlanChain(descriptor)
+            local parts={}; for i,s in ipairs(chain) do table.insert(parts,i..". "..s.Label) end
+            chainDetailLabel.Text="Chain: "..table.concat(parts," -> ")..string.format(" | Score:%.2f",score)
+            highlightStep("wrap",true)
+            sendNotification("Payload wrapped. Mode:"..wrapMode.v,"Success")
+        end)
+    end)
+
+    simBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(simBtn.Button)
+        if not SARP_State.WrappedPayload then sendNotification("Wrap first.","Warning"); return end
+        highlightStep("sim",nil)
+        task.spawn(function()
+            local simResult=SARP.DeliveryEngine.SimFirst(SARP_State.WrappedPayload)
+            local lines={}
+            for _,s in ipairs(simResult.Chain) do
+                table.insert(lines,string.format("  %s  p=%.0f%%  %s",s.Step,s.Prob*100,s.Risk))
+            end
+            chainDetailLabel.Text=simResult.Summary.."\n"..table.concat(lines,"\n")
+            highlightStep("sim",simResult.ChainScore>0.4)
+            sendNotification("Sim: "..simResult.Summary,simResult.ChainScore>0.4 and "Success" or "Warning")
+        end)
+    end)
+
+    flyBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(flyBtn.Button)
+        if not SARP_State.WrappedPayload then sendNotification("Wrap and simulate first.","Warning"); return end
+        if simFirstToggle.Get() then
+            local simResult=SARP.DeliveryEngine.SimFirst(SARP_State.WrappedPayload)
+            if simResult.ChainScore<0.25 then
+                sendNotification(string.format("Sim score %.0f%% too low — abort.",simResult.ChainScore*100),"Error"); return
+            end
+        end
+        highlightStep("fly",nil); flyBtn.Label.Text="Flying..."
+        local target=SARP_State.PrimaryTarget or "self"
+        task.spawn(function()
+            local stepLog,allPass=SARP.DeliveryEngine.Fly(SARP_State.WrappedPayload,target,
+                function(i,total,label,ok,msg)
+                    chainDetailLabel.Text=string.format("Step %d/%d: %s -- %s %s",i,total,label,ok and "OK" or "FAIL",msg)
+                end)
+            highlightStep("fly",allPass)
+            SARP.FeedbackBridge.Record(target,stepLog,allPass,SARP_State.WrappedPayload)
+            SARP_State.LastOutcome={stepLog=stepLog,allPass=allPass}
+            local suggestions=nil
+            if not allPass then suggestions=SARP.StealthLayer.SuggestVariant(stepLog,SARP_State.WrappedPayload) end
+            if not allPass and SARP_State.FallbackTarget and SARP_State.FallbackTarget~=target then
+                local fbTarget=SARP_State.FallbackTarget=="broadcast" and
+                    (Players:GetPlayers()[1] and Players:GetPlayers()[1].Name or "self") or SARP_State.FallbackTarget
+                sendNotification("Retrying fallback: "..fbTarget,"Warning")
+                task.wait(SARP.StealthLayer.GetRetryDelay())
+                local fbLog,fbPass=SARP.DeliveryEngine.Fly(SARP_State.WrappedPayload,fbTarget,nil)
+                SARP.FeedbackBridge.Record(fbTarget,fbLog,fbPass,SARP_State.WrappedPayload)
+                appendSARPLog(fbTarget,fbLog,fbPass,nil)
+            end
+            appendSARPLog(target,stepLog,allPass,suggestions)
+            flyBtn.Label.Text="3. Fly"
+            local passed=0; for _,s in ipairs(stepLog) do if s.Success then passed=passed+1 end end
+            sendNotification(string.format("SARP %s -- %d/%d passed.",allPass and "complete" or "partial",passed,#stepLog),
+                allPass and "Success" or "Warning")
+        end)
+    end)
+
+    -- Refresh on RAE scan
+    local prevOnScanSARP=RAE_Callbacks.OnScan
+    RAE_Callbacks.OnScan=function(ws,cards)
+        if prevOnScanSARP then prevOnScanSARP(ws,cards) end
+        refreshTargetList()
+    end
+
+    refreshTargetList()
+
+    task.defer(function()
+        if _G.RAE_Engine then _G.RAE_Engine.SARP=SARP end
+    end)
+end
+
+LoadSARP()
+
+-- ============================================================
 -- NAVIGATION SYSTEM
 -- ============================================================
 local TAB_DEFS = {
@@ -4420,6 +5254,7 @@ local TAB_DEFS = {
     { Name="Chain",      Page=pageChain,     Icon="⛓" },
     { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
+    { Name="SARP",       Page=pageSARP,      Icon="🛸" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
 local activeTab=nil
