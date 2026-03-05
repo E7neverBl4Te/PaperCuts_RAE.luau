@@ -3,7 +3,7 @@
     ║   Paper & Clay  +  RAE — Recursive Autonomous Engine  v2.0          ║
     ║   Deep Intelligence Edition                                          ║
     ║                                                                      ║
-    ║   NEW IN v2.0:                                                       ║
+    ║   NEW IN v3.0:                                                       ║
     ║     StateSignature  — compact φ(S) with canonicalization/hashing    ║
     ║     LWM             — Living World Model ring buffer + delta track  ║
     ║     ETM             — Empirical Transition Model (Bayesian,         ║
@@ -1791,6 +1791,7 @@ local pageChain     = makePage("Chain")
 local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
+local pageSARP      = makePage("SARP")
 
 -- ============================================================
 -- PAGE: Overview
@@ -3311,7 +3312,7 @@ do
         Text="Paper & Clay + RAE v2.0 — Deep Intelligence Edition\n\nRAE (Recursive Autonomous Engine) is a 7-layer autonomous agent extended with four new deep intelligence modules:\n\n• StateSignature φ(S): Compact, canonical, hash-stable state token enabling state-conditional learning.\n• LWM (Living World Model): Ring-buffer temporal model with delta tracking and remote co-firing registry.\n• ETM (Empirical Transition Model): State-conditional Bayesian P(success|card, φ(S)) with Welford variance and convergence detection.\n• CDG (Causal Dependency Graph): Co-execution effect size and confidence tracking for causal chain reordering.\n• Risk-Adjusted MCTS: E[U(π)] − λ·Var[U(π)] planning criterion with ETM-blended rollouts.\n• Session Persistence: IntelMem, ETM, CDG tables stored in _G across sessions.\n• Brier Calibration: Predicted probability vs actual outcome tracking.",
         TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,200),Parent=sAbout})
     local _, sLinks=makeSection(pageAbout,"Quick Nav")
-    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"}}
+    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"},{"Open SARP Tab","SARP"}}
     for _,nl in ipairs(navLinks) do
         local nb=makeButton(sLinks,nl[1],UDim2.new(0,220,0,36),"→"); nb.Button.BackgroundColor3=Color3.fromRGB(220,230,255)
         local targetName=nl[2]
@@ -3321,7 +3322,8 @@ do
             local pages={
                 Overview=pageOverview, Player=pagePlayer, Camera=pageCamera, World=pageWorld,
                 Discovery=pageDiscovery, RAE=pageRAE, Recursive=pageRecursive, Bridge=pageBridge,
-                Analytics=pageAnalytics, Chain=pageChain, Utilities=pageUtils, About=pageAbout
+                Analytics=pageAnalytics, Chain=pageChain, Utilities=pageUtils, About=pageAbout,
+                Forge=pageForge, SARP=pageSARP
             }
             if pages[targetName] then pages[targetName].Visible=true; panelTitle.Text=targetName end
         end)
@@ -4405,6 +4407,1289 @@ end
 LoadForge()
 
 -- ============================================================
+--  ███████╗ █████╗ ██████╗ ██████╗ 
+--  ██╔════╝██╔══██╗██╔══██╗██╔══██╗
+--  ███████╗███████║██████╔╝██████╔╝
+--  ╚════██║██╔══██║██╔══██╗██╔═══╝ 
+--  ███████║██║  ██║██║  ██║██║     
+--  ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     
+--  SARP — Self Autonomous Replication Payload · Phoenix Edition
+--
+--  Architecture:
+--    Layer 1 — Broadcast-before-correction  (echo propagation window)
+--    Layer 2 — Ownership-anchor carrier     (client-authoritative BasePart)
+--    Layer 3 — Adaptive Phoenix reshape     (correction-signal driven retry)
+--
+--  Modules: TargetResolver · Crafter · Simulator · Flyer
+--           PhoenixLoop · Orchestrator
+--  Hooks into: ETM · CDG · LWM · StateSignature · IntelMem
+-- ============================================================
+
+local SARP = {}
+
+-- ── Persistence ───────────────────────────────────────────────
+local SARP_PERSIST_VER      = "v1"
+local SARP_PERSIST_SESSIONS = "SARP_Sessions_" .. SARP_PERSIST_VER
+local SARP_PERSIST_RESHAPES = "SARP_Reshapes_" .. SARP_PERSIST_VER
+local SARP_PERSIST_PATTERNS = "SARP_Patterns_" .. SARP_PERSIST_VER
+
+local SARPSessions   = {}   -- [sessionID] = full session record
+local SARPReshapes   = {}   -- [channel:sig] = reshape history
+local SARPPatterns   = {}   -- [patternHash] = {strategy, successRate, totalCount, successCount}
+local SARPLog        = {}   -- flat ordered launch log (cap 200)
+local SARPCarrier    = nil  -- active owned-carrier BasePart ref
+local SARPWatchers   = {}   -- active GetAttributeChangedSignal connections
+local SARP_SessionID = 0    -- monotonic session counter
+
+-- ── Configuration ─────────────────────────────────────────────
+local SARP_CFG = {
+    Mode                  = "MANUAL",  -- "MANUAL" | "AUTO"
+    AutoThreshold         = 0.72,      -- ETM floor for AUTO mode
+    PhoenixMaxDepth       = 5,         -- max reshape iterations per flight
+    DesyncBaseDelay       = 0.18,      -- base window (seconds) before ownership hand-off
+    DesyncGammaShape      = 2.0,       -- Gamma k for delay jitter
+    DesyncGammaScale      = 0.08,      -- Gamma θ for delay jitter
+    OwnershipTimeout      = 3.0,       -- seconds to hold carrier ownership
+    CorrectionWatchWindow = 1.5,       -- seconds to listen for server correction signal
+    BroadcastMode         = "SELF",    -- "SELF" | "NEARBY" | "ALL"
+    EchoRadius            = 50,        -- studs for NEARBY mode
+    AntiCheatGate         = true,      -- abort on elevated remoteFires delta
+    ACFiresThreshold      = 20,        -- remoteFires/tick above which AC is flagged
+    ReshapeNoiseScale     = 0.05,      -- Gamma noise per reshape iteration
+    CarrierSize           = Vector3.new(0.5, 0.5, 0.5),
+}
+
+-- ── Gamma sampler (Marsaglia–Tsang, matches Intel sampler style) ──
+local function SARP_SampleGamma(k, theta)
+    if k < 1 then return SARP_SampleGamma(1 + k, theta) * math.random()^(1/k) end
+    local d = k - 1/3
+    local c = 1 / math.sqrt(9 * d)
+    while true do
+        local x, v
+        repeat x = (math.random() * 2 - 1) * 3; v = 1 + c * x until v > 0
+        v = v^3
+        local u = math.random()
+        if u < 1 - 0.0331*(x^2)^2 then return d*v*theta end
+        if math.log(u) < 0.5*x^2 + d*(1 - v + math.log(v)) then return d*v*theta end
+    end
+end
+
+-- ── Simple djb2 hash for correction pattern keys ──────────────
+local function SARP_HashStr(str)
+    local h = 5381
+    for i = 1, #str do h = bit32.band(h*33 + string.byte(str,i), 0xFFFFFFFF) end
+    return string.format("P%08X", h)
+end
+
+-- ── Save / Load ───────────────────────────────────────────────
+local function SaveSARP()
+    pcall(function()
+        _G[SARP_PERSIST_SESSIONS] = SARPSessions
+        _G[SARP_PERSIST_RESHAPES] = SARPReshapes
+        _G[SARP_PERSIST_PATTERNS] = SARPPatterns
+    end)
+end
+
+local function LoadSARP()
+    pcall(function()
+        if type(_G[SARP_PERSIST_SESSIONS]) == "table" then SARPSessions = _G[SARP_PERSIST_SESSIONS] end
+        if type(_G[SARP_PERSIST_RESHAPES]) == "table" then SARPReshapes = _G[SARP_PERSIST_RESHAPES] end
+        if type(_G[SARP_PERSIST_PATTERNS]) == "table" then SARPPatterns = _G[SARP_PERSIST_PATTERNS] end
+    end)
+end
+
+-- ============================================================
+-- MODULE 1 — TARGET RESOLVER
+-- ============================================================
+SARP.TargetResolver = {}
+
+function SARP.TargetResolver.GetAll()
+    local list = {{ Name="Self", Player=player, IsSelf=true, Distance=0 }}
+    local selfChar = player.Character
+    local selfHRP  = selfChar and selfChar:FindFirstChild("HumanoidRootPart")
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player then
+            local char = p.Character
+            local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+            local dist = math.huge
+            if hrp and selfHRP then
+                dist = (hrp.Position - selfHRP.Position).Magnitude
+            end
+            table.insert(list, { Name=p.Name, Player=p, IsSelf=false, Distance=dist })
+        end
+    end
+    table.sort(list, function(a,b) return a.Distance < b.Distance end)
+    return list
+end
+
+-- Auto-select: highest ETM-predicted success + LWM desync score
+function SARP.TargetResolver.AutoSelect()
+    local buf   = LWM.GetBuffer()
+    local delta = LWM.GetDelta()
+    local physD = math.abs(delta and delta.physDelta or 0)
+    -- Self is always baseline candidate
+    local best = { Name="Self", Player=player, IsSelf=true,
+        Score = 0.40 + math.min(physD / 15, 0.25) }
+    local sig  = RAE_State.CurrentSig or "unknown"
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player then
+            local key = "sarp_echo_" .. p.Name
+            local prob, _, _ = ETM.Predict(key, sig)
+            if prob > best.Score then
+                best = { Name=p.Name, Player=p, IsSelf=false, Score=prob }
+            end
+        end
+    end
+    return best
+end
+
+-- Risk badge: ETM variance for a named target
+function SARP.TargetResolver.RiskBadge(targetName)
+    local key = (targetName == "Self") and "sarp_attr_self"
+                or ("sarp_echo_" .. targetName)
+    local _, _, stddev = ETM.Predict(key, RAE_State.CurrentSig or "unknown")
+    local v = (stddev or 0.2)^2
+    if v > 0.12 then return "HIGH",   Color3.fromRGB(220, 80,  80)
+    elseif v > 0.06 then return "MED", Color3.fromRGB(220, 160, 60)
+    else              return "LOW",    Color3.fromRGB(80,  180, 80) end
+end
+
+-- ============================================================
+-- MODULE 2 — CRAFTER
+-- Wraps a payload into one of three delivery envelopes
+-- ============================================================
+SARP.Crafter = {}
+
+-- Strategy A: Attribute write — embeds payload in instance attributes
+-- Uses junk outer key to mask the real payload key (dump-trigger camouflage)
+function SARP.Crafter.WrapAttribute(payload, trashCamo, instanceOverride)
+    local inst = instanceOverride
+    if not inst then
+        local char = player.Character
+        inst = char and char:FindFirstChild("HumanoidRootPart")
+    end
+    if not inst or not inst.Parent then return nil, "No accessible target instance" end
+    local junkKey    = "sarp_j_" .. tostring(math.random(1000,9999))
+    local payloadKey = "sarp_p_" .. tostring(SARP_SessionID)
+    -- Junk value: anomalous vector intended to trigger server validation dump
+    local junkVal = trashCamo or Vector3.new(math.huge, math.huge, math.huge)
+    return {
+        Channel    = "Attribute",
+        Instance   = inst,
+        JunkKey    = junkKey,
+        PayloadKey = payloadKey,
+        JunkValue  = junkVal,
+        Payload    = payload,
+        Desc       = string.format("[Attribute] %s — junk '%s' + payload '%s'",
+            inst:GetFullName(), junkKey, payloadKey),
+    }, nil
+end
+
+-- Strategy B: Owned-carrier — creates a transient BasePart under client ownership,
+-- embeds payload in its attributes during the ownership window, then releases
+function SARP.Crafter.WrapOwnedCarrier(payload, desyncDelayOverride)
+    local char = player.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil, "No HumanoidRootPart" end
+    local delay = desyncDelayOverride
+        or (SARP_CFG.DesyncBaseDelay + SARP_SampleGamma(SARP_CFG.DesyncGammaShape, SARP_CFG.DesyncGammaScale))
+    return {
+        Channel      = "OwnedCarrier",
+        AnchorPart   = hrp,
+        DesyncDelay  = delay,
+        Payload      = payload,
+        Desc         = string.format("[OwnedCarrier] HRP-anchored carrier — desync window %.3fs", delay),
+    }, nil
+end
+
+-- Strategy C: Attachment bridge — creates a WeldConstraint/Attachment on an owned part,
+-- encodes state in its CFrame/attributes for FE echo propagation to nearby clients
+function SARP.Crafter.WrapAttachmentBridge(payload, echoPlayerName)
+    local char = player.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil, "No HumanoidRootPart" end
+    local echoPlayer = nil
+    if echoPlayerName and echoPlayerName ~= "Self" then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p.Name == echoPlayerName then echoPlayer = p; break end
+        end
+    end
+    return {
+        Channel     = "AttachmentBridge",
+        AnchorPart  = hrp,
+        EchoPlayer  = echoPlayer,
+        Payload     = payload,
+        Desc        = string.format("[AttachmentBridge] HRP attachment — echo target: %s",
+            echoPlayer and echoPlayer.Name or "local only"),
+    }, nil
+end
+
+-- ============================================================
+-- MODULE 3 — SIMULATOR
+-- LWM-grounded dry-run: projects linger, success probability, AC risk
+-- ============================================================
+SARP.Simulator = {}
+
+function SARP.Simulator.Simulate(wrapped, targetName)
+    local buf    = LWM.GetBuffer()
+    local delta  = LWM.GetDelta()
+    local sig    = RAE_State.CurrentSig or "unknown"
+    local ch     = wrapped.Channel
+    local tgt    = targetName or "Self"
+
+    -- ETM key for this channel+target combination
+    local etmKey   = string.format("sarp_%s_%s", ch:lower(), tgt:lower())
+    local etmProb, etmConv, etmStd = ETM.Predict(etmKey, sig)
+
+    -- LWM linger estimate: physDelta is the best proxy for active desync activity
+    local physD        = delta and math.abs(delta.physDelta) or 0
+    local lingerBase   = math.max(0.4, 0.8 + physD * 0.10)
+    local lingerTicks  = lingerBase + (etmProb - 0.5) * 0.9
+    lingerTicks        = math.max(0.1, lingerTicks)
+
+    -- CDG causal score for this channel card
+    local cdgScore = CDG.GetCausalScore(etmKey)
+
+    -- Variance → risk level
+    local variance = (etmStd or 0.2)^2
+    local risk     = variance > 0.12 and "High" or variance > 0.06 and "Medium" or "Low"
+
+    -- AntiCheat spike detection from LWM
+    local avgFires = LWM.GetTemporalAverage("remoteFires", 3)
+    local acRisk   = (avgFires and avgFires > SARP_CFG.ACFiresThreshold)
+        and "ELEVATED" or "NOMINAL"
+
+    -- Phoenix reshape estimate: how many iterations before convergence?
+    local reshapeEst = math.max(1, math.ceil((1 - etmProb) / 0.18))
+
+    return {
+        Channel      = ch,
+        Target       = tgt,
+        ETMProb      = etmProb,
+        ETMConverged = etmConv,
+        ETMStdDev    = etmStd,
+        LingerTicks  = lingerTicks,
+        CDGScore     = cdgScore,
+        Risk         = risk,
+        ACRisk       = acRisk,
+        ReshapeEst   = reshapeEst,
+        LWMDepth     = #buf,
+        Sig          = sig,
+        Summary      = string.format(
+            "P(success): %.0f%% %s | Linger: ~%.1f ticks | Risk: %s | AC: %s | Reshape est: %d | CDG: %.3f",
+            etmProb*100, etmConv and "✓" or "~", lingerTicks, risk, acRisk, reshapeEst, cdgScore),
+    }
+end
+
+-- ============================================================
+-- MODULE 4 — FLYER
+-- Executes the three delivery channels with correction watching
+-- ============================================================
+SARP.Flyer = {}
+
+-- World-state baseline capture before delivery (mirrors ResponseProbe pattern)
+local function SARP_Baseline()
+    local char = player.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    local ls   = player:FindFirstChild("leaderstats")
+    local snap = { health=hum and hum.Health or 0, leaderstats={}, timestamp=os.clock() }
+    if ls then for _, v in ipairs(ls:GetChildren()) do snap.leaderstats[v.Name]=v.Value end end
+    return snap
+end
+
+-- Watches for server correction on a specific attribute key.
+-- onResult(corrected: bool, correctedToValue: any)
+-- Layer 1 + Layer 3 hinge on this signal.
+local function SARP_WatchCorrection(instance, key, writtenValue, windowSec, onResult)
+    if not instance or not instance.Parent then onResult(true, nil); return end
+    local done = false
+    local conn
+    -- Timeout: no correction in window = linger success
+    local timeoutTask = task.delay(windowSec, function()
+        if done then return end
+        done = true
+        if conn then pcall(function() conn:Disconnect() end) end
+        onResult(false, nil)  -- false = NOT corrected = linger success
+    end)
+    pcall(function()
+        conn = instance:GetAttributeChangedSignal(key):Connect(function()
+            if done then return end
+            local newVal = instance:GetAttribute(key)
+            -- Server correction = value changed to something other than what we wrote
+            local serverOverwrote = (tostring(newVal) ~= tostring(writtenValue))
+            if serverOverwrote then
+                done = true
+                pcall(function() conn:Disconnect() end)
+                onResult(true, newVal)  -- true = corrected (delivery failed/partial)
+            end
+        end)
+        table.insert(SARPWatchers, conn)
+    end)
+end
+
+-- ── Delivery Channel A: Attribute ─────────────────────────────
+local function SARP_FlyAttribute(wrapped, onResult)
+    local inst = wrapped.Instance
+    if not inst or not inst.Parent then onResult(false, "INSTANCE_GONE", nil); return end
+    local baseline = SARP_Baseline()
+    -- Write junk outer layer (broadcast before correction: Layer 1)
+    -- Other clients receive this write in the replication tick before server discards it
+    pcall(function() inst:SetAttribute(wrapped.JunkKey, wrapped.JunkValue) end)
+    -- Minimal gap: let junk propagate to replication buffer before writing real key
+    task.wait(0.04)
+    -- Write payload key
+    local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
+    local writeOK = pcall(function() inst:SetAttribute(wrapped.PayloadKey, payloadStr) end)
+    if not writeOK then
+        pcall(function() inst:SetAttribute(wrapped.JunkKey, nil) end)
+        onResult(false, "SETATTR_FAILED", baseline)
+        return
+    end
+    -- Watch for server correction (Layer 3: correction signal drives Phoenix reshape)
+    SARP_WatchCorrection(inst, wrapped.PayloadKey, payloadStr,
+        SARP_CFG.CorrectionWatchWindow,
+        function(corrected, correctedTo)
+            -- Always clean junk key
+            pcall(function() inst:SetAttribute(wrapped.JunkKey, nil) end)
+            local pattern = corrected
+                and ("CORRECTED_TO:" .. tostring(correctedTo))
+                or "LINGERED"
+            onResult(not corrected, pattern, baseline)
+        end
+    )
+end
+
+-- ── Delivery Channel B: OwnedCarrier ──────────────────────────
+local function SARP_FlyOwnedCarrier(wrapped, onResult)
+    local baseline = SARP_Baseline()
+    local hrp = wrapped.AnchorPart
+    if not hrp or not hrp.Parent then onResult(false, "ANCHOR_GONE", nil); return end
+    -- Create transient carrier BasePart anchored near HRP
+    local carrier = Instance.new("Part")
+    carrier.Name         = "sarp_carrier_" .. tostring(SARP_SessionID)
+    carrier.Size         = SARP_CFG.CarrierSize
+    carrier.Anchored     = false
+    carrier.CanCollide   = false
+    carrier.Transparency = 1.0
+    carrier.CastShadow   = false
+    carrier.CFrame       = hrp.CFrame * CFrame.new(0, 3, 0)
+    carrier.Parent       = Workspace
+    SARPCarrier = carrier
+    -- Request client network ownership (Layer 2: ownership anchor)
+    pcall(function()
+        if carrier.SetNetworkOwner then
+            carrier:SetNetworkOwner(player)
+        end
+    end)
+    -- Hold ownership window before embedding payload
+    task.wait(wrapped.DesyncDelay)
+    local payloadKey = "sarp_oc_" .. tostring(SARP_SessionID)
+    local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
+    -- Embed payload during ownership window — we are authoritative here
+    pcall(function()
+        carrier:SetAttribute(payloadKey, payloadStr)
+        carrier:SetAttribute("sarp_oc_session", SARP_SessionID)
+        -- Slight position change during window to exercise replication path
+        carrier.CFrame = hrp.CFrame * CFrame.new(0, 3, 0)
+    end)
+    -- Watch for server correction on the attribute
+    SARP_WatchCorrection(carrier, payloadKey, payloadStr,
+        SARP_CFG.CorrectionWatchWindow,
+        function(corrected, correctedTo)
+            -- Release carrier regardless of outcome
+            task.delay(0.3, function()
+                pcall(function() if carrier and carrier.Parent then carrier:Destroy() end end)
+                if SARPCarrier == carrier then SARPCarrier = nil end
+            end)
+            local pattern = corrected
+                and ("OC_CORRECTED:" .. tostring(correctedTo))
+                or "OC_LINGERED"
+            onResult(not corrected, pattern, baseline)
+        end
+    )
+end
+
+-- ── Delivery Channel C: AttachmentBridge ──────────────────────
+local function SARP_FlyAttachmentBridge(wrapped, onResult)
+    local baseline  = SARP_Baseline()
+    local anchor    = wrapped.AnchorPart
+    if not anchor or not anchor.Parent then onResult(false, "ANCHOR_GONE", nil); return end
+    -- Create Attachment on owned HRP — broadcasts to clients in replication tick
+    local att  = Instance.new("Attachment")
+    att.Name   = "sarp_bridge_" .. tostring(SARP_SessionID)
+    att.Parent = anchor
+    -- Encode payload hash as CFrame position component (Layer 1: echo before correction)
+    local payloadStr  = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
+    local hashVal     = 0
+    for i = 1, math.min(#payloadStr, 24) do
+        hashVal = hashVal + string.byte(payloadStr, i) * i
+    end
+    local encodedCF = CFrame.new((hashVal % 500) * 0.01, 0, 0)
+    pcall(function()
+        att.CFrame = encodedCF
+        att:SetAttribute("sarp_bridge_payload",  payloadStr)
+        att:SetAttribute("sarp_bridge_session",  SARP_SessionID)
+        att:SetAttribute("sarp_bridge_echo",
+            wrapped.EchoPlayer and wrapped.EchoPlayer.Name or "local")
+    end)
+    -- Watch for server correction on bridge payload attribute
+    SARP_WatchCorrection(att, "sarp_bridge_payload", payloadStr,
+        SARP_CFG.CorrectionWatchWindow,
+        function(corrected, correctedTo)
+            -- Clean attachment after window
+            task.delay(0.5, function()
+                pcall(function() if att and att.Parent then att:Destroy() end end)
+            end)
+            local pattern = corrected
+                and ("BRIDGE_CORRECTED:" .. tostring(correctedTo))
+                or "BRIDGE_LINGERED"
+            onResult(not corrected, pattern, baseline)
+        end
+    )
+end
+
+function SARP.Flyer.Fly(wrapped, targetName, onResult)
+    SARP_SessionID = SARP_SessionID + 1
+    local ch = wrapped.Channel
+    if     ch == "Attribute"        then SARP_FlyAttribute(wrapped, onResult)
+    elseif ch == "OwnedCarrier"     then SARP_FlyOwnedCarrier(wrapped, onResult)
+    elseif ch == "AttachmentBridge" then SARP_FlyAttachmentBridge(wrapped, onResult)
+    else   onResult(false, "UNKNOWN_CHANNEL:" .. tostring(ch), nil) end
+end
+
+-- ============================================================
+-- MODULE 5 — PHOENIX LOOP
+-- Client-side adaptive retry: correction signal → reshape → retry
+-- This is the reconstruction layer. It lives entirely on the client.
+-- Each reshape iteration mutates the payload guided by the pattern
+-- that the server correction revealed about validation boundaries.
+-- ============================================================
+SARP.Phoenix = {}
+
+-- Classify what the server correction reveals
+local function SARP_InferPattern(correctionStr)
+    if not correctionStr or correctionStr == "LINGERED"
+        or correctionStr == "OC_LINGERED" or correctionStr == "BRIDGE_LINGERED"
+        then return "LINGERED" end
+    local s = correctionStr:lower()
+    if s:find("nan") or s:find("inf") or s:find("huge")    then return "BOUNDS_REJECT" end
+    if s:find("corrected_to:nil") or s:find("attr_cleared") then return "ATTR_CLEARED"  end
+    if s:find("corrected")                                  then return "SERVER_OVERRIDE" end
+    if s:find("instance_gone") or s:find("anchor_gone")    then return "INSTANCE_LOST"  end
+    if s:find("setattr_failed")                            then return "WRITE_BLOCKED"   end
+    return "UNKNOWN_" .. SARP_HashStr(correctionStr)
+end
+
+-- Reshape the payload and delivery params based on what the correction pattern reveals
+local function SARP_Reshape(payload, pattern, depth, channel)
+    local noise  = SARP_SampleGamma(SARP_CFG.DesyncGammaShape, SARP_CFG.ReshapeNoiseScale * depth)
+    local newDesync = SARP_CFG.DesyncBaseDelay + depth * 0.08
+        + SARP_SampleGamma(SARP_CFG.DesyncGammaShape, SARP_CFG.DesyncGammaScale)
+    local newPayload = payload
+    local reshapeDesc = "passthrough"
+
+    if pattern == "BOUNDS_REJECT" then
+        -- Server rejected anomalous value (NaN/inf): reshape to bounded variant + noise
+        if type(payload) == "number" then
+            newPayload = math.clamp(payload + noise, -1e5, 1e5)
+            reshapeDesc = string.format("bounds_clamp[%.4f] d%d", noise, depth)
+        elseif type(payload) == "string" then
+            newPayload = payload:sub(1, 64) .. "_r" .. depth
+            reshapeDesc = "string_truncate+suffix"
+        end
+    elseif pattern == "SERVER_OVERRIDE" then
+        -- Server actively overwrote: widen desync window and re-assert same value
+        newDesync = newDesync + 0.15 * depth
+        reshapeDesc = string.format("wider_desync[%.3fs] d%d", newDesync, depth)
+    elseif pattern == "ATTR_CLEARED" then
+        -- Server deleted attribute: rotate to a different key name
+        if type(payload) == "string" then
+            newPayload = payload .. "_k" .. depth
+        end
+        reshapeDesc = "key_rotation d" .. depth
+    elseif pattern == "WRITE_BLOCKED" then
+        -- Attribute write was blocked: escalate to OwnedCarrier if currently on Attribute
+        reshapeDesc = "channel_escalate[OwnedCarrier] d" .. depth
+    else
+        -- Unknown pattern: inject Beta-sampled noise
+        if type(payload) == "number" then
+            newPayload = payload + noise
+            reshapeDesc = string.format("noise_inject[%.4f] d%d", noise, depth)
+        elseif type(payload) == "string" then
+            newPayload = payload .. math.floor(noise * 1000)
+            reshapeDesc = "string_noise d" .. depth
+        end
+    end
+    return newPayload, newDesync, reshapeDesc
+end
+
+function SARP.Phoenix.Run(wrappedPayload, targetName, simResult, onComplete)
+    local maxD       = SARP_CFG.PhoenixMaxDepth
+    local depth      = 0
+    local channel    = wrappedPayload.Channel
+    local etmKey     = string.format("sarp_%s_%s", channel:lower(), (targetName or "self"):lower())
+    local sessionRec = {
+        ID         = SARP_SessionID,
+        Channel    = channel,
+        Target     = targetName or "Self",
+        Attempts   = {},
+        StartTime  = os.clock(),
+        FinalResult= nil,
+    }
+
+    local function attempt(currentPayload, currentWrapped, currentDesync)
+        if depth >= maxD then
+            sessionRec.FinalResult = "MAX_DEPTH"
+            onComplete(false, sessionRec, "Phoenix max depth reached (" .. maxD .. ")")
+            SaveSARP()
+            return
+        end
+        depth = depth + 1
+
+        -- AntiCheat gate: elevated remoteFires delta = abort
+        if SARP_CFG.AntiCheatGate then
+            local recentFires = LWM.GetTemporalAverage("remoteFires", 2)
+            if recentFires and recentFires > SARP_CFG.ACFiresThreshold then
+                sessionRec.FinalResult = "AC_ABORT"
+                onComplete(false, sessionRec, "AC spike detected — Phoenix aborted")
+                return
+            end
+        end
+
+        -- Humanized inter-attempt delay: Gamma jitter prevents timing fingerprinting
+        if depth > 1 then
+            task.wait(0.25 + SARP_SampleGamma(2.0, 0.12))
+        end
+
+        -- Apply current depth's desync delay to the wrapper
+        local activeWrapped = {}
+        for k, v in pairs(currentWrapped) do activeWrapped[k] = v end
+        activeWrapped.Payload     = currentPayload
+        activeWrapped.DesyncDelay = currentDesync
+
+        SARP.Flyer.Fly(activeWrapped, targetName, function(success, correctionStr, baseline)
+            local pattern = SARP_InferPattern(correctionStr)
+
+            -- Record attempt
+            local rec = {
+                Depth         = depth,
+                Success       = success,
+                Pattern       = pattern,
+                CorrectionStr = correctionStr,
+                DesyncUsed    = currentDesync,
+                Timestamp     = os.clock(),
+            }
+            table.insert(sessionRec.Attempts, rec)
+
+            -- Feed ETM with this outcome (state-conditional learning)
+            local sig = RAE_State.CurrentSig or "unknown"
+            ETM.Update(etmKey, sig, success)
+
+            -- Feed CDG: causal edge between depth N-1 and depth N attempts
+            if depth > 1 then
+                CDG.UpdateFromLog({
+                    { ID=etmKey.."_d"..(depth-1), Success=(not success) },
+                    { ID=etmKey.."_d"..depth,     Success=success        },
+                })
+            end
+
+            -- Update pattern registry (learn which patterns map to which reshape success)
+            local patHash = SARP_HashStr(pattern)
+            if not SARPPatterns[patHash] then
+                SARPPatterns[patHash] = {
+                    Pattern=pattern, totalCount=0, successCount=0, reshapeDesc=""
+                }
+            end
+            SARPPatterns[patHash].totalCount   = SARPPatterns[patHash].totalCount + 1
+            if success then SARPPatterns[patHash].successCount = SARPPatterns[patHash].successCount + 1 end
+
+            -- Log entry
+            table.insert(SARPLog, {
+                SessionID = sessionRec.ID,
+                Depth     = depth,
+                Channel   = channel,
+                Target    = targetName,
+                Success   = success,
+                Pattern   = pattern,
+                ETMKey    = etmKey,
+                T         = os.clock(),
+            })
+            if #SARPLog > 200 then table.remove(SARPLog, 1) end
+
+            if success then
+                sessionRec.FinalResult = "SUCCESS"
+                sessionRec.FinalDepth  = depth
+                onComplete(true, sessionRec, correctionStr)
+                SaveSARP()
+                return
+            end
+
+            -- ETM collapse check: if ETM confidence falls too low, abandon
+            local newProb, _, _ = ETM.Predict(etmKey, sig)
+            if newProb < 0.18 and depth >= 3 then
+                sessionRec.FinalResult = "ETM_COLLAPSE"
+                onComplete(false, sessionRec, string.format(
+                    "ETM confidence %.0f%% < floor after %d attempts — abort", newProb*100, depth))
+                SaveSARP()
+                return
+            end
+
+            -- Reshape for next attempt
+            local newPayload, newDesync, reshapeDesc = SARP_Reshape(
+                currentPayload, pattern, depth, channel)
+            SARPPatterns[patHash].reshapeDesc = reshapeDesc
+
+            -- Escalate channel if write was blocked on Attribute
+            if pattern == "WRITE_BLOCKED" and channel == "Attribute" then
+                local escalated, escalateErr = SARP.Crafter.WrapOwnedCarrier(newPayload, newDesync)
+                if escalated then
+                    activeWrapped = escalated
+                end
+            end
+
+            attempt(newPayload, activeWrapped, newDesync)
+        end)
+    end
+
+    attempt(wrappedPayload.Payload, wrappedPayload, SARP_CFG.DesyncBaseDelay)
+end
+
+-- ============================================================
+-- SARP ORCHESTRATOR
+-- ============================================================
+function SARP.Build(channel, payload, trashCamo, deliveryParams, targetName)
+    local wrapped, err
+    if channel == "Attribute" then
+        local inst = deliveryParams and deliveryParams.Instance or nil
+        wrapped, err = SARP.Crafter.WrapAttribute(payload, trashCamo, inst)
+    elseif channel == "OwnedCarrier" then
+        local delay = deliveryParams and deliveryParams.DesyncDelay or nil
+        wrapped, err = SARP.Crafter.WrapOwnedCarrier(payload, delay)
+    elseif channel == "AttachmentBridge" then
+        wrapped, err = SARP.Crafter.WrapAttachmentBridge(payload, targetName)
+    else
+        return nil, nil, "Unknown channel: " .. tostring(channel)
+    end
+    if err then return nil, nil, err end
+    local simResult = SARP.Simulator.Simulate(wrapped, targetName)
+    return wrapped, simResult, nil
+end
+
+function SARP.Execute(wrapped, simResult, targetName, onComplete)
+    if SARP_CFG.Mode == "AUTO" then
+        if not simResult or simResult.ETMProb < SARP_CFG.AutoThreshold then
+            local pct = simResult and math.floor(simResult.ETMProb*100) or 0
+            onComplete(false, nil, string.format(
+                "AUTO mode: ETM %d%% < threshold %d%%", pct,
+                math.floor(SARP_CFG.AutoThreshold*100)))
+            return
+        end
+    end
+    SARP.Phoenix.Run(wrapped, targetName, simResult, onComplete)
+end
+
+function SARP.Cleanup()
+    for _, c in ipairs(SARPWatchers) do pcall(function() c:Disconnect() end) end
+    SARPWatchers = {}
+    if SARPCarrier and SARPCarrier.Parent then
+        pcall(function() SARPCarrier:Destroy() end)
+        SARPCarrier = nil
+    end
+end
+
+-- ============================================================
+-- PAGE: SARP (UI)
+-- ============================================================
+do
+    -- ── Header ───────────────────────────────────────────────
+    local _, sHdr = makeSection(pageSARP, "SARP — Phoenix Edition")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Self Autonomous Replication Payload. Delivers payloads via the replication boundary using three channels: Attribute write (with junk camouflage), Owned Carrier (BasePart ownership anchor), and Attachment Bridge (CFrame-encoded echo). The Phoenix Loop adaptively reshapes failed payloads guided by server correction signals, ETM confidence, and CDG causal data.",
+        TextColor3=Color3.fromRGB(92,84,76),TextSize=12,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,72),Parent=sHdr})
+
+    local sarpStatusLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Status: Idle  |  Sessions: 0  |  Log: 0 entries  |  ETM keys: 0",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sHdr})
+
+    local function updateSARPStatus()
+        local sesCount = 0; for _ in pairs(SARPSessions) do sesCount=sesCount+1 end
+        local etmKeys  = 0
+        for k in pairs(ETM.GetTableRef()) do
+            if k:find("^sarp_") then etmKeys=etmKeys+1 end
+        end
+        sarpStatusLabel.Text = string.format(
+            "Status: Ready  |  Sessions: %d  |  Log: %d  |  ETM keys: %d  |  Mode: %s",
+            sesCount, #SARPLog, etmKeys, SARP_CFG.Mode)
+    end
+
+    -- ── Target + Mode Row ─────────────────────────────────────
+    local _, sTgt = makeSection(pageSARP, "Target & Delivery Mode")
+    local tgtRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
+        AutomaticSize=Enum.AutomaticSize.Y,Parent=sTgt})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=tgtRow})
+
+    -- Target dropdown (simulated with scroll buttons)
+    local tgtFrame = mk("Frame",{BackgroundColor3=Color3.fromRGB(250,247,243),
+        Size=UDim2.new(0,220,0,36),Parent=tgtRow})
+    addCorner(tgtFrame,UDim.new(0,8)); addStroke(tgtFrame,1,0.3)
+    local tgtLabel = mk("TextLabel",{Text="👤 Self",Font=Enum.Font.GothamBold,TextSize=12,
+        TextColor3=Color3.fromRGB(52,47,42),Size=UDim2.new(1,-40,1,0),Position=UDim2.new(0,10,0,0),
+        BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=tgtFrame})
+    local tgtCycleBtn = mk("TextButton",{Text="↕",Font=Enum.Font.GothamBold,TextSize=14,
+        BackgroundColor3=Color3.fromRGB(220,230,255),Size=UDim2.new(0,32,1,0),
+        AnchorPoint=Vector2.new(1,0),Position=UDim2.new(1,0,0,0),Parent=tgtFrame})
+    addCorner(tgtCycleBtn,UDim.new(0,6))
+
+    -- Risk badge
+    local riskBadge = mk("TextLabel",{Text="RISK: LOW",Font=Enum.Font.GothamBold,TextSize=10,
+        TextColor3=Color3.fromRGB(255,255,255),BackgroundColor3=Color3.fromRGB(80,180,80),
+        Size=UDim2.new(0,90,0,28),TextXAlignment=Enum.TextXAlignment.Center,Parent=tgtRow})
+    addCorner(riskBadge,UDim.new(0,8))
+
+    -- Mode toggle
+    local modeBtn = makeButton(tgtRow,"Mode: MANUAL",UDim2.new(0,160,0,36),"⚙")
+    modeBtn.Button.BackgroundColor3 = Color3.fromRGB(220,240,220)
+
+    -- Auto-select button
+    local autoSelBtn = makeButton(tgtRow,"🔄 Auto-Select",UDim2.new(0,140,0,36),"")
+    autoSelBtn.Button.BackgroundColor3 = Color3.fromRGB(240,230,255)
+
+    local SARP_CurrentTarget = "Self"
+    local SARP_TargetList    = {}
+
+    local function refreshTargetList()
+        SARP_TargetList = SARP.TargetResolver.GetAll()
+    end
+    refreshTargetList()
+
+    local tgtIdx = 1
+    tgtCycleBtn.MouseButton1Click:Connect(function()
+        clickSound(); refreshTargetList()
+        tgtIdx = (tgtIdx % #SARP_TargetList) + 1
+        local entry = SARP_TargetList[tgtIdx]
+        SARP_CurrentTarget = entry.Name
+        tgtLabel.Text = (entry.IsSelf and "👤 Self" or "👥 " .. entry.Name)
+            .. (entry.Distance and entry.Distance < math.huge
+                and string.format(" (%.0fm)", entry.Distance) or "")
+        local badge, badgeCol = SARP.TargetResolver.RiskBadge(SARP_CurrentTarget)
+        riskBadge.Text = "RISK: " .. badge
+        riskBadge.BackgroundColor3 = badgeCol
+    end)
+
+    autoSelBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(autoSelBtn.Button)
+        local best = SARP.TargetResolver.AutoSelect()
+        SARP_CurrentTarget = best.Name
+        tgtLabel.Text = best.IsSelf and "👤 Self" or "👥 " .. best.Name
+        local badge, badgeCol = SARP.TargetResolver.RiskBadge(SARP_CurrentTarget)
+        riskBadge.Text = "RISK: " .. badge
+        riskBadge.BackgroundColor3 = badgeCol
+        sendNotification(string.format("Auto-selected: %s (score %.2f)", best.Name, best.Score), "Info")
+    end)
+
+    modeBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(modeBtn.Button)
+        SARP_CFG.Mode = SARP_CFG.Mode == "MANUAL" and "AUTO" or "MANUAL"
+        modeBtn.Label.Text = "Mode: " .. SARP_CFG.Mode
+        modeBtn.Button.BackgroundColor3 = SARP_CFG.Mode == "AUTO"
+            and Color3.fromRGB(255,230,200) or Color3.fromRGB(220,240,220)
+        updateSARPStatus()
+    end)
+
+    -- ── Channel Selector ──────────────────────────────────────
+    local _, sChan = makeSection(pageSARP, "Delivery Channel")
+    local chanRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sChan})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=chanRow})
+    local SARP_CurrentChannel = "Attribute"
+    local channelDefs = {
+        { Name="Attribute",        Icon="🔑", Desc="Attr write + junk camo. Layer 1 echo.",      Color=Color3.fromRGB(220,230,255) },
+        { Name="OwnedCarrier",     Icon="📦", Desc="Transient BasePart. Layer 2 ownership.",      Color=Color3.fromRGB(220,255,230) },
+        { Name="AttachmentBridge", Icon="🔗", Desc="Attachment CFrame echo. Layer 1+2 combined.", Color=Color3.fromRGB(255,240,220) },
+    }
+    local chanBtns = {}
+    for _, cd in ipairs(channelDefs) do
+        local cb = makeButton(chanRow, cd.Icon.." "..cd.Name, UDim2.new(0,0,0,40), "")
+        cb.Button.Size = UDim2.new(0,170,0,40)
+        cb.Button.BackgroundColor3 = cd.Name == SARP_CurrentChannel
+            and Color3.fromRGB(200,210,240) or cd.Color
+        addStroke(cb.Button, 1, 0.3)
+        local cdCapture = cd
+        cb.Button.MouseButton1Click:Connect(function()
+            clickSound(); pulseClick(cb.Button)
+            SARP_CurrentChannel = cdCapture.Name
+            for _, b in ipairs(chanBtns) do
+                b.Button.BackgroundColor3 = (b == cb)
+                    and Color3.fromRGB(200,210,240) or channelDefs[_].Color
+            end
+        end)
+        table.insert(chanBtns, cb)
+    end
+    -- Channel description label
+    local chanDescLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Attribute: writes payload to instance attributes. Junk key triggers server dump; real payload key survives the echo window before correction arrives.",
+        TextColor3=Color3.fromRGB(100,92,84),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,32),Parent=sChan})
+
+    -- ── Script / Payload Input ────────────────────────────────
+    local _, sScript = makeSection(pageSARP, "Payload & Trash Camo")
+
+    local payloadRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
+        AutomaticSize=Enum.AutomaticSize.Y,Parent=sScript})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=payloadRow})
+
+    -- Box 1: Payload content
+    local payloadBox = mk("TextBox",{
+        PlaceholderText="Payload value (string, number, or expression)...",
+        Text="test_payload_" .. tostring(math.random(1000,9999)),
+        BackgroundColor3=Color3.fromRGB(255,255,255),
+        Size=UDim2.new(0,0,0,60),Font=Enum.Font.Code,TextSize=11,
+        TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        TextYAlignment=Enum.TextYAlignment.Top,ClearTextOnFocus=false,
+        Parent=payloadRow})
+    payloadBox.Size = UDim2.new(0.55,0,0,60)
+    addCorner(payloadBox,UDim.new(0,6)); addStroke(payloadBox,1,0.3)
+    mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingTop=UDim.new(0,6),Parent=payloadBox})
+
+    local payloadLabel = mk("TextLabel",{Text="📦 Payload",Font=Enum.Font.GothamBold,TextSize=10,
+        TextColor3=Color3.fromRGB(80,80,80),BackgroundTransparency=1,
+        Size=UDim2.new(0.55,0,0,14),Parent=sScript})
+
+    -- Box 2: Trash camo
+    local trashCol = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
+        AutomaticSize=Enum.AutomaticSize.Y,Parent=sScript})
+    local trashBox = mk("TextBox",{
+        PlaceholderText="Trash camo value (NaN vector, oversized string, etc)...",
+        Text="",BackgroundColor3=Color3.fromRGB(255,252,248),
+        Size=UDim2.new(1,0,0,44),Font=Enum.Font.Code,TextSize=11,
+        TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        TextYAlignment=Enum.TextYAlignment.Top,ClearTextOnFocus=false,
+        Parent=trashCol})
+    addCorner(trashBox,UDim.new(0,6)); addStroke(trashBox,1,0.3)
+    mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingTop=UDim.new(0,6),Parent=trashBox})
+    mk("TextLabel",{Text="🗑 Trash Camo (blank = auto NaN vector)",Font=Enum.Font.GothamBold,TextSize=10,
+        TextColor3=Color3.fromRGB(80,80,80),BackgroundTransparency=1,
+        Size=UDim2.new(1,0,0,14),Parent=trashCol})
+
+    -- Phoenix config row
+    local phxRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
+        AutomaticSize=Enum.AutomaticSize.Y,Parent=sScript})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,16),Parent=phxRow})
+    makeToggle(phxRow,"AC Gate",true,function(on) SARP_CFG.AntiCheatGate=on end)
+    makeToggle(phxRow,"Humanize Delays",true,function(on)
+        SARP_CFG.ReshapeNoiseScale = on and 0.05 or 0.0
+    end)
+
+    -- Phoenix max depth slider
+    local phxDepthRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sScript})
+    makeSlider(phxDepthRow,"Phoenix Depth",1,8,5,function(v)
+        SARP_CFG.PhoenixMaxDepth = math.floor(v)
+    end)
+
+    -- ── Simulation Preview Pane ───────────────────────────────
+    local _, sSim = makeSection(pageSARP, "Simulation Preview")
+    local simPreviewLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Run Simulate to see projected outcome before launch.",
+        TextColor3=Color3.fromRGB(72,66,60),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,80),Parent=sSim})
+
+    local simBtn = makeButton(sSim,"⚙ Simulate",UDim2.new(0,180,0,40),"")
+    simBtn.Button.BackgroundColor3 = Color3.fromRGB(220,230,255)
+
+    local SARP_CurrentSim     = nil
+    local SARP_CurrentWrapped = nil
+
+    simBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(simBtn.Button)
+        local payload = payloadBox.Text
+        if #payload == 0 then
+            sendNotification("Payload box is empty.", "Warning"); return
+        end
+        local wrapped, simResult, err = SARP.Build(
+            SARP_CurrentChannel, payload, nil, nil, SARP_CurrentTarget)
+        if err then
+            sendNotification("SARP Build error: " .. err, "Error"); return
+        end
+        SARP_CurrentSim     = simResult
+        SARP_CurrentWrapped = wrapped
+
+        local riskCol = simResult.Risk == "High" and Color3.fromRGB(200,80,80)
+            or simResult.Risk == "Medium" and Color3.fromRGB(200,160,60)
+            or Color3.fromRGB(60,160,60)
+        local acCol   = simResult.ACRisk == "ELEVATED"
+            and Color3.fromRGB(200,80,80) or Color3.fromRGB(60,160,60)
+
+        simPreviewLabel.Text = string.format(
+            "Channel: %s → Target: %s
+%s
+
+Wrapper: %s
+
+Phoenix max depth: %d | Reshape estimate: %d iteration(s)
+LWM snapshots: %d | State sig: %s",
+            SARP_CurrentChannel, SARP_CurrentTarget,
+            simResult.Summary,
+            wrapped.Desc,
+            SARP_CFG.PhoenixMaxDepth, simResult.ReshapeEst,
+            simResult.LWMDepth, simResult.Sig)
+        simPreviewLabel.TextColor3 = Color3.fromRGB(50,50,80)
+        sendNotification("Simulation ready. " .. simResult.Summary, "Info")
+    end)
+
+    -- ── Execution Steps ───────────────────────────────────────
+    local _, sExec = makeSection(pageSARP, "Execution  —  Wrap → Fly → Phoenix")
+
+    local stepRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,52),Parent=sExec})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=stepRow})
+
+    -- Step indicators
+    local function makeStepBadge(parent, icon, label, color)
+        local f = mk("Frame",{BackgroundColor3=color,Size=UDim2.new(0,100,0,48),Parent=parent})
+        addCorner(f,UDim.new(0,8)); addStroke(f,1,0.3)
+        mk("TextLabel",{Text=icon,Font=Enum.Font.GothamBold,TextSize=18,
+            TextColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,24),
+            Position=UDim2.new(0,0,0,4),BackgroundTransparency=1,
+            TextXAlignment=Enum.TextXAlignment.Center,Parent=f})
+        local lbl = mk("TextLabel",{Text=label,Font=Enum.Font.GothamBold,TextSize=10,
+            TextColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(1,0,0,16),
+            Position=UDim2.new(0,0,0,28),BackgroundTransparency=1,
+            TextXAlignment=Enum.TextXAlignment.Center,Parent=f})
+        return f, lbl
+    end
+
+    local step1Frame, step1Lbl = makeStepBadge(stepRow,"🔒","Wrap",Color3.fromRGB(140,160,220))
+    local step2Frame, step2Lbl = makeStepBadge(stepRow,"🚀","Fly", Color3.fromRGB(140,200,140))
+    local step3Frame, step3Lbl = makeStepBadge(stepRow,"🔥","Phoenix",Color3.fromRGB(200,130,80))
+
+    -- Arrow decorators
+    local function mkArrow(parent)
+        mk("TextLabel",{Text="→",Font=Enum.Font.GothamBold,TextSize=20,
+            TextColor3=Color3.fromRGB(180,170,160),BackgroundTransparency=1,
+            Size=UDim2.new(0,24,0,48),Parent=parent})
+    end
+    -- Insert arrows (done after badges so layout order is correct)
+    -- We'll use a grid layout with arrows inline
+    local arrowA = mk("TextLabel",{Text="→",Font=Enum.Font.GothamBold,TextSize=20,
+        TextColor3=Color3.fromRGB(160,155,148),BackgroundTransparency=1,
+        Size=UDim2.new(0,20,0,48),LayoutOrder=2,Parent=stepRow})
+    local arrowB = mk("TextLabel",{Text="→",Font=Enum.Font.GothamBold,TextSize=20,
+        TextColor3=Color3.fromRGB(160,155,148),BackgroundTransparency=1,
+        Size=UDim2.new(0,20,0,48),LayoutOrder=4,Parent=stepRow})
+    step1Frame.LayoutOrder=1; step2Frame.LayoutOrder=3; step3Frame.LayoutOrder=5
+
+    local execStateLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+        Text="State: Idle",TextColor3=Color3.fromRGB(92,84,76),TextSize=13,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sExec})
+
+    -- Progress bar
+    local progBg = mk("Frame",{BackgroundColor3=Color3.fromRGB(230,225,220),
+        Size=UDim2.new(1,0,0,8),Parent=sExec})
+    addCorner(progBg,UDim.new(0,4))
+    local progFill = mk("Frame",{BackgroundColor3=Color3.fromRGB(140,200,140),
+        Size=UDim2.new(0,0,1,0),Parent=progBg})
+    addCorner(progFill,UDim.new(0,4))
+
+    local function setProgress(pct, color)
+        tween(progFill, TweenInfo.new(0.3), {
+            Size=UDim2.new(math.clamp(pct,0,1),0,1,0),
+            BackgroundColor3=color or Color3.fromRGB(140,200,140)
+        })
+    end
+
+    -- Main Launch button
+    local launchBtnRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sExec})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=launchBtnRow})
+
+    local simFirstToggle = {Value=true}
+    makeToggle(launchBtnRow,"Sim First",true,function(on) simFirstToggle.Value=on end)
+
+    local launchBtn = makeButton(launchBtnRow,"🚀 Launch Phoenix",UDim2.new(0,200,0,40),"")
+    launchBtn.Button.BackgroundColor3 = Color3.fromRGB(200,240,200)
+    addStroke(launchBtn.Button,1,0.2)
+
+    local abortBtn = makeButton(launchBtnRow,"✕ Abort",UDim2.new(0,100,0,40),"")
+    abortBtn.Button.BackgroundColor3 = Color3.fromRGB(255,220,220)
+
+    local SARP_Running = false
+
+    abortBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); SARP_Running=false
+        SARP.Cleanup()
+        execStateLabel.Text="State: Aborted"
+        setProgress(0, Color3.fromRGB(220,160,80))
+        sendNotification("SARP aborted. Watchers cleared.", "Warning")
+    end)
+
+    launchBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(launchBtn.Button)
+        if SARP_Running then sendNotification("SARP already running.", "Warning"); return end
+        local payload = payloadBox.Text
+        if #payload == 0 then sendNotification("Payload is empty.", "Warning"); return end
+
+        -- Build if no existing sim or if payload changed
+        if not SARP_CurrentWrapped then
+            local wrapped, simResult, err = SARP.Build(
+                SARP_CurrentChannel, payload, nil, nil, SARP_CurrentTarget)
+            if err then sendNotification("SARP Build: " .. err, "Error"); return end
+            SARP_CurrentSim     = simResult
+            SARP_CurrentWrapped = wrapped
+        end
+
+        -- Sim-first gate
+        if simFirstToggle.Value and SARP_CurrentSim then
+            simPreviewLabel.Text = SARP_CurrentSim.Summary
+        end
+
+        SARP_Running = true
+        execStateLabel.Text = "State: Wrapping..."
+        tween(step1Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(80,100,200)})
+        setProgress(0.12, Color3.fromRGB(140,160,220))
+        task.wait(0.2)
+
+        execStateLabel.Text = "State: Flying..."
+        tween(step1Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(140,160,220)})
+        tween(step2Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(60,160,60)})
+        setProgress(0.40, Color3.fromRGB(140,200,140))
+
+        task.spawn(function()
+            SARP.Execute(SARP_CurrentWrapped, SARP_CurrentSim, SARP_CurrentTarget,
+                function(success, sessionRec, finalStr)
+                    SARP_Running = false
+
+                    -- Update step indicators
+                    if success then
+                        tween(step2Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(140,200,140)})
+                        tween(step3Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(60,180,60)})
+                        setProgress(1.0, Color3.fromRGB(100,220,100))
+                        execStateLabel.Text = string.format(
+                            "State: ✓ SUCCESS — %s (depth %d)",
+                            SARP_CurrentTarget,
+                            sessionRec and sessionRec.FinalDepth or 1)
+                    else
+                        tween(step3Frame,TweenInfo.new(0.2),{BackgroundColor3=Color3.fromRGB(200,80,80)})
+                        setProgress(1.0, Color3.fromRGB(220,100,100))
+                        execStateLabel.Text = "State: ✕ FAILED — " .. (finalStr or "no result")
+                    end
+
+                    -- Session record
+                    if sessionRec then
+                        SARPSessions[tostring(sessionRec.ID)] = sessionRec
+                    end
+
+                    -- Notification
+                    local depthStr = sessionRec
+                        and string.format(" (%d attempt%s)", #sessionRec.Attempts,
+                            #sessionRec.Attempts~=1 and "s" or "") or ""
+                    sendNotification(
+                        string.format("SARP [%s→%s]%s — %s",
+                            SARP_CurrentChannel, SARP_CurrentTarget, depthStr,
+                            success and "Payload lingered ✓" or (finalStr or "failed")),
+                        success and "Success" or "Warning")
+
+                    -- Reset wrapped so next launch re-builds fresh
+                    SARP_CurrentWrapped = nil
+                    SARP_CurrentSim     = nil
+                    updateSARPStatus()
+                end
+            )
+        end)
+    end)
+
+    -- ── Outcome Log ───────────────────────────────────────────
+    local _, sLog = makeSection(pageSARP, "Session Log")
+    local logScroll = mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
+        Size=UDim2.new(1,0,0,240),CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sLog})
+    addCorner(logScroll,UDim.new(0,8)); addStroke(logScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=logScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),
+        PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=logScroll})
+
+    local function appendSARPLog(entry)
+        local row = mk("Frame",{
+            BackgroundColor3 = entry.Success
+                and Color3.fromRGB(235,255,235) or Color3.fromRGB(255,238,235),
+            Size=UDim2.new(1,0,0,48),Parent=logScroll})
+        addCorner(row,UDim.new(0,5)); addStroke(row,1,0.2)
+        mk("TextLabel",{
+            Text=string.format("%s  [%s→%s]  d%d  %s",
+                entry.Success and "✓" or "✕",
+                entry.Channel, entry.Target,
+                entry.Depth,
+                entry.Pattern),
+            Font=Enum.Font.GothamBold,TextSize=11,
+            TextColor3=Color3.fromRGB(50,50,50),
+            Position=UDim2.new(0,8,0,4),Size=UDim2.new(1,-16,0,14),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            BackgroundTransparency=1,Parent=row})
+        mk("TextLabel",{
+            Text=string.format("ETM key: %s  |  T: +%.2fs",
+                entry.ETMKey, entry.T - (SARPLog[1] and SARPLog[1].T or entry.T)),
+            Font=Enum.Font.Code,TextSize=10,
+            TextColor3=Color3.fromRGB(100,100,100),
+            Position=UDim2.new(0,8,0,22),Size=UDim2.new(1,-16,0,12),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            BackgroundTransparency=1,Parent=row})
+        mk("TextLabel",{
+            Text="Session " .. tostring(entry.SessionID),
+            Font=Enum.Font.Code,TextSize=9,
+            TextColor3=Color3.fromRGB(150,150,150),
+            Position=UDim2.new(0,8,0,36),Size=UDim2.new(1,-80,0,10),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            BackgroundTransparency=1,Parent=row})
+    end
+
+    -- Log refresh button
+    local logCtrlRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,40),Parent=sLog})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=logCtrlRow})
+    local refreshLogBtn = makeButton(logCtrlRow,"Refresh Log",UDim2.new(0,160,0,36),"↻")
+    refreshLogBtn.Button.BackgroundColor3 = Color3.fromRGB(220,230,255)
+    local clearLogBtn2 = makeButton(logCtrlRow,"Clear Log",UDim2.new(0,120,0,36),"🗑")
+    clearLogBtn2.Button.BackgroundColor3 = Color3.fromRGB(255,230,230)
+
+    local function doRefreshLog()
+        logScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=logScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),
+            PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=logScroll})
+        if #SARPLog == 0 then
+            mk("TextLabel",{Text="No launches yet.",BackgroundTransparency=1,
+                Font=Enum.Font.GothamMedium,TextSize=12,TextColor3=Color3.fromRGB(150,150,150),
+                Size=UDim2.new(1,0,0,24),Parent=logScroll})
+            return
+        end
+        for i = #SARPLog, math.max(1, #SARPLog-30), -1 do
+            appendSARPLog(SARPLog[i])
+        end
+    end
+
+    refreshLogBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(refreshLogBtn.Button); doRefreshLog(); updateSARPStatus()
+    end)
+    clearLogBtn2.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(clearLogBtn2.Button)
+        SARPLog = {}; doRefreshLog(); updateSARPStatus()
+        sendNotification("SARP log cleared.", "Info")
+    end)
+
+    -- ── Phoenix Intelligence Panel ────────────────────────────
+    local _, sPhxIntel = makeSection(pageSARP, "Phoenix Intelligence — Pattern Registry")
+    local patternScroll = mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(245,242,238),
+        Size=UDim2.new(1,0,0,160),CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sPhxIntel})
+    addCorner(patternScroll,UDim.new(0,8)); addStroke(patternScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=patternScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),
+        PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=patternScroll})
+
+    local refreshPtnBtn = makeButton(sPhxIntel,"Refresh Patterns",UDim2.new(0,180,0,36),"🔄")
+    refreshPtnBtn.Button.BackgroundColor3 = Color3.fromRGB(220,240,255)
+
+    local function doRefreshPatterns()
+        patternScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=patternScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,6),PaddingLeft=UDim.new(0,8),
+            PaddingRight=UDim.new(0,8),PaddingBottom=UDim.new(0,6),Parent=patternScroll})
+        local count = 0
+        for _, p in pairs(SARPPatterns) do count=count+1 end
+        if count == 0 then
+            mk("TextLabel",{Text="No patterns learned yet. Run launches to build pattern registry.",
+                BackgroundTransparency=1,Font=Enum.Font.GothamMedium,TextSize=11,
+                TextColor3=Color3.fromRGB(150,150,150),Size=UDim2.new(1,0,0,24),Parent=patternScroll})
+            return
+        end
+        -- Header
+        mk("TextLabel",{
+            Text=string.format("%-22s %6s %6s %6s  Reshape", "Pattern","Total","✓","Rate"),
+            Font=Enum.Font.Code,TextSize=10,TextColor3=Color3.fromRGB(120,120,120),
+            Size=UDim2.new(1,0,0,14),BackgroundTransparency=1,
+            TextXAlignment=Enum.TextXAlignment.Left,Parent=patternScroll})
+        local sorted = {}
+        for _, p in pairs(SARPPatterns) do table.insert(sorted, p) end
+        table.sort(sorted, function(a,b) return a.totalCount > b.totalCount end)
+        for _, p in ipairs(sorted) do
+            local rate = p.totalCount > 0 and (p.successCount / p.totalCount) or 0
+            local rateCol = rate >= 0.6 and Color3.fromRGB(60,160,60)
+                or rate >= 0.3 and Color3.fromRGB(180,130,60)
+                or Color3.fromRGB(180,60,60)
+            local pRow = mk("Frame",{BackgroundColor3=Color3.fromRGB(255,255,255),
+                Size=UDim2.new(1,0,0,20),Parent=patternScroll})
+            addCorner(pRow,UDim.new(0,4)); addStroke(pRow,1,0.3)
+            mk("TextLabel",{
+                Text=string.format("%-22s %6d %6d %5.0f%%  %s",
+                    p.Pattern:sub(1,22), p.totalCount, p.successCount, rate*100,
+                    p.reshapeDesc or "-"),
+                Font=Enum.Font.Code,TextSize=10,TextColor3=rateCol,
+                Size=UDim2.new(1,-16,1,0),Position=UDim2.new(0,8,0,0),
+                BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,
+                TextTruncate=Enum.TextTruncate.AtEnd,Parent=pRow})
+        end
+    end
+
+    refreshPtnBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(refreshPtnBtn.Button); doRefreshPatterns()
+    end)
+
+    -- ── ETM Convergence (SARP keys only) ─────────────────────
+    local _, sETMSARP = makeSection(pageSARP, "ETM — SARP Convergence")
+    local etmSARPLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="No ETM data for SARP keys yet.",TextColor3=Color3.fromRGB(72,66,60),
+        TextSize=11,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+        Size=UDim2.new(1,0,0,60),Parent=sETMSARP})
+    local etmSARPBtn = makeButton(sETMSARP,"Refresh ETM",UDim2.new(0,160,0,36),"📊")
+    etmSARPBtn.Button.BackgroundColor3 = Color3.fromRGB(220,240,255)
+
+    local function doRefreshETMSARP()
+        local cmap = ETM.GetConvergenceMap()
+        local lines = {}
+        local sarpKeys = 0
+        local sarpConv = 0
+        for cardID, stats in pairs(cmap) do
+            if cardID ~= "_global" and cardID:find("^sarp_") then
+                sarpKeys = sarpKeys + 1
+                if stats.converged > 0 then sarpConv = sarpConv + 1 end
+                local p, conv, std = ETM.Predict(cardID, RAE_State.CurrentSig or "unknown")
+                table.insert(lines, string.format("%-32s  p=%.2f σ=%.3f %s",
+                    cardID:sub(1,32), p, std, conv and "✓" or "~"))
+            end
+        end
+        if #lines == 0 then
+            etmSARPLabel.Text = "No ETM data for SARP keys yet. Run launches to populate."
+        else
+            table.insert(lines, 1, string.format("SARP ETM keys: %d  |  Converged: %d  |  Rate: %.0f%%",
+                sarpKeys, sarpConv, sarpKeys>0 and (sarpConv/sarpKeys*100) or 0))
+            etmSARPLabel.Text = table.concat(lines, "
+")
+            etmSARPLabel.Size = UDim2.new(1,0,0,math.max(60, #lines*14+8))
+        end
+    end
+
+    etmSARPBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(etmSARPBtn.Button); doRefreshETMSARP()
+    end)
+
+    -- Auto-refresh ETM and log after any SARP launch (via SARPLog growth)
+    -- Done by polling in the launch callback above (updateSARPStatus triggers downstream)
+
+    -- Seed patterns on load
+    task.defer(function()
+        doRefreshPatterns()
+        doRefreshETMSARP()
+        updateSARPStatus()
+    end)
+end
+
+-- Load persisted SARP data
+LoadSARP()
+
+-- Expose SARP in global API
+task.defer(function()
+    if _G.RAE_Engine then _G.RAE_Engine.SARP = SARP end
+end)
+
+
+-- ============================================================
 -- NAVIGATION SYSTEM
 -- ============================================================
 local TAB_DEFS = {
@@ -4420,6 +5705,7 @@ local TAB_DEFS = {
     { Name="Chain",      Page=pageChain,     Icon="⛓" },
     { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
+    { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
 local activeTab=nil
@@ -4672,1338 +5958,4 @@ end
 if player.Character then task.spawn(bootRAE)
 else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
 
--- ============================================================
--- ███████╗ █████╗ ██████╗ ██████╗
--- ██╔════╝██╔══██╗██╔══██╗██╔══██╗
--- ███████╗███████║██████╔╝██████╔╝
--- ╚════██║██╔══██║██╔══██╗██╔═══╝
--- ███████║██║  ██║██║  ██║██║
--- ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝
--- SARP — Self-Autonomous Replication Payload
--- Phoenix Edition — Adaptive Replication Surface Exploitation
--- Addendum to PaperCuts RAE v3.0
--- Patches into existing globals: ETM, CDG, LWM, RAE_State,
--- mk, makeSection, makeButton, makeToggle, makeSlider,
--- sendNotification, addCorner, addStroke, hookHover,
--- tween, clickSound, pulseClick, pagesFolder, TAB_DEFS,
--- navHolder, panelTitle, switchTab, SampleGamma
--- ============================================================
-
--- ============================================================
--- SARP: CONFIGURATION
--- ============================================================
-local SARP_CFG = {
-    Mode                  = "MANUAL",     -- "MANUAL" | "AUTO"
-    AutoConfidenceThresh  = 0.72,          -- ETM threshold for AUTO mode trigger
-    MaxPhoenixDepth       = 4,             -- max reshape iterations per fly
-    DesyncDelayBase       = 0.18,          -- seconds, Gamma-sampled around this
-    DesyncDelayShape      = 1.8,           -- Gamma shape parameter
-    DesyncDelayScale      = 0.10,          -- Gamma scale parameter
-    OwnershipTimeout      = 0.45,          -- seconds before releasing owned part
-    EchoWaitWindow        = 0.20,          -- seconds for other-client echo propagation
-    CorrectionPollRate    = 0.05,          -- seconds between correction polls
-    CorrectionPollMax     = 8,             -- max polls before declaring silent-ignore
-    AttributeKey          = "SARP_probe",  -- attribute name used for carrier writes
-    AntiCheatVarThresh    = 0.12,          -- ETM Var above which we abort for safety
-    PersistKey_Outcomes   = "SARP_Outcomes_v1",
-    PersistKey_Reshape    = "SARP_ReshapeEdges_v1",
-}
-
--- ============================================================
--- SARP: PERSISTENCE
--- ============================================================
-local SARP_Outcomes     = {}   -- [channelKey] = { {variant, success, correctionPattern, sig, t} }
-local SARP_ReshapeEdges = {}   -- CDG-style causal edges for reshape transitions
-
-local function SARP_Save()
-    pcall(function()
-        _G[SARP_CFG.PersistKey_Outcomes]    = SARP_Outcomes
-        _G[SARP_CFG.PersistKey_Reshape]     = SARP_ReshapeEdges
-    end)
-end
-
-local function SARP_Load()
-    pcall(function()
-        if type(_G[SARP_CFG.PersistKey_Outcomes])    == "table" then SARP_Outcomes     = _G[SARP_CFG.PersistKey_Outcomes]    end
-        if type(_G[SARP_CFG.PersistKey_Reshape])     == "table" then SARP_ReshapeEdges = _G[SARP_CFG.PersistKey_Reshape]     end
-    end)
-end
-
--- ============================================================
--- SARP: UTILITIES
--- ============================================================
-local function SARP_SampleDesync()
-    -- Gamma-sampled desync delay centered around base
-    local s = SampleGamma and SampleGamma(SARP_CFG.DesyncDelayShape, SARP_CFG.DesyncDelayScale) or 0
-    return math.clamp(SARP_CFG.DesyncDelayBase + s, 0.05, 0.80)
-end
-
-local function SARP_ChannelKey(channel, targetName)
-    return channel .. ":" .. (targetName or "self")
-end
-
-local function SARP_InferCorrectionPattern(expected, received)
-    if received == nil then return "silent_ignore" end
-    if type(received) ~= type(expected) then return "type_error" end
-    if type(expected) == "number" then
-        if received ~= received then return "nan_reject" end          -- NaN → NaN check
-        if math.abs(received - expected) > 0.001 then return "bounds" end
-    end
-    if tostring(received) == tostring(expected) then return "no_correction" end
-    return "value_clamp"
-end
-
--- ============================================================
--- SARP: TARGETING MODULE
--- ============================================================
-local SARP_Targeting = {}
-
--- Score a player as a replication target using LWM intelligence
-function SARP_Targeting.ScorePlayers()
-    local results = {}
-    local buf = LWM.GetBuffer()
-    local physDelta = 0
-    if #buf >= 2 then
-        local d = LWM.GetDelta()
-        if d then physDelta = math.abs(d.physDelta or 0) end
-    end
-
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= Players.LocalPlayer then
-            local char = p.Character
-            local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-            local dist = hrp and (hrp.Position - (Players.LocalPlayer.Character
-                and Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-                and Players.LocalPlayer.Character.HumanoidRootPart.Position
-                or Vector3.new())).Magnitude or 9999
-
-            -- ETM-based replication success estimate for this player (cross-player heuristic)
-            local etmEst = 0.50
-            local etmVar = 0.25
-            for _, card in ipairs(RAE_State.Cards or {}) do
-                local p2, c, std = ETM.Predict(card.ID, RAE_State.CurrentSig)
-                if c then etmEst = math.max(etmEst, p2); etmVar = math.min(etmVar, std^2) end
-            end
-
-            -- Desync window score: high physDelta = active physics simulation = better window
-            local desyncScore = math.clamp(physDelta / 10, 0, 1)
-
-            -- Proximity score: closer = tighter replication, better echo timing
-            local proximityScore = math.clamp(1 - dist / 500, 0, 1)
-
-            local totalScore = etmEst * 0.45 + desyncScore * 0.35 + proximityScore * 0.20
-
-            table.insert(results, {
-                Player       = p,
-                Score        = totalScore,
-                ETMEst       = etmEst,
-                ETMVar       = etmVar,
-                DesyncScore  = desyncScore,
-                Distance     = dist,
-                RiskBadge    = etmVar > SARP_CFG.AntiCheatVarThresh and "HIGH" or "LOW",
-            })
-        end
-    end
-
-    table.sort(results, function(a, b) return a.Score > b.Score end)
-    return results
-end
-
--- Returns best target character's root, or local player's
-function SARP_Targeting.ResolveTargetRoot(targetEntry)
-    if not targetEntry or targetEntry == "self" then
-        local char = Players.LocalPlayer.Character
-        return char and char:FindFirstChild("HumanoidRootPart")
-    end
-    local char = targetEntry.Player and targetEntry.Player.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-
--- ============================================================
--- SARP: CRAFTER — Phoenix Wrap Construction
--- ============================================================
-local SARP_Crafter = {}
-
--- Reshape strategy table — ordered fallback mutations keyed by correction pattern
-local RESHAPE_STRATEGIES = {
-    bounds = function(variant)
-        -- Server applied bounds check: clamp numeric args toward boundary + tiny Gamma noise
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        if type(v.value) == "number" then
-            local noise = (SampleGamma and SampleGamma(0.5, 2) or 0) * 0.01
-            v.value = math.clamp(v.value, 0, 1e6) + noise
-        end
-        v.reshapeReason = "bounds→clamp"
-        return v
-    end,
-    type_error = function(variant)
-        -- Server rejected type: cast number → string or vice versa
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        if type(v.value) == "number" then
-            v.value = tostring(v.value)
-        elseif type(v.value) == "string" then
-            v.value = tonumber(v.value) or 0
-        end
-        v.reshapeReason = "type_error→cast"
-        return v
-    end,
-    silent_ignore = function(variant)
-        -- No server response: increase desync delay and retry same payload
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        v.desyncDelay = (v.desyncDelay or SARP_CFG.DesyncDelayBase) + 0.10
-        v.reshapeReason = "silent_ignore→desync+"
-        return v
-    end,
-    nan_reject = function(variant)
-        -- Server rejected NaN: substitute large finite value
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        v.value = 1e15
-        v.reshapeReason = "nan_reject→large_finite"
-        return v
-    end,
-    value_clamp = function(variant)
-        -- Server clamped value: switch delivery channel to OwnedCarrier
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        v.channel = "OwnedCarrier"
-        v.reshapeReason = "value_clamp→channel_switch"
-        return v
-    end,
-    ownership_reclaim = function(variant)
-        -- Server reclaimed ownership too fast: switch to AttachmentBridge
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        v.channel = "AttachmentBridge"
-        v.desyncDelay = (v.desyncDelay or SARP_CFG.DesyncDelayBase) + 0.15
-        v.reshapeReason = "ownership_reclaim→attachment"
-        return v
-    end,
-    no_correction = function(variant)
-        -- Value persisted unmodified: flag as success, no reshape needed
-        local v = table.clone and table.clone(variant) or {}
-        for k, val in pairs(variant) do v[k] = val end
-        v.reshapeReason = "no_correction→persist_confirmed"
-        v._success = true
-        return v
-    end,
-}
-
--- ETM-guided reshape strategy selection
--- Scores each strategy by historical success rate from SARP_Outcomes
-local function SelectReshapeStrategy(pattern, channelKey)
-    local strategy = RESHAPE_STRATEGIES[pattern] or RESHAPE_STRATEGIES["silent_ignore"]
-    -- Check if a CDG-style reshape edge suggests a better path
-    local bestEdge = nil
-    for _, edge in ipairs(SARP_ReshapeEdges) do
-        if edge.fromPattern == pattern and edge.coTotal > 2 then
-            local successRate = edge.coSuccess / edge.coTotal
-            if not bestEdge or successRate > bestEdge.rate then
-                bestEdge = { toPattern = edge.toPattern, rate = successRate }
-            end
-        end
-    end
-    if bestEdge and RESHAPE_STRATEGIES[bestEdge.toPattern] then
-        return RESHAPE_STRATEGIES[bestEdge.toPattern], bestEdge.toPattern, bestEdge.rate
-    end
-    return strategy, pattern, 0.5
-end
-
--- Build a Phoenix-wrapped payload variant
-function SARP_Crafter.Wrap(params)
-    -- params: { value, channel, customScript, targetName, goal }
-    local channel = params.channel or "Attribute"
-    local desync  = SARP_SampleDesync()
-
-    -- Outer junk layer: data that looks like a legit but useless write
-    local outerJunk
-    if channel == "Attribute" then
-        -- NaN vector for attribute write — triggers dump but establishes the echo window
-        outerJunk = { type = "vector3_nan", data = Vector3.new(0/0, 0/0, 0/0) }
-    elseif channel == "OwnedCarrier" then
-        outerJunk = { type = "cframe_identity", data = CFrame.new() }
-    else
-        outerJunk = { type = "string_junk", data = string.rep("x", 8) }
-    end
-
-    -- Inner payload: the actual value to deliver + reshape table
-    local inner = {
-        value         = params.value or 0,
-        channel       = channel,
-        desyncDelay   = desync,
-        customScript  = params.customScript or nil,
-        reshapeTable  = {},  -- populated below
-        maxDepth      = SARP_CFG.MaxPhoenixDepth,
-        depth         = 0,
-        stateSig      = RAE_State.CurrentSig,
-        targetName    = params.targetName or "self",
-        goal          = params.goal or "probe",
-    }
-
-    -- Populate reshape table from all strategies, ordered by historical success
-    for patternKey, _ in pairs(RESHAPE_STRATEGIES) do
-        local outcomes = SARP_Outcomes[SARP_ChannelKey(channel, params.targetName)] or {}
-        local successes = 0
-        local total = 0
-        for _, o in ipairs(outcomes) do
-            if o.correctionPattern == patternKey then
-                total = total + 1
-                if o.success then successes = successes + 1 end
-            end
-        end
-        local rate = total > 0 and (successes / total) or 0.5
-        table.insert(inner.reshapeTable, { pattern = patternKey, rate = rate })
-    end
-    table.sort(inner.reshapeTable, function(a, b) return a.rate > b.rate end)
-
-    -- ETM simulation estimate
-    local etmEst, etmConv, etmStd = ETM.Predict(
-        "SARP_" .. channel, RAE_State.CurrentSig)
-
-    -- LWM linger estimate: temporal average of physCount as proxy for desync window stability
-    local avgPhys = LWM.GetTemporalAverage("physCount", 5)
-    local lingerEst = math.clamp(avgPhys / 20, 0.5, 4.0)  -- ticks, rough heuristic
-
-    return {
-        outer        = outerJunk,
-        inner        = inner,
-        channel      = channel,
-        desyncDelay  = desync,
-        stateSig     = RAE_State.CurrentSig,
-        etmEst       = etmEst,
-        etmConv      = etmConv,
-        etmStd       = etmStd,
-        lingerEst    = lingerEst,
-        preview = {
-            channel     = channel,
-            outer       = outerJunk.type,
-            desync      = string.format("%.2fs (Gamma-sampled)", desync),
-            linger      = string.format("~%.1f ticks (LWM avg)", lingerEst),
-            etmSuccess  = string.format("%.0f%% (ETM%s)", etmEst * 100, etmConv and " ✓" or " ~"),
-            etmVar      = string.format("%.3f", etmStd^2),
-            risk        = (etmStd^2 > SARP_CFG.AntiCheatVarThresh) and "HIGH" or "LOW",
-        },
-    }
-end
-
--- ============================================================
--- SARP: FLYER — Channel-Aware Delivery
--- ============================================================
-local SARP_Flyer = {}
-
--- Baseline capture for correction detection
-function SARP_Flyer.CaptureBaseline(targetInstance, attributeKey)
-    local snap = {
-        attributeValues = {},
-        position        = nil,
-        cframe          = nil,
-        timestamp       = os.clock(),
-    }
-    if targetInstance then
-        pcall(function()
-            snap.attributeValues[attributeKey] = targetInstance:GetAttribute(attributeKey)
-            if targetInstance:IsA("BasePart") then
-                snap.position = targetInstance.Position
-                snap.cframe   = targetInstance.CFrame
-            end
-        end)
-    end
-    return snap
-end
-
--- Detect whether server corrected our write by polling for value change
-function SARP_Flyer.PollCorrection(targetInstance, attributeKey, writtenValue, baseline)
-    for i = 1, SARP_CFG.CorrectionPollMax do
-        task.wait(SARP_CFG.CorrectionPollRate)
-        local ok, currentVal = pcall(function()
-            return targetInstance:GetAttribute(attributeKey)
-        end)
-        if not ok then
-            return { corrected = true, pattern = "silent_ignore", currentVal = nil }
-        end
-        -- Value changed from what we wrote → server corrected it
-        if currentVal ~= writtenValue then
-            local pattern = SARP_InferCorrectionPattern(writtenValue, currentVal)
-            return { corrected = true, pattern = pattern, currentVal = currentVal }
-        end
-        -- Value is nil and we wrote something → server wiped it
-        if currentVal == nil and writtenValue ~= nil then
-            return { corrected = true, pattern = "silent_ignore", currentVal = nil }
-        end
-    end
-    -- No correction detected in poll window → value persisted
-    return { corrected = false, pattern = "no_correction", currentVal = writtenValue }
-end
-
--- Attribute channel: write to SetAttribute on a reachable instance
-function SARP_Flyer.FlyAttribute(variant, targetRoot)
-    local instance = targetRoot or workspace
-    local key      = SARP_CFG.AttributeKey
-    local value    = variant.inner.value
-
-    local baseline = SARP_Flyer.CaptureBaseline(instance, key)
-
-    -- Write outer junk first (establishes echo window)
-    local junkOk = pcall(function()
-        instance:SetAttribute(key .. "_outer", variant.outer.data)
-    end)
-
-    -- Desync delay
-    task.wait(variant.desyncDelay)
-
-    -- Write inner payload
-    local writeOk, writeErr = pcall(function()
-        instance:SetAttribute(key, value)
-    end)
-
-    return {
-        instance   = instance,
-        key        = key,
-        writtenVal = value,
-        baseline   = baseline,
-        writeOk    = writeOk,
-        writeErr   = writeErr,
-        junkOk     = junkOk,
-        channel    = "Attribute",
-    }
-end
-
--- OwnedCarrier channel: write during ownership handshake window
-function SARP_Flyer.FlyOwnedCarrier(variant, targetRoot)
-    -- Find a client-owned or physics-active BasePart to use as carrier
-    local carrier = nil
-    local char    = Players.LocalPlayer.Character
-    if char then
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if hrp then carrier = hrp end
-        -- Prefer a Tool part if available (more frequently owned)
-        local tool = char:FindFirstChildOfClass("Tool")
-        if tool then
-            for _, p in ipairs(tool:GetDescendants()) do
-                if p:IsA("BasePart") then carrier = p; break end
-            end
-        end
-    end
-
-    if not carrier then
-        return { writeOk = false, writeErr = "No owned carrier found", channel = "OwnedCarrier" }
-    end
-
-    local key      = SARP_CFG.AttributeKey
-    local value    = variant.inner.value
-    local baseline = SARP_Flyer.CaptureBaseline(carrier, key)
-
-    -- Request network ownership (if setNetworkOwner is accessible via exploit env)
-    local ownOk = pcall(function()
-        if carrier.SetNetworkOwner then
-            carrier:SetNetworkOwner(Players.LocalPlayer)
-        end
-    end)
-
-    task.wait(variant.desyncDelay)
-
-    -- Write during ownership window
-    local writeOk, writeErr = pcall(function()
-        carrier:SetAttribute(key, value)
-    end)
-
-    -- Hold window then release
-    task.wait(SARP_CFG.OwnershipTimeout)
-    pcall(function()
-        if carrier.SetNetworkOwner then carrier:SetNetworkOwner(nil) end
-    end)
-
-    return {
-        instance   = carrier,
-        key        = key,
-        writtenVal = value,
-        baseline   = baseline,
-        writeOk    = writeOk,
-        writeErr   = writeErr,
-        ownOk      = ownOk,
-        channel    = "OwnedCarrier",
-    }
-end
-
--- AttachmentBridge channel: create Attachment on owned part, encode state, propagate echo
-function SARP_Flyer.FlyAttachmentBridge(variant, targetRoot)
-    local char    = Players.LocalPlayer.Character
-    local hrp     = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        return { writeOk = false, writeErr = "No HumanoidRootPart", channel = "AttachmentBridge" }
-    end
-
-    local value    = variant.inner.value
-    local baseline = SARP_Flyer.CaptureBaseline(hrp, SARP_CFG.AttributeKey)
-
-    task.wait(variant.desyncDelay)
-
-    -- Create attachment as echo carrier
-    local att = nil
-    local writeOk, writeErr = pcall(function()
-        att = Instance.new("Attachment")
-        att.Name = "SARP_echo"
-        -- Encode value in CFrame offset (survives replication as position data)
-        if type(value) == "number" then
-            att.CFrame = CFrame.new(value % 1e6, 0, 0)
-        end
-        att:SetAttribute(SARP_CFG.AttributeKey, value)
-        att.Parent = hrp
-    end)
-
-    -- Echo window: allow other clients to receive replicated state
-    task.wait(SARP_CFG.EchoWaitWindow)
-
-    -- Clean up carrier attachment
-    pcall(function()
-        if att and att.Parent then att:Destroy() end
-    end)
-
-    return {
-        instance   = hrp,
-        key        = SARP_CFG.AttributeKey,
-        writtenVal = value,
-        baseline   = baseline,
-        writeOk    = writeOk,
-        writeErr   = writeErr,
-        attachment = att,
-        channel    = "AttachmentBridge",
-    }
-end
-
--- Route to correct channel
-function SARP_Flyer.Fly(variant, targetRoot)
-    local ch = variant.channel or variant.inner.channel or "Attribute"
-    if ch == "Attribute"        then return SARP_Flyer.FlyAttribute(variant, targetRoot)
-    elseif ch == "OwnedCarrier" then return SARP_Flyer.FlyOwnedCarrier(variant, targetRoot)
-    elseif ch == "AttachmentBridge" then return SARP_Flyer.FlyAttachmentBridge(variant, targetRoot)
-    else return SARP_Flyer.FlyAttribute(variant, targetRoot) end
-end
-
--- ============================================================
--- SARP: PHOENIX LOOP — Adaptive Retry Engine
--- ============================================================
-local PhoenixLoop = {}
-
--- Record a reshape transition for CDG-style edge learning
-local function RecordReshapeEdge(fromPattern, toPattern, success)
-    for _, edge in ipairs(SARP_ReshapeEdges) do
-        if edge.fromPattern == fromPattern and edge.toPattern == toPattern then
-            edge.coTotal   = edge.coTotal + 1
-            if success then edge.coSuccess = edge.coSuccess + 1 end
-            edge.lastUpdated = os.clock()
-            return
-        end
-    end
-    table.insert(SARP_ReshapeEdges, {
-        fromPattern  = fromPattern,
-        toPattern    = toPattern,
-        coTotal      = 1,
-        coSuccess    = success and 1 or 0,
-        lastUpdated  = os.clock(),
-    })
-end
-
--- Core Phoenix execution loop
-function PhoenixLoop.Run(wrappedPayload, targetRoot, onProgress)
-    local variant    = wrappedPayload
-    local depth      = 0
-    local maxDepth   = SARP_CFG.MaxPhoenixDepth
-    local log        = {}
-    local channelKey = SARP_ChannelKey(variant.channel, variant.inner.targetName)
-    local prevPattern = nil
-
-    while depth <= maxDepth do
-        if onProgress then onProgress(depth, variant, nil) end
-
-        -- ETM variance gate: abort if prediction too noisy (detection risk)
-        local etmP, _, etmStd = ETM.Predict("SARP_" .. variant.channel, RAE_State.CurrentSig)
-        if etmStd^2 > SARP_CFG.AntiCheatVarThresh and depth == 0 then
-            return {
-                success  = false,
-                aborted  = true,
-                reason   = string.format("ETM Var=%.3f > threshold %.2f (anti-cheat risk)", etmStd^2, SARP_CFG.AntiCheatVarThresh),
-                log      = log,
-                depth    = depth,
-            }
-        end
-
-        -- Execute fly
-        local flyResult = SARP_Flyer.Fly(variant, targetRoot)
-
-        -- Wait for replication window then poll for correction
-        task.wait(0.05)
-        local corrResult
-        if flyResult.writeOk and flyResult.instance then
-            corrResult = SARP_Flyer.PollCorrection(
-                flyResult.instance, flyResult.key,
-                flyResult.writtenVal, flyResult.baseline)
-        else
-            corrResult = { corrected = true, pattern = "silent_ignore", currentVal = nil }
-        end
-
-        local success = not corrResult.corrected or corrResult.pattern == "no_correction"
-
-        -- ETM update
-        ETM.Update("SARP_" .. variant.channel, RAE_State.CurrentSig, success)
-
-        -- Log outcome
-        local entry = {
-            depth            = depth,
-            channel          = variant.channel,
-            value            = variant.inner and variant.inner.value,
-            desyncDelay      = variant.desyncDelay,
-            writeOk          = flyResult.writeOk,
-            corrected        = corrResult.corrected,
-            correctionPattern = corrResult.pattern,
-            success          = success,
-            t                = os.clock(),
-        }
-        table.insert(log, entry)
-
-        -- Persist outcome
-        if not SARP_Outcomes[channelKey] then SARP_Outcomes[channelKey] = {} end
-        table.insert(SARP_Outcomes[channelKey], {
-            variant          = { channel = variant.channel, value = variant.inner and variant.inner.value },
-            success          = success,
-            correctionPattern = corrResult.pattern,
-            sig              = RAE_State.CurrentSig,
-            t                = os.clock(),
-        })
-        if #SARP_Outcomes[channelKey] > 60 then table.remove(SARP_Outcomes[channelKey], 1) end
-
-        -- Record reshape edge for CDG learning
-        if prevPattern and corrResult.pattern then
-            RecordReshapeEdge(prevPattern, corrResult.pattern, success)
-        end
-
-        if onProgress then onProgress(depth, variant, entry) end
-
-        if success then
-            SARP_Save()
-            return {
-                success  = true,
-                aborted  = false,
-                depth    = depth,
-                log      = log,
-                finalVariant = variant,
-                correctionPattern = corrResult.pattern,
-            }
-        end
-
-        -- No success: select reshape strategy and build next variant
-        if depth >= maxDepth then break end
-        local reshapeFn, reshapeKey, reshapeRate = SelectReshapeStrategy(corrResult.pattern, channelKey)
-        local nextVariant = reshapeFn(variant.inner)
-        if nextVariant._success then
-            -- Strategy flagged no correction needed
-            SARP_Save()
-            return { success = true, aborted = false, depth = depth, log = log, finalVariant = variant }
-        end
-        -- Rebuild wrapper around reshaped inner
-        prevPattern    = corrResult.pattern
-        variant        = SARP_Crafter.Wrap({
-            value       = nextVariant.value,
-            channel     = nextVariant.channel or variant.channel,
-            targetName  = nextVariant.targetName or (variant.inner and variant.inner.targetName),
-            goal        = nextVariant.goal or (variant.inner and variant.inner.goal),
-        })
-        -- Transfer depth and reshape reason
-        variant.inner.depth = depth + 1
-        variant.reshapeReason = nextVariant.reshapeReason
-
-        depth = depth + 1
-    end
-
-    SARP_Save()
-    return {
-        success  = false,
-        aborted  = false,
-        depth    = depth,
-        log      = log,
-        reason   = "Max Phoenix depth reached",
-    }
-end
-
--- ============================================================
--- SARP: FEEDBACK — Post-Fly Intelligence Update
--- ============================================================
-local SARP_Feedback = {}
-
--- Summarise a Phoenix result for display
-function SARP_Feedback.Summarize(result)
-    if result.aborted then
-        return string.format("⛔ Aborted at depth 0 — %s", result.reason or "?")
-    end
-    if result.success then
-        return string.format("✓ Success at depth %d — pattern: %s",
-            result.depth, result.finalVariant and result.finalVariant.reshapeReason or "initial")
-    end
-    return string.format("✕ Failed — %d iterations, last pattern: %s",
-        result.depth, result.log and result.log[#result.log] and result.log[#result.log].correctionPattern or "?")
-end
-
--- Update CDG with reshape edge sequence from a Phoenix run
-function SARP_Feedback.UpdateCDG(result)
-    if not result.log or #result.log < 2 then return end
-    for i = 2, #result.log do
-        local prev = result.log[i-1]
-        local curr = result.log[i]
-        local edgeKey = "SARP:" .. prev.correctionPattern .. "→" .. curr.correctionPattern
-        -- Inject into CDG as synthetic cards
-        CDG.UpdateFromLog({
-            { CardID = "SARP_" .. prev.channel, Success = prev.success },
-            { CardID = "SARP_" .. curr.channel, Success = curr.success },
-        })
-    end
-end
-
--- ============================================================
--- SARP: GLOBAL STATE
--- ============================================================
-local SARP_State = {
-    CurrentPayload   = nil,    -- most recently crafted wrapped payload
-    CurrentTarget    = "self", -- "self" | player scoring entry
-    CurrentChannel   = "Attribute",
-    LastResult       = nil,
-    PhoenixRunning   = false,
-    Log              = {},     -- flat launch log
-}
-
--- ============================================================
--- SARP: UI PAGE
--- ============================================================
-do
-    -- Create the page frame in pagesFolder
-    local pageSARP = Instance.new("Frame")
-    pageSARP.Name             = "pageSARP"
-    pageSARP.BackgroundTransparency = 1
-    pageSARP.Size             = UDim2.new(1, 0, 1, 0)
-    pageSARP.Visible          = false
-    pageSARP.Parent           = pagesFolder
-
-    local sarScroll = Instance.new("ScrollingFrame")
-    sarScroll.BackgroundTransparency = 1
-    sarScroll.Size                   = UDim2.new(1, 0, 1, 0)
-    sarScroll.CanvasSize             = UDim2.new(0, 0, 0, 0)
-    sarScroll.AutomaticCanvasSize    = Enum.AutomaticSize.Y
-    sarScroll.ScrollBarThickness     = 4
-    sarScroll.Parent                 = pageSARP
-    Instance.new("UIListLayout", sarScroll).SortOrder = Enum.SortOrder.LayoutOrder
-    Instance.new("UIPadding", sarScroll).PaddingTop   = UDim.new(0, 8)
-
-    local function makeSection2(parent, title)
-        local sec = mk("Frame", {
-            BackgroundTransparency = 1,
-            Size = UDim2.new(1, -24, 0, 10),
-            AutomaticSize = Enum.AutomaticSize.Y,
-            Parent = parent,
-        })
-        mk("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), PaddingBottom = UDim.new(0, 12), Parent = sec })
-        mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = sec })
-        mk("TextLabel", {
-            Text = title, Font = Enum.Font.GothamBold, TextSize = 13,
-            TextColor3 = Color3.fromRGB(52, 47, 42),
-            BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 22),
-            TextXAlignment = Enum.TextXAlignment.Left, Parent = sec,
-        })
-        local inner = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 10), AutomaticSize = Enum.AutomaticSize.Y, Parent = sec })
-        mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = inner })
-        return sec, inner
-    end
-
-    -- ── Header ─────────────────────────────────────────────
-    local _, sHdr = makeSection2(sarScroll, "SARP — Self-Autonomous Replication Payload")
-    mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        Text = "Phoenix Edition. Exploits the replication gap between client assertion and server correction across three delivery channels: Attribute write, OwnedCarrier handshake, AttachmentBridge echo. Phoenix Loop adaptively reshapes on correction signals using ETM/CDG intelligence.",
-        TextColor3 = Color3.fromRGB(92, 84, 76), TextSize = 12, TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 56), Parent = sHdr,
-    })
-
-    -- ── Target Selector ────────────────────────────────────
-    local _, sTgt = makeSection2(sarScroll, "Target")
-
-    local targetLabel = mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "Current Target: Self", TextColor3 = Color3.fromRGB(60, 60, 60),
-        TextSize = 12, Size = UDim2.new(1, 0, 0, 20),
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = sTgt,
-    })
-
-    local riskBadge = mk("TextLabel", {
-        BackgroundTransparency = 0, Font = Enum.Font.GothamBold,
-        Text = "ETM Var: — ", TextColor3 = Color3.fromRGB(255, 255, 255),
-        BackgroundColor3 = Color3.fromRGB(120, 180, 120),
-        TextSize = 10, Size = UDim2.new(0, 160, 0, 22),
-        TextXAlignment = Enum.TextXAlignment.Center, Parent = sTgt,
-    })
-    addCorner(riskBadge, UDim.new(0, 6))
-
-    local playerScroll = mk("ScrollingFrame", {
-        BackgroundColor3 = Color3.fromRGB(245, 242, 238),
-        Size = UDim2.new(1, 0, 0, 120), CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 4, Parent = sTgt,
-    })
-    addCorner(playerScroll, UDim.new(0, 8)); addStroke(playerScroll, 1, 0.3)
-    mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = playerScroll })
-    mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = playerScroll })
-
-    local function refreshTargetList()
-        playerScroll:ClearAllChildren()
-        mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = playerScroll })
-        mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = playerScroll })
-
-        -- Self option
-        local selfRow = mk("TextButton", {
-            Text = "👤  Self (default — safe testing)", Font = Enum.Font.GothamSemibold,
-            TextSize = 11, BackgroundColor3 = SARP_State.CurrentTarget == "self" and Color3.fromRGB(210, 235, 210) or Color3.fromRGB(255, 255, 255),
-            Size = UDim2.new(1, 0, 0, 30), TextXAlignment = Enum.TextXAlignment.Left, Parent = playerScroll,
-        })
-        mk("UIPadding", { PaddingLeft = UDim.new(0, 8), Parent = selfRow })
-        addCorner(selfRow, UDim.new(0, 6)); addStroke(selfRow, 1, 0.25)
-        selfRow.MouseButton1Click:Connect(function()
-            clickSound()
-            SARP_State.CurrentTarget = "self"
-            targetLabel.Text = "Current Target: Self"
-            riskBadge.Text = "ETM Var: — "
-            riskBadge.BackgroundColor3 = Color3.fromRGB(120, 180, 120)
-            refreshTargetList()
-        end)
-
-        -- Scored player list
-        local scored = SARP_Targeting.ScorePlayers()
-        if #scored == 0 then
-            mk("TextLabel", {
-                Text = "No other players in server.", BackgroundTransparency = 1,
-                Font = Enum.Font.GothamMedium, TextSize = 11,
-                TextColor3 = Color3.fromRGB(150, 150, 150), Size = UDim2.new(1, 0, 0, 24), Parent = playerScroll,
-            })
-        else
-            for _, entry in ipairs(scored) do
-                local isSelected = type(SARP_State.CurrentTarget) == "table" and SARP_State.CurrentTarget.Player == entry.Player
-                local rowBg = isSelected and Color3.fromRGB(210, 235, 210) or Color3.fromRGB(255, 255, 255)
-                local pRow = mk("Frame", { BackgroundColor3 = rowBg, Size = UDim2.new(1, 0, 0, 36), Parent = playerScroll })
-                addCorner(pRow, UDim.new(0, 6)); addStroke(pRow, 1, 0.2)
-
-                local riskCol = entry.RiskBadge == "HIGH" and Color3.fromRGB(220, 80, 80) or Color3.fromRGB(80, 180, 80)
-                local badge = mk("TextLabel", {
-                    Text = entry.RiskBadge, Font = Enum.Font.GothamBold, TextSize = 9,
-                    TextColor3 = Color3.fromRGB(255, 255, 255), BackgroundColor3 = riskCol,
-                    Position = UDim2.new(0, 6, 0.5, -9), Size = UDim2.new(0, 36, 0, 18),
-                    TextXAlignment = Enum.TextXAlignment.Center, Parent = pRow,
-                })
-                addCorner(badge, UDim.new(0, 4))
-
-                mk("TextLabel", {
-                    Text = string.format("👤 %s  |  Score: %.0f%%  ETM: %.0f%%  Dist: %.0f",
-                        entry.Player.Name, entry.Score * 100, entry.ETMEst * 100, entry.Distance),
-                    Font = Enum.Font.Code, TextSize = 10, TextColor3 = Color3.fromRGB(50, 50, 50),
-                    Position = UDim2.new(0, 48, 0, 4), Size = UDim2.new(1, -100, 0, 12),
-                    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Parent = pRow,
-                })
-                mk("TextLabel", {
-                    Text = string.format("Var: %.3f  Desync: %.0f%%", entry.ETMVar, entry.DesyncScore * 100),
-                    Font = Enum.Font.Code, TextSize = 10, TextColor3 = Color3.fromRGB(120, 120, 120),
-                    Position = UDim2.new(0, 48, 0, 18), Size = UDim2.new(1, -100, 0, 12),
-                    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Parent = pRow,
-                })
-
-                local selBtn = mk("TextButton", {
-                    Text = isSelected and "✓" or "Select", Font = Enum.Font.GothamBold, TextSize = 10,
-                    BackgroundColor3 = isSelected and Color3.fromRGB(180, 230, 180) or Color3.fromRGB(230, 230, 255),
-                    Size = UDim2.new(0, 60, 0, 24), AnchorPoint = Vector2.new(1, 0.5),
-                    Position = UDim2.new(1, -6, 0.5, 0), Parent = pRow,
-                })
-                addCorner(selBtn, UDim.new(0, 5))
-                local eCapture = entry
-                selBtn.MouseButton1Click:Connect(function()
-                    clickSound()
-                    SARP_State.CurrentTarget = eCapture
-                    targetLabel.Text = "Current Target: " .. eCapture.Player.Name
-                    local varCol = eCapture.RiskBadge == "HIGH" and Color3.fromRGB(220, 80, 80) or Color3.fromRGB(80, 180, 80)
-                    riskBadge.Text = string.format("ETM Var: %.3f  [%s]", eCapture.ETMVar, eCapture.RiskBadge)
-                    riskBadge.BackgroundColor3 = varCol
-                    refreshTargetList()
-                end)
-            end
-        end
-    end
-
-    local scanTgtBtn = makeButton(sTgt, "Scan Players", UDim2.new(0, 180, 0, 36), "🔍")
-    scanTgtBtn.Button.BackgroundColor3 = Color3.fromRGB(220, 230, 255)
-    scanTgtBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(scanTgtBtn.Button); refreshTargetList()
-    end)
-    refreshTargetList()
-
-    -- ── Channel Selector ───────────────────────────────────
-    local _, sChan = makeSection2(sarScroll, "Delivery Channel")
-    mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        Text = "Attribute: write via SetAttribute during desync window.\nOwnedCarrier: write during network ownership handshake.\nAttachmentBridge: echo propagation to other clients before server correction.",
-        TextColor3 = Color3.fromRGB(92, 84, 76), TextSize = 11, TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 48), Parent = sChan,
-    })
-
-    local chanRow = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 40), Parent = sChan })
-    mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 10), Parent = chanRow })
-
-    local chanButtons = {}
-    local function makeChanBtn(label, chan, color)
-        local b = makeButton(chanRow, label, UDim2.new(0, 160, 0, 36), "")
-        b.Button.BackgroundColor3 = color
-        hookHover(b.Button, color, Color3.fromRGB(255, 252, 248), 0.3, 0.1)
-        b.Button.MouseButton1Click:Connect(function()
-            clickSound(); pulseClick(b.Button)
-            SARP_State.CurrentChannel = chan
-            for _, cb in ipairs(chanButtons) do
-                cb.Button.BackgroundColor3 = cb._baseColor
-            end
-            b.Button.BackgroundColor3 = Color3.fromRGB(180, 220, 180)
-            sendNotification("Channel: " .. chan, "Info")
-        end)
-        b._baseColor = color
-        table.insert(chanButtons, b)
-        return b
-    end
-    makeChanBtn("Attribute",        "Attribute",        Color3.fromRGB(220, 230, 255))
-    makeChanBtn("OwnedCarrier",     "OwnedCarrier",     Color3.fromRGB(255, 230, 210))
-    makeChanBtn("AttachmentBridge", "AttachmentBridge", Color3.fromRGB(210, 255, 230))
-
-    -- ── Payload Builder ────────────────────────────────────
-    local _, sBuild = makeSection2(sarScroll, "Payload Builder")
-
-    -- Value input
-    mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamSemibold,
-        Text = "Payload Value (number, string, or 'nan' for NaN probe):",
-        TextColor3 = Color3.fromRGB(72, 66, 60), TextSize = 11,
-        TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 16), Parent = sBuild,
-    })
-    local valueInput = mk("TextBox", {
-        PlaceholderText = "e.g. 99999, nan, hello",
-        Text = "nan", BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-        Size = UDim2.new(1, 0, 0, 34), Font = Enum.Font.Code, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = sBuild,
-    })
-    addCorner(valueInput, UDim.new(0, 8)); addStroke(valueInput, 1, 0.3)
-    mk("UIPadding", { PaddingLeft = UDim.new(0, 8), Parent = valueInput })
-
-    -- Goal input
-    mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamSemibold,
-        Text = "Goal (for preview label):",
-        TextColor3 = Color3.fromRGB(72, 66, 60), TextSize = 11,
-        TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 16), Parent = sBuild,
-    })
-    local goalInput = mk("TextBox", {
-        PlaceholderText = "e.g. Attribute persistence probe",
-        Text = "Attribute persistence probe",
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-        Size = UDim2.new(1, 0, 0, 34), Font = Enum.Font.GothamMedium, TextSize = 11,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = sBuild,
-    })
-    addCorner(goalInput, UDim.new(0, 8)); addStroke(goalInput, 1, 0.3)
-    mk("UIPadding", { PaddingLeft = UDim.new(0, 8), Parent = goalInput })
-
-    -- ── Payload Preview ────────────────────────────────────
-    local _, sPreview = makeSection2(sarScroll, "Payload Preview")
-    local previewLabel = mk("TextLabel", {
-        BackgroundTransparency = 0, BackgroundColor3 = Color3.fromRGB(245, 242, 238),
-        Font = Enum.Font.Code, TextSize = 11,
-        Text = "No payload crafted yet. Click 'Phoenix Wrap' to build.",
-        TextColor3 = Color3.fromRGB(72, 66, 60), TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-        Size = UDim2.new(1, 0, 0, 96), Parent = sPreview,
-    })
-    addCorner(previewLabel, UDim.new(0, 8)); addStroke(previewLabel, 1, 0.3)
-    mk("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingTop = UDim.new(0, 6), Parent = previewLabel })
-
-    -- ── Execution Steps ────────────────────────────────────
-    local _, sExec = makeSection2(sarScroll, "Execution — Phoenix Wrap → Simulate → Fly → Monitor")
-
-    local stepLabel = mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
-        Text = "Phase: Idle", TextColor3 = Color3.fromRGB(92, 84, 76),
-        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
-        Size = UDim2.new(1, 0, 0, 20), Parent = sExec,
-    })
-
-    -- Progress bar
-    local progBg = mk("Frame", {
-        BackgroundColor3 = Color3.fromRGB(230, 225, 218),
-        Size = UDim2.new(1, 0, 0, 10), Parent = sExec,
-    })
-    addCorner(progBg, UDim.new(0, 5))
-    local progFill = mk("Frame", {
-        BackgroundColor3 = Color3.fromRGB(140, 200, 140),
-        Size = UDim2.new(0, 0, 1, 0), Parent = progBg,
-    })
-    addCorner(progFill, UDim.new(0, 5))
-
-    local function setProgress(pct, color)
-        tween(progFill, TweenInfo.new(0.2), {
-            Size = UDim2.new(math.clamp(pct, 0, 1), 0, 1, 0),
-            BackgroundColor3 = color or Color3.fromRGB(140, 200, 140),
-        })
-    end
-
-    local btnRow = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 44), Parent = sExec })
-    mk("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 10), Parent = btnRow })
-
-    local wrapBtn   = makeButton(btnRow, "🔒 Phoenix Wrap",  UDim2.new(0, 180, 0, 40), "")
-    local simBtn    = makeButton(btnRow, "⚙ Simulate",      UDim2.new(0, 160, 0, 40), "")
-    local flyBtn    = makeButton(btnRow, "🚀 Fly",           UDim2.new(0, 140, 0, 40), "")
-    wrapBtn.Button.BackgroundColor3 = Color3.fromRGB(220, 230, 255)
-    simBtn.Button.BackgroundColor3  = Color3.fromRGB(230, 220, 255)
-    flyBtn.Button.BackgroundColor3  = Color3.fromRGB(210, 245, 210)
-
-    -- Parse value from input
-    local function parseValue(raw)
-        local s = raw:lower():match("^%s*(.-)%s*$")
-        if s == "nan"  then return 0/0 end
-        if s == "inf"  then return math.huge end
-        if s == "-inf" then return -math.huge end
-        local n = tonumber(s)
-        if n then return n end
-        return s  -- treat as string
-    end
-
-    -- Step 1: Phoenix Wrap
-    wrapBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(wrapBtn.Button)
-        stepLabel.Text  = "Phase: Wrapping..."
-        setProgress(0.25, Color3.fromRGB(140, 160, 220))
-
-        local rawVal    = valueInput.Text
-        local goal      = goalInput.Text
-        local parsedVal = parseValue(rawVal)
-        local targetName = SARP_State.CurrentTarget == "self" and "self"
-            or (type(SARP_State.CurrentTarget) == "table" and SARP_State.CurrentTarget.Player.Name or "self")
-
-        SARP_State.CurrentPayload = SARP_Crafter.Wrap({
-            value      = parsedVal,
-            channel    = SARP_State.CurrentChannel,
-            targetName = targetName,
-            goal       = goal,
-        })
-
-        local p = SARP_State.CurrentPayload.preview
-        previewLabel.Text = string.format(
-            "Channel:    %s\nOuter:      %s\nDesync:     %s\nLinger est: %s\nP(success): %s\nETM Var:    %s\nRisk:       %s\nGoal:       %s",
-            p.channel, p.outer, p.desync, p.linger,
-            p.etmSuccess, p.etmVar, p.risk, goal)
-
-        stepLabel.Text = "Phase: Wrapped ✓ — ready to Simulate or Fly"
-        setProgress(0.33, Color3.fromRGB(140, 200, 160))
-        sendNotification("Phoenix Wrap complete — " .. p.channel .. " channel", "Success")
-    end)
-
-    -- Step 2: Simulate (MCTS dry-run via ETM)
-    simBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(simBtn.Button)
-        if not SARP_State.CurrentPayload then
-            sendNotification("Wrap a payload first.", "Warning"); return
-        end
-        stepLabel.Text = "Phase: Simulating..."
-        setProgress(0.55, Color3.fromRGB(180, 160, 220))
-
-        local p   = SARP_State.CurrentPayload
-        local etmP, etmConv, etmStd = ETM.Predict("SARP_" .. p.channel, RAE_State.CurrentSig)
-        local causal = CDG.GetCausalScore("SARP_" .. p.channel)
-        local lwmDelta = LWM.GetDelta()
-        local firesDelta = lwmDelta and lwmDelta.firesDelta or 0
-
-        -- Simulate reshape depth estimate
-        local reshapeDepthEst = math.ceil((1 - etmP) * SARP_CFG.MaxPhoenixDepth)
-
-        local simText = string.format(
-            "── MCTS Dry-Run ──\nETM P(success): %.0f%% (σ=%.3f)%s\nCDG causal score: %.3f\nLWM fires delta: %+d\nEst reshape depth: %d / %d\nProjected: %s\nRisk gate: %s",
-            etmP * 100, etmStd, etmConv and " ✓ converged" or " ~ unconverged",
-            causal, firesDelta,
-            reshapeDepthEst, SARP_CFG.MaxPhoenixDepth,
-            etmP >= 0.60 and "PROCEED" or etmP >= 0.35 and "CAUTION — reshape likely" or "ABORT RECOMMENDED",
-            etmStd^2 > SARP_CFG.AntiCheatVarThresh and "⛔ HIGH VAR — anti-cheat risk" or "✓ Var within safe range")
-
-        previewLabel.Text = previewLabel.Text .. "\n\n" .. simText
-        previewLabel.Size = UDim2.new(1, 0, 0, 200)
-        stepLabel.Text = "Phase: Simulated ✓ — ready to Fly"
-        setProgress(0.66, Color3.fromRGB(140, 200, 160))
-        sendNotification(string.format("Sim: P=%.0f%% depth≤%d", etmP * 100, reshapeDepthEst), etmP >= 0.50 and "Info" or "Warning")
-    end)
-
-    -- Step 3: Fly (Phoenix Loop)
-    flyBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(flyBtn.Button)
-        if not SARP_State.CurrentPayload then
-            sendNotification("Wrap a payload first.", "Warning"); return
-        end
-        if SARP_State.PhoenixRunning then
-            sendNotification("Phoenix Loop already running.", "Warning"); return
-        end
-
-        stepLabel.Text = "Phase: 🔥 Phoenix Loop running..."
-        setProgress(0.75, Color3.fromRGB(220, 180, 80))
-        SARP_State.PhoenixRunning = true
-        flyBtn.Button.BackgroundColor3 = Color3.fromRGB(255, 220, 180)
-
-        task.spawn(function()
-            local targetRoot = SARP_Targeting.ResolveTargetRoot(
-                SARP_State.CurrentTarget == "self" and nil or SARP_State.CurrentTarget)
-
-            local result = PhoenixLoop.Run(
-                SARP_State.CurrentPayload,
-                targetRoot,
-                function(depth, variant, entry)
-                    -- Progress callback
-                    local pct = 0.75 + (depth / SARP_CFG.MaxPhoenixDepth) * 0.20
-                    local col = entry and entry.success
-                        and Color3.fromRGB(100, 210, 100)
-                        or Color3.fromRGB(220, 180, 80)
-                    setProgress(pct, col)
-                    if entry then
-                        stepLabel.Text = string.format(
-                            "Phase: 🔥 Depth %d — %s — pattern: %s",
-                            depth, entry.success and "✓" or "✕",
-                            entry.correctionPattern or "?")
-                    end
-                end
-            )
-
-            SARP_State.LastResult     = result
-            SARP_State.PhoenixRunning = false
-
-            -- CDG feedback
-            SARP_Feedback.UpdateCDG(result)
-
-            -- Log entry
-            table.insert(SARP_State.Log, {
-                t       = os.clock(),
-                result  = result,
-                channel = SARP_State.CurrentPayload.channel,
-                target  = SARP_State.CurrentTarget == "self" and "self"
-                    or (type(SARP_State.CurrentTarget) == "table" and SARP_State.CurrentTarget.Player.Name or "?"),
-            })
-            if #SARP_State.Log > 100 then table.remove(SARP_State.Log, 1) end
-
-            local summary = SARP_Feedback.Summarize(result)
-            stepLabel.Text = "Phase: Complete — " .. summary
-            setProgress(1.0, result.success and Color3.fromRGB(100, 210, 100) or Color3.fromRGB(210, 100, 100))
-            flyBtn.Button.BackgroundColor3 = Color3.fromRGB(210, 245, 210)
-
-            local notifType = result.aborted and "Warning" or result.success and "Success" or "Warning"
-            sendNotification("Phoenix: " .. summary, notifType)
-        end)
-    end)
-
-    -- ── Phoenix Outcome Log ────────────────────────────────
-    local _, sLog = makeSection2(sarScroll, "Phoenix Outcome Log")
-    local logScroll = mk("ScrollingFrame", {
-        BackgroundColor3 = Color3.fromRGB(245, 242, 238),
-        Size = UDim2.new(1, 0, 0, 220), CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 4, Parent = sLog,
-    })
-    addCorner(logScroll, UDim.new(0, 8)); addStroke(logScroll, 1, 0.3)
-    mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = logScroll })
-    mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = logScroll })
-
-    local function refreshLog()
-        logScroll:ClearAllChildren()
-        mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = logScroll })
-        mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = logScroll })
-
-        if #SARP_State.Log == 0 then
-            mk("TextLabel", {
-                Text = "No launches yet.", BackgroundTransparency = 1,
-                Font = Enum.Font.GothamMedium, TextSize = 11,
-                TextColor3 = Color3.fromRGB(150, 150, 150), Size = UDim2.new(1, 0, 0, 24), Parent = logScroll,
-            }); return
-        end
-
-        for i = #SARP_State.Log, math.max(1, #SARP_State.Log - 20), -1 do
-            local entry  = SARP_State.Log[i]
-            local result = entry.result
-            local rowCol = result.success and Color3.fromRGB(235, 255, 235)
-                or result.aborted and Color3.fromRGB(255, 240, 220)
-                or Color3.fromRGB(255, 235, 235)
-
-            local row = mk("Frame", { BackgroundColor3 = rowCol, Size = UDim2.new(1, 0, 0, 52), Parent = logScroll })
-            addCorner(row, UDim.new(0, 6)); addStroke(row, 1, 0.2)
-
-            local icon = result.success and "✓" or result.aborted and "⛔" or "✕"
-            mk("TextLabel", {
-                Text = string.format("%s  [%s → %s]  depth: %d",
-                    icon, entry.channel, entry.target, result.depth or 0),
-                Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.fromRGB(50, 50, 50),
-                Position = UDim2.new(0, 8, 0, 4), Size = UDim2.new(1, -16, 0, 14),
-                TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Parent = row,
-            })
-            mk("TextLabel", {
-                Text = SARP_Feedback.Summarize(result),
-                Font = Enum.Font.Code, TextSize = 10, TextColor3 = Color3.fromRGB(80, 80, 80),
-                Position = UDim2.new(0, 8, 0, 20), Size = UDim2.new(1, -16, 0, 12),
-                TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
-                TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
-            })
-            -- Per-iteration log
-            if result.log then
-                local itStr = {}
-                for _, it in ipairs(result.log) do
-                    table.insert(itStr, string.format("[d%d:%s→%s]",
-                        it.depth, it.channel:sub(1,3), it.correctionPattern or "?"))
-                end
-                mk("TextLabel", {
-                    Text = table.concat(itStr, "  "),
-                    Font = Enum.Font.Code, TextSize = 9, TextColor3 = Color3.fromRGB(120, 120, 120),
-                    Position = UDim2.new(0, 8, 0, 36), Size = UDim2.new(1, -16, 0, 12),
-                    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
-                    TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
-                })
-            end
-        end
-    end
-
-    local logRefreshBtn = makeButton(sLog, "Refresh Log", UDim2.new(0, 180, 0, 36), "↻")
-    logRefreshBtn.Button.BackgroundColor3 = Color3.fromRGB(220, 230, 255)
-    logRefreshBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(logRefreshBtn.Button); refreshLog()
-    end)
-
-    -- ── Reshape Edge Intelligence ──────────────────────────
-    local _, sEdges = makeSection2(sarScroll, "Phoenix Reshape Edge Map (CDG)")
-    local edgeLabel = mk("TextLabel", {
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        Text = "Accumulated reshape transition intelligence. Builds across sessions via _G persistence. Shows which correction patterns most reliably lead to success after reshaping.",
-        TextColor3 = Color3.fromRGB(92, 84, 76), TextSize = 11, TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, 40), Parent = sEdges,
-    })
-
-    local edgeScroll = mk("ScrollingFrame", {
-        BackgroundColor3 = Color3.fromRGB(245, 242, 238),
-        Size = UDim2.new(1, 0, 0, 160), CanvasSize = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 4, Parent = sEdges,
-    })
-    addCorner(edgeScroll, UDim.new(0, 8)); addStroke(edgeScroll, 1, 0.3)
-    mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3), Parent = edgeScroll })
-    mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = edgeScroll })
-
-    local function refreshEdges()
-        edgeScroll:ClearAllChildren()
-        mk("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3), Parent = edgeScroll })
-        mk("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), Parent = edgeScroll })
-
-        if #SARP_ReshapeEdges == 0 then
-            mk("TextLabel", {
-                Text = "No reshape edges yet. Run Phoenix Fly cycles to populate.",
-                BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, TextSize = 11,
-                TextColor3 = Color3.fromRGB(150, 150, 150), Size = UDim2.new(1, 0, 0, 24), Parent = edgeScroll,
-            }); return
-        end
-
-        -- Sort by success rate descending
-        local sorted = {}
-        for _, e in ipairs(SARP_ReshapeEdges) do
-            local rate = e.coTotal > 0 and (e.coSuccess / e.coTotal) or 0
-            table.insert(sorted, { edge = e, rate = rate })
-        end
-        table.sort(sorted, function(a, b) return a.rate > b.rate end)
-
-        for _, s in ipairs(sorted) do
-            local e   = s.edge
-            local col = s.rate >= 0.6 and Color3.fromRGB(60, 140, 60) or s.rate >= 0.4 and Color3.fromRGB(160, 120, 40) or Color3.fromRGB(160, 60, 60)
-            local row = mk("Frame", { BackgroundColor3 = Color3.fromRGB(255, 255, 255), Size = UDim2.new(1, 0, 0, 22), Parent = edgeScroll })
-            addCorner(row, UDim.new(0, 4)); addStroke(row, 1, 0.3)
-            mk("TextLabel", {
-                Text = string.format("%-18s → %-18s  rate=%.0f%%  n=%d  ✓=%d",
-                    e.fromPattern, e.toPattern, s.rate * 100, e.coTotal, e.coSuccess),
-                Font = Enum.Font.Code, TextSize = 10, TextColor3 = col,
-                Size = UDim2.new(1, -16, 1, 0), Position = UDim2.new(0, 8, 0, 0),
-                TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, Parent = row,
-            })
-        end
-    end
-
-    local edgeRefreshBtn = makeButton(sEdges, "Refresh Edges", UDim2.new(0, 180, 0, 36), "📊")
-    edgeRefreshBtn.Button.BackgroundColor3 = Color3.fromRGB(220, 240, 255)
-    edgeRefreshBtn.Button.MouseButton1Click:Connect(function()
-        clickSound(); pulseClick(edgeRefreshBtn.Button); refreshEdges()
-    end)
-
-    -- Auto-refresh edges after each fly
-    local _origFlyClick = flyBtn.Button.MouseButton1Click
-    -- Edge + log auto-refresh after result lands (deferred)
-    task.spawn(function()
-        while true do
-            task.wait(2)
-            if not SARP_State.PhoenixRunning and SARP_State.LastResult then
-                refreshLog()
-                refreshEdges()
-            end
-        end
-    end)
-
-    -- ── Inject SARP tab into navigation ───────────────────
-    -- Patch TAB_DEFS to include SARP before About
-    local insertIdx = #TAB_DEFS  -- default: end
-    for i, td in ipairs(TAB_DEFS) do
-        if td.Name == "About" then insertIdx = i; break end
-    end
-    local sarpTabDef = { Name = "SARP", Page = pageSARP, Icon = "🔥" }
-    table.insert(TAB_DEFS, insertIdx, sarpTabDef)
-
-    -- Create nav button
-    local navBtn = mk("TextButton", {
-        AutoButtonColor = false, BackgroundColor3 = Color3.fromRGB(245, 239, 231),
-        BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 34),
-        Font = Enum.Font.GothamSemibold,
-        Text = sarpTabDef.Icon .. "  " .. sarpTabDef.Name,
-        TextColor3 = Color3.fromRGB(52, 47, 42), TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = navHolder,
-    })
-    mk("UIPadding", { PaddingLeft = UDim.new(0, 10), Parent = navBtn })
-    addCorner(navBtn, UDim.new(0, 10))
-    local navStroke = addStroke(navBtn, 1, 0.6)
-    sarpTabDef._btn    = navBtn
-    sarpTabDef._stroke = navStroke
-    hookHover(navBtn, navBtn.BackgroundColor3, Color3.fromRGB(252, 246, 238), 0.6, 0.35)
-    navBtn.MouseButton1Click:Connect(function()
-        clickSound()
-        switchTab(sarpTabDef)
-        refreshTargetList()
-        refreshLog()
-        refreshEdges()
-    end)
-
-    -- Move About button to end (re-parent to keep order)
-    for _, td in ipairs(TAB_DEFS) do
-        if td.Name == "About" and td._btn then
-            td._btn.Parent = nil
-            td._btn.Parent = navHolder
-        end
-    end
-end
-
--- ============================================================
--- SARP: SESSION LOAD + GLOBAL API
--- ============================================================
-SARP_Load()
-
--- ETM initialise SARP virtual cards (one per channel)
-for _, ch in ipairs({"Attribute", "OwnedCarrier", "AttachmentBridge"}) do
-    ETM.GetOrInit("SARP_" .. ch, RAE_State.CurrentSig or "h0_p0_c0_f0_e0_m0_i0")
-end
-
-_G.SARP = {
-    Crafter   = SARP_Crafter,
-    Flyer     = SARP_Flyer,
-    Phoenix   = PhoenixLoop,
-    Targeting = SARP_Targeting,
-    Feedback  = SARP_Feedback,
-    State     = SARP_State,
-    Config    = SARP_CFG,
-}
 -- END OF SCRIPT
