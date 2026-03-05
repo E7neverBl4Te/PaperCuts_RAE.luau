@@ -5176,11 +5176,15 @@ local function SARP_FlyAttribute(wrapped, onResult)
                             baseline.burstsFired  = burstCount
                             baseline.fragCount    = #fragments
                             -- Feed fingerprint into SBI for server behavior inference
+                            -- Late-bind via _G.RAE_Engine since SBI is declared after SARP
                             pcall(function()
-                                SBI.IngestFingerprint(
-                                    tostring(wrapped.Instance
-                                        and wrapped.Instance.Name or "attr"),
-                                    fp, "Attribute")
+                                local sbi = _G.RAE_Engine and _G.RAE_Engine.SBI
+                                if sbi and sbi.IngestFingerprint then
+                                    sbi.IngestFingerprint(
+                                        tostring(wrapped.Instance
+                                            and wrapped.Instance.Name or "attr"),
+                                        fp, "Attribute")
+                                end
                             end)
                             local pattern = corrected
                                 and ("CORRECTED_TO:" .. tostring(correctedTo))
@@ -6801,19 +6805,20 @@ local function PROT_AttachListeners()
     -- Primary: poll remote registry from LWM (non-invasive)
     local lastKnown = {}
     local conn = RunService.Heartbeat:Connect(function()
-        local reg = LWM.GetRemoteRegistry and LWM.GetRemoteRegistry() or {}
-        for name, data in pairs(reg) do
-            if not lastKnown[name] then
-                lastKnown[name] = data.FireCount or 0
-            else
-                local current = data.FireCount or 0
-                if current > lastKnown[name] then
-                    -- New calls detected — record with available info
-                    PROT_Record(name, data.FullPath or name, {}, false)
-                    lastKnown[name] = current
+        pcall(function()
+            local reg = LWM.GetRemoteRegistry and LWM.GetRemoteRegistry() or {}
+            for name, data in pairs(reg) do
+                if not lastKnown[name] then
+                    lastKnown[name] = data.FireCount or 0
+                else
+                    local current = data.FireCount or 0
+                    if current > lastKnown[name] then
+                        PROT_Record(name, data.FullPath or name, {}, false)
+                        lastKnown[name] = current
+                    end
                 end
             end
-        end
+        end)
     end)
     table.insert(listeners, conn)
 end
@@ -7283,7 +7288,7 @@ end
 
 -- ── Heartbeat update loop ─────────────────────────────────────
 local SRM_SnapInterval = 2.0
-local SRM_LastSnap     = 0
+local SRM_LastSnap     = os.clock() -- initialize to now so first tick is skipped
 
 local function SRM_Tick()
     local now = os.clock()
@@ -7304,7 +7309,9 @@ local function SRM_Tick()
     lastSnapshot = curr
 end
 
-RunService.Heartbeat:Connect(SRM_Tick)
+RunService.Heartbeat:Connect(function()
+    pcall(SRM_Tick)
+end)
 
 -- ── Save / Load ───────────────────────────────────────────────
 function SRM.Save()
@@ -7948,7 +7955,7 @@ local function APE_ScanPermutations(onResult)
             end
         end
     end
-    if onResult then onComplete(discovered) end
+    if onResult then onResult(discovered) end
     return discovered
 end
 
