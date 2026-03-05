@@ -5321,13 +5321,7 @@ do
             and Color3.fromRGB(200,80,80) or Color3.fromRGB(60,160,60)
 
         simPreviewLabel.Text = string.format(
-            "Channel: %s → Target: %s
-%s
-
-Wrapper: %s
-
-Phoenix max depth: %d | Reshape estimate: %d iteration(s)
-LWM snapshots: %d | State sig: %s",
+            "Channel: %s -> Target: %s | %s | Wrapper: %s | Depth: %d | Reshape est: %d | LWM: %d snaps | Sig: %s",
             SARP_CurrentChannel, SARP_CurrentTarget,
             simResult.Summary,
             wrapped.Desc,
@@ -5659,8 +5653,7 @@ LWM snapshots: %d | State sig: %s",
         else
             table.insert(lines, 1, string.format("SARP ETM keys: %d  |  Converged: %d  |  Rate: %.0f%%",
                 sarpKeys, sarpConv, sarpKeys>0 and (sarpConv/sarpKeys*100) or 0))
-            etmSARPLabel.Text = table.concat(lines, "
-")
+            etmSARPLabel.Text = table.concat(lines, "\n")
             etmSARPLabel.Size = UDim2.new(1,0,0,math.max(60, #lines*14+8))
         end
     end
