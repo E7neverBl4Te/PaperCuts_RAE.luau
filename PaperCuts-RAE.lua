@@ -7919,7 +7919,7 @@ local function APE_TimingAttack(remoteName, baseArgs, onComplete)
         })
         nextInterval()
     end
-    task.spawn(nextInterval)
+    task.spawn(function() pcall(nextInterval) end)
 end
 
 -- ── Remote permutation scanner ────────────────────────────────
@@ -8010,7 +8010,7 @@ local function APE_Dequeue()
     APE_Running = true
     local task_t = table.remove(probeQueue, 1)
     task.spawn(function()
-        task_t.fn()
+        pcall(task_t.fn)
         task.wait(0.3 + math.random() * 0.2)
         APE_Dequeue()
     end)
@@ -8364,7 +8364,7 @@ function ASE.Start(goal)
     sendNotification(string.format(
         "ASE started — %d step plan. Goal: %s",
         #currentPlan.steps, currentPlan.goal), "Info")
-    task.spawn(ASE_RunNextStep)
+    task.spawn(function() pcall(ASE_RunNextStep) end)
 end
 
 function ASE.Stop()
@@ -8402,10 +8402,12 @@ end
 
 -- Boot: update RSM/SBI on load so data is ready immediately
 task.delay(5, function()
-    RSM.Update()
-    SBI.UpdateAll()
-    CKG.AutoPopulate()
-    APE.RunBootProbe()
+    pcall(function()
+        RSM.Update()
+        SBI.UpdateAll()
+        CKG.AutoPopulate()
+        APE.RunBootProbe()
+    end)
 end)
 
 ASE.Load()
