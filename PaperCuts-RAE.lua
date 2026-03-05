@@ -4690,7 +4690,50 @@ end
 -- ============================================================
 SARP.Flyer = {}
 
--- World-state baseline capture before delivery (mirrors ResponseProbe pattern)
+-- ── Correction latency tracker — feeds echo window calibration ──
+-- Stored as a ring buffer of observed (writeTime → correctionTime) deltas.
+-- Used to calibrate SARP_CFG.EchoWindowEst and phase writes to tick boundaries.
+local SARP_CorrLatency = {}  -- {delta, channel, t}
+local SARP_CorrLatencyMax = 30
+
+local function SARP_RecordCorrLatency(delta, channel)
+    table.insert(SARP_CorrLatency, {delta=delta, channel=channel, t=os.clock()})
+    if #SARP_CorrLatency > SARP_CorrLatencyMax then table.remove(SARP_CorrLatency, 1) end
+    -- Recompute rolling estimate for this channel
+    local sum, n = 0, 0
+    for _, r in ipairs(SARP_CorrLatency) do
+        if r.channel == channel then sum = sum + r.delta; n = n + 1 end
+    end
+    if n > 0 then SARP_CFG.EchoWindowEst = math.max(0.04, (sum/n) * 0.72) end
+end
+
+-- Returns the estimated echo window for a given channel (seconds).
+-- Echo window = fraction of observed correction latency during which
+-- replication has already propagated to other clients.
+local function SARP_GetEchoWindow(channel)
+    local sum, n = 0, 0
+    for _, r in ipairs(SARP_CorrLatency) do
+        if r.channel == channel then sum = sum + r.delta; n = n + 1 end
+    end
+    if n >= 2 then return math.max(0.03, (sum/n) * 0.68) end
+    return SARP_CFG.EchoWindowEst or 0.06  -- cold-start fallback
+end
+
+-- ── Heartbeat-aligned write helper ─────────────────────────────
+-- Waits for the next RunService.Heartbeat boundary before executing writeFn.
+-- This times attribute writes to just after a replication tick begins,
+-- maximising the window before the server's next replication flush.
+local function SARP_HeartbeatWrite(writeFn, onDone)
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        conn:Disconnect()
+        local ok, err = pcall(writeFn)
+        if onDone then onDone(ok, err) end
+    end)
+    table.insert(SARPWatchers, conn)
+end
+
+-- ── Baseline snapshot ───────────────────────────────────────────
 local function SARP_Baseline()
     local char = player.Character
     local hum  = char and char:FindFirstChildOfClass("Humanoid")
@@ -4700,155 +4743,308 @@ local function SARP_Baseline()
     return snap
 end
 
--- Watches for server correction on a specific attribute key.
--- onResult(corrected: bool, correctedToValue: any)
--- Layer 1 + Layer 3 hinge on this signal.
-local function SARP_WatchCorrection(instance, key, writtenValue, windowSec, onResult)
-    if not instance or not instance.Parent then onResult(true, nil); return end
-    local done = false
+-- ── Correction signal listener ──────────────────────────────────
+-- Connects GetAttributeChangedSignal on the written key.
+-- Records correction latency for echo window calibration.
+-- onResult(corrected: bool, correctedToValue: any, latencySeconds: number)
+local function SARP_WatchCorrection(instance, key, writtenValue, windowSec, channel, onResult)
+    if not instance or not instance.Parent then onResult(true, nil, 0); return end
+    local done      = false
+    local writeTime = os.clock()
     local conn
-    -- Timeout: no correction in window = linger success
-    local timeoutTask = task.delay(windowSec, function()
+
+    local timeoutConn = task.delay(windowSec, function()
         if done then return end
         done = true
         if conn then pcall(function() conn:Disconnect() end) end
-        onResult(false, nil)  -- false = NOT corrected = linger success
+        -- No correction arrived in window — attribute lingered
+        onResult(false, nil, os.clock() - writeTime)
     end)
+
     pcall(function()
         conn = instance:GetAttributeChangedSignal(key):Connect(function()
             if done then return end
             local newVal = instance:GetAttribute(key)
-            -- Server correction = value changed to something other than what we wrote
             local serverOverwrote = (tostring(newVal) ~= tostring(writtenValue))
             if serverOverwrote then
                 done = true
+                local latency = os.clock() - writeTime
                 pcall(function() conn:Disconnect() end)
-                onResult(true, newVal)  -- true = corrected (delivery failed/partial)
+                -- Feed latency into echo window calibrator
+                SARP_RecordCorrLatency(latency, channel or "unknown")
+                onResult(true, newVal, latency)
             end
         end)
         table.insert(SARPWatchers, conn)
     end)
 end
 
--- ── Delivery Channel A: Attribute ─────────────────────────────
+-- ── Ownership handshake verifier ────────────────────────────────
+-- Polls GetNetworkOwner() up to maxWait seconds to confirm the handshake
+-- completed. Calls onConfirmed(true) when ownership is ours,
+-- onConfirmed(false) on timeout.
+local function SARP_WaitForOwnership(part, maxWait, onConfirmed)
+    local deadline = os.clock() + maxWait
+    local function poll()
+        if not part or not part.Parent then onConfirmed(false); return end
+        local ok, owner = pcall(function() return part:GetNetworkOwner() end)
+        if ok and owner == player then
+            onConfirmed(true)
+        elseif os.clock() >= deadline then
+            onConfirmed(false)  -- handshake timed out
+        else
+            task.wait(0.05)
+            poll()
+        end
+    end
+    task.spawn(poll)
+end
+
+-- ── Re-assertion loop ───────────────────────────────────────────
+-- While the client holds ownership of `part`, re-writes `key` to `value`
+-- on every Heartbeat. Fights server corrections by re-asserting faster
+-- than the server can overwrite. Returns a stop function.
+local function SARP_StartReassertLoop(part, key, value, maxDuration)
+    local running   = true
+    local deadline  = os.clock() + maxDuration
+    local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not running or os.clock() > deadline then
+            conn:Disconnect()
+            return
+        end
+        if not part or not part.Parent then
+            running = false; conn:Disconnect(); return
+        end
+        pcall(function() part:SetAttribute(key, value) end)
+    end)
+    table.insert(SARPWatchers, conn)
+    return function()
+        running = false
+        pcall(function() conn:Disconnect() end)
+    end
+end
+
+-- ── Carrier factory ─────────────────────────────────────────────
+-- Creates a ghost (invisible, non-collide, unanchored) BasePart near the
+-- player's HumanoidRootPart, suitable for network ownership operations.
+-- Returns the part, or nil on failure.
+local function SARP_MakeCarrier(sessionID)
+    local char = player.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local p = Instance.new("Part")
+    p.Name          = "sarp_c_" .. tostring(sessionID)
+    p.Size          = SARP_CFG.CarrierSize
+    p.Anchored      = false
+    p.CanCollide    = false
+    p.CanTouch      = false
+    p.CanQuery      = false
+    p.Transparency  = 1.0
+    p.CastShadow    = false
+    p.Massless      = true
+    -- Position near HRP but offset so physics doesn't interact
+    p.CFrame        = hrp.CFrame * CFrame.new(0, 4, 0)
+    p.Parent        = Workspace
+    return p
+end
+
+-- ── Delivery Channel A: Attribute ──────────────────────────────
+-- Layer 1 (Broadcast before correction) + Layer 3 (Adaptive reshape).
+-- Writes junk key first, then payload key, timed to Heartbeat boundary.
+-- Uses measured echo window to determine gap between writes.
+-- Layer 3: GetAttributeChangedSignal fires when server corrects;
+-- correction latency is recorded and fed back to calibrator.
 local function SARP_FlyAttribute(wrapped, onResult)
     local inst = wrapped.Instance
     if not inst or not inst.Parent then onResult(false, "INSTANCE_GONE", nil); return end
-    local baseline = SARP_Baseline()
-    -- Write junk outer layer (broadcast before correction: Layer 1)
-    -- Other clients receive this write in the replication tick before server discards it
-    pcall(function() inst:SetAttribute(wrapped.JunkKey, wrapped.JunkValue) end)
-    -- Minimal gap: let junk propagate to replication buffer before writing real key
-    task.wait(0.04)
-    -- Write payload key
+    local baseline   = SARP_Baseline()
     local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
-    local writeOK = pcall(function() inst:SetAttribute(wrapped.PayloadKey, payloadStr) end)
-    if not writeOK then
-        pcall(function() inst:SetAttribute(wrapped.JunkKey, nil) end)
-        onResult(false, "SETATTR_FAILED", baseline)
-        return
-    end
-    -- Watch for server correction (Layer 3: correction signal drives Phoenix reshape)
-    SARP_WatchCorrection(inst, wrapped.PayloadKey, payloadStr,
-        SARP_CFG.CorrectionWatchWindow,
-        function(corrected, correctedTo)
-            -- Always clean junk key
+    local echoWin    = SARP_GetEchoWindow("Attribute")
+
+    -- Time the write to the next Heartbeat boundary (tick alignment)
+    SARP_HeartbeatWrite(function()
+        -- Write junk key at tick boundary — this travels the replication path first
+        pcall(function() inst:SetAttribute(wrapped.JunkKey, wrapped.JunkValue) end)
+    end, function()
+        -- Wait the calibrated echo window, then write payload key
+        -- Echo window = time during which junk is propagating to other clients
+        -- before the server's correction arrives
+        task.wait(echoWin)
+        local writeOK = pcall(function() inst:SetAttribute(wrapped.PayloadKey, payloadStr) end)
+        if not writeOK then
             pcall(function() inst:SetAttribute(wrapped.JunkKey, nil) end)
-            local pattern = corrected
-                and ("CORRECTED_TO:" .. tostring(correctedTo))
-                or "LINGERED"
-            onResult(not corrected, pattern, baseline)
+            onResult(false, "SETATTR_FAILED", baseline)
+            return
         end
-    )
+        -- Layer 3: watch for server correction, record latency
+        SARP_WatchCorrection(inst, wrapped.PayloadKey, payloadStr,
+            SARP_CFG.CorrectionWatchWindow, "Attribute",
+            function(corrected, correctedTo, latency)
+                pcall(function() inst:SetAttribute(wrapped.JunkKey, nil) end)
+                local pattern = corrected
+                    and ("CORRECTED_TO:" .. tostring(correctedTo))
+                    or "LINGERED"
+                -- Attach latency to baseline for Phoenix reshape use
+                baseline.corrLatency = latency
+                baseline.echoWinUsed = echoWin
+                onResult(not corrected, pattern, baseline)
+            end
+        )
+    end)
 end
 
--- ── Delivery Channel B: OwnedCarrier ──────────────────────────
+-- ── Delivery Channel B: OwnedCarrier ───────────────────────────
+-- Layer 2 (Ownership anchor): creates a ghost carrier part, requests
+-- network ownership, VERIFIES the handshake completed, THEN writes
+-- state during the confirmed ownership window.
+-- Re-assertion loop re-writes the payload attribute every Heartbeat
+-- while ownership is held, fighting server corrections.
+-- Echo window: the re-assertion runs for EchoWindowEst * multiplier
+-- to maximise the duration other clients see the replicated state.
 local function SARP_FlyOwnedCarrier(wrapped, onResult)
     local baseline = SARP_Baseline()
-    local hrp = wrapped.AnchorPart
-    if not hrp or not hrp.Parent then onResult(false, "ANCHOR_GONE", nil); return end
-    -- Create transient carrier BasePart anchored near HRP
-    local carrier = Instance.new("Part")
-    carrier.Name         = "sarp_carrier_" .. tostring(SARP_SessionID)
-    carrier.Size         = SARP_CFG.CarrierSize
-    carrier.Anchored     = false
-    carrier.CanCollide   = false
-    carrier.Transparency = 1.0
-    carrier.CastShadow   = false
-    carrier.CFrame       = hrp.CFrame * CFrame.new(0, 3, 0)
-    carrier.Parent       = Workspace
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then onResult(false, "ANCHOR_GONE", nil); return end
+
+    -- Layer 2a: Carrier factory — ghost part
+    local carrier = SARP_MakeCarrier(SARP_SessionID)
+    if not carrier then onResult(false, "CARRIER_CREATE_FAILED", nil); return end
     SARPCarrier = carrier
-    -- Request client network ownership (Layer 2: ownership anchor)
-    pcall(function()
+
+    -- Layer 2b: Request ownership
+    local ownershipRequested = pcall(function()
         if carrier.SetNetworkOwner then
             carrier:SetNetworkOwner(player)
         end
     end)
-    -- Hold ownership window before embedding payload
-    task.wait(wrapped.DesyncDelay)
-    local payloadKey = "sarp_oc_" .. tostring(SARP_SessionID)
-    local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
-    -- Embed payload during ownership window — we are authoritative here
-    pcall(function()
-        carrier:SetAttribute(payloadKey, payloadStr)
-        carrier:SetAttribute("sarp_oc_session", SARP_SessionID)
-        -- Slight position change during window to exercise replication path
-        carrier.CFrame = hrp.CFrame * CFrame.new(0, 3, 0)
-    end)
-    -- Watch for server correction on the attribute
-    SARP_WatchCorrection(carrier, payloadKey, payloadStr,
-        SARP_CFG.CorrectionWatchWindow,
-        function(corrected, correctedTo)
-            -- Release carrier regardless of outcome
-            task.delay(0.3, function()
-                pcall(function() if carrier and carrier.Parent then carrier:Destroy() end end)
-                if SARPCarrier == carrier then SARPCarrier = nil end
-            end)
-            local pattern = corrected
-                and ("OC_CORRECTED:" .. tostring(correctedTo))
-                or "OC_LINGERED"
-            onResult(not corrected, pattern, baseline)
+
+    -- Layer 2c: Verify handshake — wait for GetNetworkOwner() to confirm
+    -- Maximum handshake wait: 1.2 seconds
+    SARP_WaitForOwnership(carrier, 1.2, function(confirmed)
+        if not confirmed then
+            -- Handshake failed or timed out — still attempt write (may be partial)
+            baseline.ownershipConfirmed = false
+        else
+            baseline.ownershipConfirmed = true
         end
-    )
+
+        -- Layer 2d: Write state at Heartbeat boundary during ownership window
+        local payloadKey = "sarp_oc_" .. tostring(SARP_SessionID)
+        local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
+
+        SARP_HeartbeatWrite(function()
+            -- Embed payload + nudge CFrame to exercise the full replication path
+            carrier:SetAttribute(payloadKey, payloadStr)
+            carrier:SetAttribute("sarp_oc_session", SARP_SessionID)
+            -- Micro-position nudge: triggers BasePart replication flush
+            carrier.CFrame = hrp.CFrame * CFrame.new(
+                SARP_SampleGamma(1.2, 0.02) - 0.01,
+                4 + SARP_SampleGamma(1.2, 0.01),
+                SARP_SampleGamma(1.2, 0.02) - 0.01
+            )
+        end, function(writeOK)
+            if not writeOK then
+                pcall(function() carrier:Destroy() end)
+                SARPCarrier = nil
+                onResult(false, "OC_WRITE_FAILED", baseline)
+                return
+            end
+
+            -- Layer 2e: Re-assertion loop — fight server corrections
+            -- Runs for DesyncDelay duration to maximise echo window
+            local stopReassert = SARP_StartReassertLoop(
+                carrier, payloadKey, payloadStr, wrapped.DesyncDelay)
+
+            -- Layer 3: Correction signal listener on the carrier attribute
+            SARP_WatchCorrection(carrier, payloadKey, payloadStr,
+                SARP_CFG.CorrectionWatchWindow, "OwnedCarrier",
+                function(corrected, correctedTo, latency)
+                    -- Stop re-assertion regardless of outcome
+                    stopReassert()
+                    -- Schedule carrier cleanup after a brief hold
+                    -- (hold briefly so other clients' replication catchup can occur)
+                    task.delay(0.4, function()
+                        pcall(function() if carrier and carrier.Parent then carrier:Destroy() end end)
+                        if SARPCarrier == carrier then SARPCarrier = nil end
+                    end)
+                    baseline.corrLatency          = latency
+                    baseline.ownershipConfirmed   = confirmed
+                    local pattern = corrected
+                        and ("OC_CORRECTED:" .. tostring(correctedTo))
+                        or "OC_LINGERED"
+                    onResult(not corrected, pattern, baseline)
+                end
+            )
+        end)
+    end)
 end
 
--- ── Delivery Channel C: AttachmentBridge ──────────────────────
+-- ── Delivery Channel C: AttachmentBridge ───────────────────────
+-- Layer 1 + Layer 2 combined: creates an Attachment on the client-owned
+-- HRP. Since HRP is always client-owned for the local player, writes to
+-- it and its children replicate immediately with client authority.
+-- Echo window: write at Heartbeat boundary so replication propagates to
+-- nearby clients before the server's next validation pass.
+-- Micro-desync: a small CFrame perturbation on the Attachment is applied
+-- simultaneously with the payload attribute write, exercising both the
+-- CFrame and attribute replication paths in the same tick.
 local function SARP_FlyAttachmentBridge(wrapped, onResult)
-    local baseline  = SARP_Baseline()
-    local anchor    = wrapped.AnchorPart
-    if not anchor or not anchor.Parent then onResult(false, "ANCHOR_GONE", nil); return end
-    -- Create Attachment on owned HRP — broadcasts to clients in replication tick
+    local baseline = SARP_Baseline()
+    local anchor   = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not anchor then onResult(false, "ANCHOR_GONE", nil); return end
+
+    -- Create Attachment as child of HRP (client authority surface)
     local att  = Instance.new("Attachment")
-    att.Name   = "sarp_bridge_" .. tostring(SARP_SessionID)
+    att.Name   = "sarp_ab_" .. tostring(SARP_SessionID)
     att.Parent = anchor
-    -- Encode payload hash as CFrame position component (Layer 1: echo before correction)
-    local payloadStr  = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
-    local hashVal     = 0
-    for i = 1, math.min(#payloadStr, 24) do
-        hashVal = hashVal + string.byte(payloadStr, i) * i
-    end
-    local encodedCF = CFrame.new((hashVal % 500) * 0.01, 0, 0)
-    pcall(function()
-        att.CFrame = encodedCF
-        att:SetAttribute("sarp_bridge_payload",  payloadStr)
-        att:SetAttribute("sarp_bridge_session",  SARP_SessionID)
-        att:SetAttribute("sarp_bridge_echo",
+
+    local payloadStr = type(wrapped.Payload)=="string" and wrapped.Payload or tostring(wrapped.Payload)
+    local echoWin    = SARP_GetEchoWindow("AttachmentBridge")
+
+    -- Write at Heartbeat boundary — both CFrame and attributes in same tick
+    SARP_HeartbeatWrite(function()
+        -- Micro-desync: small CFrame offset exercises the replication path
+        -- for the Attachment alongside the attribute write
+        local noiseX = SARP_SampleGamma(1.5, 0.004) - 0.002
+        local noiseY = SARP_SampleGamma(1.5, 0.004) - 0.002
+        att.CFrame = CFrame.new(noiseX, noiseY, 0)
+        -- Attribute writes in same Heartbeat step — all travel together
+        att:SetAttribute("sarp_ab_payload", payloadStr)
+        att:SetAttribute("sarp_ab_session", SARP_SessionID)
+        att:SetAttribute("sarp_ab_echo",
             wrapped.EchoPlayer and wrapped.EchoPlayer.Name or "local")
-    end)
-    -- Watch for server correction on bridge payload attribute
-    SARP_WatchCorrection(att, "sarp_bridge_payload", payloadStr,
-        SARP_CFG.CorrectionWatchWindow,
-        function(corrected, correctedTo)
-            -- Clean attachment after window
-            task.delay(0.5, function()
-                pcall(function() if att and att.Parent then att:Destroy() end end)
-            end)
-            local pattern = corrected
-                and ("BRIDGE_CORRECTED:" .. tostring(correctedTo))
-                or "BRIDGE_LINGERED"
-            onResult(not corrected, pattern, baseline)
+    end, function(writeOK)
+        if not writeOK then
+            pcall(function() att:Destroy() end)
+            onResult(false, "AB_WRITE_FAILED", baseline)
+            return
         end
-    )
+
+        -- Echo window: wait calibrated window, then re-assert once more
+        -- This double-write pattern increases the probability that at least
+        -- one write propagates to other clients before correction
+        task.wait(echoWin)
+        if att and att.Parent then
+            pcall(function() att:SetAttribute("sarp_ab_payload", payloadStr) end)
+        end
+
+        -- Layer 3: Correction listener on the primary payload attribute
+        SARP_WatchCorrection(att, "sarp_ab_payload", payloadStr,
+            SARP_CFG.CorrectionWatchWindow, "AttachmentBridge",
+            function(corrected, correctedTo, latency)
+                task.delay(0.5, function()
+                    pcall(function() if att and att.Parent then att:Destroy() end end)
+                end)
+                baseline.corrLatency = latency
+                baseline.echoWinUsed = echoWin
+                local pattern = corrected
+                    and ("AB_CORRECTED:" .. tostring(correctedTo))
+                    or "AB_LINGERED"
+                onResult(not corrected, pattern, baseline)
+            end
+        )
+    end)
 end
 
 function SARP.Flyer.Fly(wrapped, targetName, onResult)
