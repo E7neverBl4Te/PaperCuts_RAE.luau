@@ -8250,8 +8250,14 @@ local function ASE_BuildPlan(goal)
     }
 end
 
+-- ── Forward declarations (mutual recursion fix) ───────────────
+-- ASE_ExecuteStep and ASE_RunNextStep call each other.
+-- Declare both locals first so each closure captures the real variable.
+local ASE_ExecuteStep
+local ASE_RunNextStep
+
 -- ── Step executor ─────────────────────────────────────────────
-local function ASE_ExecuteStep(step, onDone)
+ASE_ExecuteStep = function(step, onDone)
     table.insert(strategyLog, {
         step=step.type, desc=step.desc, t=os.clock()
     })
@@ -8328,7 +8334,7 @@ local function ASE_ExecuteStep(step, onDone)
 end
 
 -- ── Plan runner ───────────────────────────────────────────────
-local function ASE_RunNextStep()
+ASE_RunNextStep = function()
     if not currentPlan then ASE_Active=false; return end
     local steps = currentPlan.steps
     currentPlan.stepIdx = currentPlan.stepIdx + 1
@@ -8349,7 +8355,7 @@ local function ASE_RunNextStep()
             (success and "OK" or "FAIL") .. " " .. tostring(note))
         -- Humanized inter-step delay
         local delay = 0.5 + math.random() * 1.0
-        task.delay(delay, ASE_RunNextStep)
+        task.delay(delay, function() pcall(ASE_RunNextStep) end)
     end)
 end
 
