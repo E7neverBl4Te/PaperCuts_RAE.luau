@@ -4425,6 +4425,9 @@ LoadForge()
 --  Hooks into: ETM · CDG · LWM · StateSignature · IntelMem
 -- ============================================================
 
+-- ── SARP is initialized inside an IIFE so all internal locals
+-- ── live in function scope (avoids main-chunk register exhaustion)
+local SARP = (function()
 local SARP = {}
 
 -- ── Persistence ───────────────────────────────────────────────
@@ -5680,7 +5683,8 @@ LoadSARP()
 task.defer(function()
     if _G.RAE_Engine then _G.RAE_Engine.SARP = SARP end
 end)
-
+return SARP
+end)()
 
 -- ============================================================
 -- NAVIGATION SYSTEM
