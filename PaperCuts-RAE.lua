@@ -92,6 +92,23 @@ local uiClickSound = mk("Sound", { Name="PaperClay_Click", SoundId="rbxassetid:/
 local function clickSound() if uiClickSound then uiClickSound:Play() end end
 
 -- ============================================================
+-- SHARED UTILITIES (top-level, accessible by all modules)
+-- ============================================================
+local function GammaSample(k, theta)
+    if k < 1 then return GammaSample(1 + k, theta) * math.random()^(1/k) end
+    local d = k - 1/3
+    local c = 1 / math.sqrt(9 * d)
+    while true do
+        local x, v
+        repeat x = (math.random() * 2 - 1) * 3; v = 1 + c * x until v > 0
+        v = v^3
+        local u = math.random()
+        if u < 1 - 0.0331*(x^2)^2 then return d*v*theta end
+        if math.log(u) < 0.5*x^2 + d*(1 - v + math.log(v)) then return d*v*theta end
+    end
+end
+
+-- ============================================================
 -- PARSING ENGINES
 -- ============================================================
 local function cleanTable(t, seen)
@@ -4962,9 +4979,7 @@ function APE.RunBatch(maxProbes)
             local pt=table.remove(APE_Queue,1)
             APE_CurProbe=pt; APE_ExecuteProbe(pt); APE_CurProbe=nil
             ran=ran+1
-            local jitter=0; pcall(function()
-                jitter=SARP_SampleGamma(2.0, APE_CFG.InterProbeDelay*0.3)
-            end)
+            local jitter=GammaSample(2.0, APE_CFG.InterProbeDelay*0.3)
             task.wait(APE_CFG.InterProbeDelay + jitter)
         end
         APE_Running=false
@@ -5214,7 +5229,13 @@ local function ASE_ObservePhase()
     if RAE_State.WorldState then
         LWM.Record(RAE_State.WorldState, RAE_State.CurrentSig)
     end
-    if RAE_State.Phase=="DORMANT" then pcall(RAE_Scan) end
+    if RAE_State.Phase=="DORMANT" then
+        pcall(function()
+            if _G.RAE_Engine and type(_G.RAE_Engine.Scan)=="function" then
+                _G.RAE_Engine.Scan()
+            end
+        end)
+    end
     local nodeCount=0; for _ in pairs(CSKG_Graph.Nodes) do nodeCount=nodeCount+1 end
     local frontierCount=0; for _ in pairs(CSKG_Frontier) do frontierCount=frontierCount+1 end
     ASE_Log(string.format("Observe: %d remotes | %d nodes | %d frontier",
@@ -5459,19 +5480,9 @@ local SARP_CFG = {
     SubTickPhaseSamples    = 12,       -- Heartbeat frames to sample for sub-tick phase lock
 }
 
--- ── Gamma sampler (Marsaglia–Tsang, matches Intel sampler style) ──
+-- ── Gamma sampler — delegates to top-level GammaSample ────────
 local function SARP_SampleGamma(k, theta)
-    if k < 1 then return SARP_SampleGamma(1 + k, theta) * math.random()^(1/k) end
-    local d = k - 1/3
-    local c = 1 / math.sqrt(9 * d)
-    while true do
-        local x, v
-        repeat x = (math.random() * 2 - 1) * 3; v = 1 + c * x until v > 0
-        v = v^3
-        local u = math.random()
-        if u < 1 - 0.0331*(x^2)^2 then return d*v*theta end
-        if math.log(u) < 0.5*x^2 + d*(1 - v + math.log(v)) then return d*v*theta end
-    end
+    return GammaSample(k, theta)
 end
 
 -- ── Simple djb2 hash for correction pattern keys ──────────────
