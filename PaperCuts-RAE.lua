@@ -5279,10 +5279,12 @@ do
     local phxRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
         AutomaticSize=Enum.AutomaticSize.Y,Parent=sScript})
     mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,16),Parent=phxRow})
-    makeToggle(phxRow,"AC Gate",true,function(on) SARP_CFG.AntiCheatGate=on end)
-    makeToggle(phxRow,"Humanize Delays",true,function(on)
+    local _tAC = makeToggle(phxRow,"AC Gate",true,function(on) SARP_CFG.AntiCheatGate=on end)
+    if _tAC and _tAC.Root then _tAC.Root.Size = UDim2.new(0,120,0,34) end
+    local _tHum = makeToggle(phxRow,"Humanize Delays",true,function(on)
         SARP_CFG.ReshapeNoiseScale = on and 0.05 or 0.0
     end)
+    if _tHum and _tHum.Root then _tHum.Root.Size = UDim2.new(0,160,0,34) end
 
     -- Phoenix max depth slider
     local phxDepthRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,44),Parent=sScript})
@@ -5399,7 +5401,10 @@ do
     mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,12),Parent=launchBtnRow})
 
     local simFirstToggle = {Value=true}
-    makeToggle(launchBtnRow,"Sim First",true,function(on) simFirstToggle.Value=on end)
+    local _simToggle = makeToggle(launchBtnRow,"Sim First",true,function(on) simFirstToggle.Value=on end)
+    if _simToggle and _simToggle.Root then
+        _simToggle.Root.Size = UDim2.new(0,110,0,40)
+    end
 
     local launchBtn = makeButton(launchBtnRow,"🚀 Launch Phoenix",UDim2.new(0,200,0,40),"")
     launchBtn.Button.BackgroundColor3 = Color3.fromRGB(200,240,200)
