@@ -4962,8 +4962,19 @@ local function SARP_FlyOwnedCarrier(wrapped, onResult)
                 function(corrected, correctedTo, latency)
                     -- Stop re-assertion regardless of outcome
                     stopReassert()
-                    -- Schedule carrier cleanup after a brief hold
-                    -- (hold briefly so other clients' replication catchup can occur)
+                    -- Release ownership explicitly so the server inherits the final
+                    -- attribute state as its own authoritative baseline rather than
+                    -- discarding it as a client-side anomaly.
+                    -- SetNetworkOwner(nil) triggers a server ownership takeover;
+                    -- the last attribute value written during our window becomes
+                    -- the starting point for the server's own copy.
+                    pcall(function()
+                        if carrier and carrier.Parent and carrier.SetNetworkOwner then
+                            carrier:SetNetworkOwner(nil)
+                        end
+                    end)
+                    -- Brief hold after ownership release — gives the server time to
+                    -- inherit the state before we destroy the part
                     task.delay(0.4, function()
                         pcall(function() if carrier and carrier.Parent then carrier:Destroy() end end)
                         if SARPCarrier == carrier then SARPCarrier = nil end
@@ -5055,6 +5066,144 @@ function SARP.Flyer.Fly(wrapped, targetName, onResult)
     elseif ch == "AttachmentBridge" then SARP_FlyAttachmentBridge(wrapped, onResult)
     else   onResult(false, "UNKNOWN_CHANNEL:" .. tostring(ch), nil) end
 end
+
+-- ── Multi-client cascade ─────────────────────────────────────
+-- After a confirmed linger on any channel, propagates the payload
+-- to nearby players via AttachmentBridge writes on their characters.
+-- CDG causal score determines sequencing: highest-score targets first,
+-- since CDG edges encode which target ordering produced the best echo
+-- propagation in prior sessions.
+-- Each cascade step is separated by a Gamma-sampled humanization delay
+-- to avoid uniform burst timing that could trigger AC detection.
+SARP.Cascade = {}
+
+local SARP_CascadeLog = {}  -- {sessionID, target, success, t}
+
+local function SARP_CascadeToTarget(targetPlayer, payloadStr, sessionID, onDone)
+    if not targetPlayer or not targetPlayer.Character then
+        onDone(false, "NO_CHAR"); return
+    end
+    local hrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then onDone(false, "NO_HRP"); return end
+
+    -- Create a transient Attachment on their HRP
+    -- We can parent Attachments to instances we don't own via the client tree;
+    -- whether it replicates depends on the game's network ownership config,
+    -- but the write always exercises our local replication path outward.
+    local att = Instance.new("Attachment")
+    att.Name   = "sarp_cas_" .. tostring(sessionID) .. "_" .. targetPlayer.Name
+    att.Parent = hrp
+
+    local echoWin = SARP_GetEchoWindow("AttachmentBridge")
+
+    SARP_HeartbeatWrite(function()
+        local noiseX = SARP_SampleGamma(1.5, 0.003) - 0.0015
+        att.CFrame = CFrame.new(noiseX, 0, 0)
+        att:SetAttribute("sarp_cas_payload", payloadStr)
+        att:SetAttribute("sarp_cas_session", sessionID)
+        att:SetAttribute("sarp_cas_origin",  player.Name)
+    end, function(ok)
+        if not ok then
+            pcall(function() att:Destroy() end)
+            onDone(false, "WRITE_FAILED")
+            return
+        end
+        -- Watch for correction on the cascade attachment
+        SARP_WatchCorrection(att, "sarp_cas_payload", payloadStr,
+            SARP_CFG.CorrectionWatchWindow, "Cascade",
+            function(corrected, correctedTo, latency)
+                task.delay(0.35, function()
+                    pcall(function() if att and att.Parent then att:Destroy() end end)
+                end)
+                table.insert(SARP_CascadeLog, {
+                    sessionID = sessionID,
+                    target    = targetPlayer.Name,
+                    success   = not corrected,
+                    latency   = latency,
+                    t         = os.clock(),
+                })
+                if #SARP_CascadeLog > 100 then table.remove(SARP_CascadeLog, 1) end
+                onDone(not corrected, corrected and ("CORRECTED:"..tostring(correctedTo)) or "LINGERED")
+            end
+        )
+    end)
+end
+
+function SARP.Cascade.Run(payloadStr, maxTargets, onComplete)
+    maxTargets = math.min(maxTargets or 3, 5)  -- hard cap at 5
+    local selfHRP = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+    -- Build candidate list: nearby players sorted by CDG causal score
+    -- (higher score = this target has historically produced better echo propagation)
+    local candidates = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player and p.Character then
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            local dist = math.huge
+            if hrp and selfHRP then
+                dist = (hrp.Position - selfHRP.Position).Magnitude
+            end
+            if dist <= SARP_CFG.EchoRadius then
+                local cdgKey   = "sarp_cas_" .. p.Name:lower()
+                local cdgScore = CDG.GetCausalScore(cdgKey)
+                -- ETM probability for cascade success on this target
+                local etmP, _, _ = ETM.Predict(cdgKey, RAE_State.CurrentSig or "unknown")
+                table.insert(candidates, {
+                    Player   = p,
+                    Distance = dist,
+                    CDGScore = cdgScore,
+                    ETMProb  = etmP,
+                    -- Combined priority: CDG lift + ETM confidence + proximity bonus
+                    Priority = cdgScore * 0.5 + etmP * 0.35 + math.max(0, 1 - dist/SARP_CFG.EchoRadius) * 0.15,
+                })
+            end
+        end
+    end
+
+    -- Sort by priority descending
+    table.sort(candidates, function(a, b) return a.Priority > b.Priority end)
+
+    local selected = {}
+    for i = 1, math.min(maxTargets, #candidates) do
+        table.insert(selected, candidates[i])
+    end
+
+    if #selected == 0 then
+        onComplete({}, "NO_TARGETS_IN_RANGE")
+        return
+    end
+
+    -- Execute cascade sequentially with Gamma-sampled inter-step delays
+    local results = {}
+    local idx     = 0
+    local sesID   = SARP_SessionID
+
+    local function nextStep()
+        idx = idx + 1
+        if idx > #selected then
+            onComplete(results, "CASCADE_COMPLETE")
+            return
+        end
+        local entry = selected[idx]
+        SARP_CascadeToTarget(entry.Player, payloadStr, sesID, function(success, pattern)
+            table.insert(results, {
+                Target  = entry.Player.Name,
+                Success = success,
+                Pattern = pattern,
+                Priority= entry.Priority,
+            })
+            -- Feed ETM with cascade outcome
+            local cdgKey = "sarp_cas_" .. entry.Player.Name:lower()
+            ETM.Update(cdgKey, RAE_State.CurrentSig or "unknown", success)
+            -- Humanization delay between cascade steps
+            local delay = 0.18 + SARP_SampleGamma(SARP_CFG.DesyncGammaShape, 0.09)
+            task.delay(delay, nextStep)
+        end)
+    end
+
+    nextStep()
+end
+
 
 -- ============================================================
 -- MODULE 5 — PHOENIX LOOP
@@ -5869,10 +6018,218 @@ do
     -- Auto-refresh ETM and log after any SARP launch (via SARPLog growth)
     -- Done by polling in the launch callback above (updateSARPStatus triggers downstream)
 
+
+    -- ── Live Heat / Correction Dashboard ─────────────────────
+    local _, sHeat = makeSection(pageSARP, "Live Heat & Correction Dashboard")
+
+    -- Status grid: 6 live metrics updated on Refresh
+    local heatGridData = {
+        { Key="AC Heat",         Val="--",  Col=Color3.fromRGB(72,66,60) },
+        { Key="Correction Rate", Val="--",  Col=Color3.fromRGB(72,66,60) },
+        { Key="Echo Window",     Val="--",  Col=Color3.fromRGB(72,66,60) },
+        { Key="Evasion Score",   Val="--",  Col=Color3.fromRGB(72,66,60) },
+        { Key="Linger Rate",     Val="--",  Col=Color3.fromRGB(72,66,60) },
+        { Key="Cascade Success", Val="--",  Col=Color3.fromRGB(72,66,60) },
+    }
+    local heatGrid = mk("Frame",{BackgroundTransparency=1,
+        Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=sHeat})
+    mk("UIGridLayout",{CellSize=UDim2.new(0.5,-6,0,48),CellPadding=UDim2.new(0,6,0,6),
+        SortOrder=Enum.SortOrder.LayoutOrder,Parent=heatGrid})
+    local heatCells = {}
+    for idx, entry in ipairs(heatGridData) do
+        local cell = mk("Frame",{BackgroundColor3=Color3.fromRGB(248,245,240),
+            Size=UDim2.new(0,1,0,1),LayoutOrder=idx,Parent=heatGrid})
+        addCorner(cell,UDim.new(0,8)); addStroke(cell,1,0.3)
+        local keyLbl = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+            Text=entry.Key,TextColor3=Color3.fromRGB(130,120,110),TextSize=10,
+            Position=UDim2.new(0,8,0,6),Size=UDim2.new(1,-16,0,14),
+            TextXAlignment=Enum.TextXAlignment.Left,Parent=cell})
+        local valLbl = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,
+            Text=entry.Val,TextColor3=entry.Col,TextSize=16,
+            Position=UDim2.new(0,8,0,22),Size=UDim2.new(1,-16,0,20),
+            TextXAlignment=Enum.TextXAlignment.Left,Parent=cell})
+        heatCells[idx] = { Cell=cell, ValLbl=valLbl, KeyLbl=keyLbl }
+    end
+
+    -- Correction history sparkline (last 20 sessions: green=lingered, red=corrected)
+    local _, sSparkline = makeSection(pageSARP, "Correction History")
+    local sparkRow = mk("Frame",{BackgroundColor3=Color3.fromRGB(242,238,232),
+        Size=UDim2.new(1,0,0,28),Parent=sSparkline})
+    addCorner(sparkRow,UDim.new(0,6)); addStroke(sparkRow,1,0.3)
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,2),
+        VerticalAlignment=Enum.VerticalAlignment.Center,Parent=sparkRow})
+    mk("UIPadding",{PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6),
+        PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),Parent=sparkRow})
+    local sparkBars = {}
+    for i = 1, 20 do
+        local bar = mk("Frame",{BackgroundColor3=Color3.fromRGB(210,205,198),
+            Size=UDim2.new(0,0,1,0),AutomaticSize=Enum.AutomaticSize.None,
+            LayoutOrder=i,Parent=sparkRow})
+        bar.Size = UDim2.new(0, 12, 0, 18)
+        addCorner(bar,UDim.new(0,3))
+        sparkBars[i] = bar
+    end
+
+    local sparkNoteLbl = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="No history yet. Launch payloads to populate.",
+        TextColor3=Color3.fromRGB(150,145,138),TextSize=10,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,
+        Size=UDim2.new(1,0,0,14),Parent=sSparkline})
+
+    local function doRefreshHeat()
+        -- ── AC Heat ────────────────────────────────────────────
+        -- Derived from LWM remoteFires temporal average vs threshold
+        local avgFires = LWM.GetTemporalAverage("remoteFires", 3) or 0
+        local heat = math.min(100, math.floor(avgFires / SARP_CFG.ACFiresThreshold * 100))
+        local heatStr = tostring(heat) .. "%"
+        local heatCol = heat > 70 and Color3.fromRGB(220,60,60)
+            or heat > 40 and Color3.fromRGB(220,150,40)
+            or Color3.fromRGB(60,180,80)
+
+        -- ── Correction Rate ────────────────────────────────────
+        -- Fraction of SARPLog entries where success=false
+        local total, corrected = 0, 0
+        for _, e in ipairs(SARPLog) do
+            total = total + 1
+            if not e.Success then corrected = corrected + 1 end
+        end
+        local corrRate = total > 0 and math.floor(corrected/total*100) or 0
+        local corrStr  = tostring(corrRate) .. "% (" .. tostring(corrected) .. "/" .. tostring(total) .. ")"
+        local corrCol  = corrRate > 60 and Color3.fromRGB(220,60,60)
+            or corrRate > 30 and Color3.fromRGB(220,150,40)
+            or Color3.fromRGB(60,180,80)
+
+        -- ── Echo Window ────────────────────────────────────────
+        local echoWin = SARP_CFG.EchoWindowEst or 0.06
+        -- Combine per-channel estimates
+        local ewAttr = SARP_GetEchoWindow("Attribute")
+        local ewOC   = SARP_GetEchoWindow("OwnedCarrier")
+        local ewAB   = SARP_GetEchoWindow("AttachmentBridge")
+        local ewStr  = string.format("A:%.0fms OC:%.0fms AB:%.0fms",
+            ewAttr*1000, ewOC*1000, ewAB*1000)
+        local ewCol  = Color3.fromRGB(72,120,200)
+
+        -- ── Evasion Score (Brier-calibrated) ──────────────────
+        -- Uses ETM Brier score if available; lower Brier = better calibration
+        -- Evasion = 1 - correctionRate (adjusted by ETM mean confidence)
+        local etmKeys, etmSum = 0, 0
+        for cardID, _ in pairs(ETM.GetTableRef()) do
+            if cardID:find("^sarp_") then
+                local p, _, _ = ETM.Predict(cardID, RAE_State.CurrentSig or "unknown")
+                etmSum = etmSum + p; etmKeys = etmKeys + 1
+            end
+        end
+        local etmMean    = etmKeys > 0 and (etmSum / etmKeys) or 0.5
+        local evasionPct = math.floor(etmMean * (1 - corrRate/100) * 100)
+        local evasionStr = tostring(evasionPct) .. "%"
+        local evasionCol = evasionPct > 65 and Color3.fromRGB(60,180,80)
+            or evasionPct > 35 and Color3.fromRGB(220,150,40)
+            or Color3.fromRGB(220,60,60)
+
+        -- ── Linger Rate ───────────────────────────────────────
+        local lingerCount = total - corrected
+        local lingerPct   = total > 0 and math.floor(lingerCount/total*100) or 0
+        local lingerStr   = tostring(lingerPct) .. "% (" .. tostring(lingerCount) .. " lingered)"
+        local lingerCol   = lingerPct > 60 and Color3.fromRGB(60,180,80)
+            or lingerPct > 30 and Color3.fromRGB(220,150,40)
+            or Color3.fromRGB(220,60,60)
+
+        -- ── Cascade Success ───────────────────────────────────
+        local casTotal, casOK = 0, 0
+        for _, e in ipairs(SARP_CascadeLog) do
+            casTotal = casTotal + 1
+            if e.success then casOK = casOK + 1 end
+        end
+        local casPct = casTotal > 0 and math.floor(casOK/casTotal*100) or 0
+        local casStr = casTotal > 0
+            and (tostring(casPct) .. "% (" .. tostring(casOK) .. "/" .. tostring(casTotal) .. ")")
+            or "No cascade runs"
+        local casCol = casPct > 60 and Color3.fromRGB(60,180,80)
+            or casPct > 30 and Color3.fromRGB(220,150,40)
+            or Color3.fromRGB(140,140,140)
+
+        -- Apply to grid cells
+        local vals = {
+            { heatStr,    heatCol    },
+            { corrStr,    corrCol    },
+            { ewStr,      ewCol      },
+            { evasionStr, evasionCol },
+            { lingerStr,  lingerCol  },
+            { casStr,     casCol     },
+        }
+        for i, cell in ipairs(heatCells) do
+            cell.ValLbl.Text           = vals[i][1]
+            cell.ValLbl.TextColor3     = vals[i][2]
+            cell.Cell.BackgroundColor3 = Color3.fromRGB(248,245,240)
+        end
+
+        -- Highlight AC Heat cell if elevated
+        if heat > 70 then
+            heatCells[1].Cell.BackgroundColor3 = Color3.fromRGB(255,235,235)
+        end
+
+        -- ── Sparkline ─────────────────────────────────────────
+        local recentLog = {}
+        for i = math.max(1, #SARPLog-19), #SARPLog do
+            table.insert(recentLog, SARPLog[i])
+        end
+        sparkNoteLbl.Text = #recentLog == 0
+            and "No history yet. Launch payloads to populate."
+            or string.format("Last %d launches  |  green=lingered  red=corrected  grey=pending", #recentLog)
+
+        for i = 1, 20 do
+            local bar = sparkBars[i]
+            local entry = recentLog[i]
+            if entry then
+                bar.BackgroundColor3 = entry.Success
+                    and Color3.fromRGB(80, 200, 100)
+                    or  Color3.fromRGB(220, 80, 80)
+            else
+                bar.BackgroundColor3 = Color3.fromRGB(210, 205, 198)
+            end
+        end
+    end
+
+    -- Refresh heat button
+    local heatRefreshRow = mk("Frame",{BackgroundTransparency=1,
+        Size=UDim2.new(1,0,0,40),Parent=sHeat})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,
+        Padding=UDim.new(0,10),Parent=heatRefreshRow})
+    local heatRefreshBtn = makeButton(heatRefreshRow,"Refresh Heat",UDim2.new(0,160,0,36),"🌡")
+    heatRefreshBtn.Button.BackgroundColor3 = Color3.fromRGB(255,235,210)
+    local cascadeTestBtn = makeButton(heatRefreshRow,"Run Cascade",UDim2.new(0,150,0,36),"📡")
+    cascadeTestBtn.Button.BackgroundColor3 = Color3.fromRGB(220,235,255)
+
+    heatRefreshBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(heatRefreshBtn.Button)
+        doRefreshHeat()
+    end)
+
+    cascadeTestBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(cascadeTestBtn.Button)
+        if not SARP_CurrentWrapped then
+            sendNotification("Build a payload first (Simulate), then run Cascade.", "Warning")
+            return
+        end
+        local payload = SARP_CurrentWrapped.Payload or ""
+        local payloadStr = type(payload)=="string" and payload or tostring(payload)
+        sendNotification("Cascade starting — targeting nearby players...", "Info")
+        SARP.Cascade.Run(payloadStr, 3, function(results, status)
+            local ok = 0
+            for _, r in ipairs(results) do if r.Success then ok=ok+1 end end
+            sendNotification(string.format(
+                "Cascade %s — %d/%d targets lingered",
+                status, ok, #results), ok > 0 and "Success" or "Warning")
+            doRefreshHeat()
+            updateSARPStatus()
+        end)
+    end)
+
     -- Seed patterns on load
     task.defer(function()
         doRefreshPatterns()
         doRefreshETMSARP()
+        doRefreshHeat()
         updateSARPStatus()
     end)
 end
