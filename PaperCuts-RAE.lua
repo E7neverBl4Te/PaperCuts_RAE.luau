@@ -1,18 +1,26 @@
 --[[
     ╔══════════════════════════════════════════════════════════════════════╗
-    ║   Paper & Clay  +  RAE — Recursive Autonomous Engine  v2.0          ║
-    ║   Deep Intelligence Edition                                          ║
+    ║   Paper & Clay  +  RAE — Recursive Autonomous Engine  v5.0          ║
+    ║   Deep Intelligence Edition — Full Autonomous Stack                  ║
     ║                                                                      ║
-    ║   NEW IN v3.0:                                                       ║
-    ║     StateSignature  — compact φ(S) with canonicalization/hashing    ║
-    ║     LWM             — Living World Model ring buffer + delta track  ║
-    ║     ETM             — Empirical Transition Model (Bayesian,         ║
-    ║                        state-conditional, convergence-aware)         ║
-    ║     CDG             — Causal Dependency Graph (effect size+conf)    ║
-    ║     Risk-Adj MCTS   — E[U] − λVar[U] − μCost selection criterion   ║
-    ║     Session Persist — _G persistence for IntelMem / ETM / CDG       ║
-    ║     Brier Calibration — predicted-vs-actual confidence tracking     ║
-    ║     Analytics Tab   — convergence map, CDG edges, calibration live  ║
+    ║   CORE (v3):                                                         ║
+    ║     StateSignature · LWM · ETM · CDG · Risk-Adj MCTS               ║
+    ║     Session Persist · Brier Calibration · Analytics Tab             ║
+    ║                                                                      ║
+    ║   SARP (v4):                                                         ║
+    ║     Sub-tick phase lock · Probe gate · Multi-burst writes           ║
+    ║     Surface rotation · Fragmentation · Parallel racing              ║
+    ║     Weld-anchored carrier · ETM context enrichment                  ║
+    ║     Per-PlaceId echo persistence · Correction fingerprinting        ║
+    ║                                                                      ║
+    ║   DEEP STACK (v5):                                                   ║
+    ║     PROT — Protocol Reconstruction Engine                           ║
+    ║     RSM  — Remote Signature Mapper                                  ║
+    ║     SRM  — State Reconstruction Module                              ║
+    ║     SBI  — Server Behavior Inference                                ║
+    ║     APE  — Active Probing Engine                                    ║
+    ║     CKG  — Cross-Session Knowledge Graph                            ║
+    ║     ASE  — Autonomous Strategy Engine                               ║
     ║                                                                      ║
     ║   Tabs:                                                              ║
     ║     Overview · Player · Camera · World · Discovery                  ║
@@ -5167,6 +5175,13 @@ local function SARP_FlyAttribute(wrapped, onResult)
                             baseline.fingerprint  = fp
                             baseline.burstsFired  = burstCount
                             baseline.fragCount    = #fragments
+                            -- Feed fingerprint into SBI for server behavior inference
+                            pcall(function()
+                                SBI.IngestFingerprint(
+                                    tostring(wrapped.Instance
+                                        and wrapped.Instance.Name or "attr"),
+                                    fp, "Attribute")
+                            end)
                             local pattern = corrected
                                 and ("CORRECTED_TO:" .. tostring(correctedTo))
                                 or  "LINGERED"
@@ -6639,6 +6654,1757 @@ task.spawn(SARP_StartPhaseMeasurement)
 return SARP
 end)()
 
+
+-- ============================================================
+-- PROT — PROTOCOL RECONSTRUCTION ENGINE
+-- ============================================================
+-- Intercepts ALL remote traffic passing through the client,
+-- reconstructs argument signatures, maps call timing and frequency,
+-- detects tokens/sequence counters, and feeds RSM with raw data.
+-- This is the sensor layer for all deep-stack modules.
+-- ============================================================
+local PROT = (function()
+local PROT = {}
+
+-- ── Persistence ──────────────────────────────────────────────
+local PROT_PERSIST = "PROT_Registry_" .. tostring(game.PlaceId)
+
+-- ── Internal state ────────────────────────────────────────────
+-- registry[remoteName] = {
+--   name, fullPath, calls, firstSeen, lastSeen, lastCallTime,
+--   argSigs = { [posIdx] = {types seen, sample values} },
+--   callGaps = {}, -- inter-call deltas for rate limit inference
+--   tokenCandidates = {}, -- args that look like tokens
+--   responsePatterns = {}, -- InvokeServer return patterns
+--   stateDeltas = {}, -- LWM deltas observed after this remote fired
+-- }
+local registry = {}
+local callLog   = {} -- ordered ring buffer, cap 500
+local CAP_LOG   = 500
+local listeners = {} -- active connections
+
+-- ── Type classifier ───────────────────────────────────────────
+local function classifyArg(v)
+    local t = type(v)
+    if t == "number" then
+        if v == math.floor(v) then return "int" else return "float" end
+    elseif t == "string" then
+        if #v >= 20 and not v:find("%s") then return "token" end
+        if #v >= 64 then return "blob" end
+        return "string"
+    elseif t == "boolean" then return "bool"
+    elseif t == "userdata" then
+        local ok, cn = pcall(function() return v.ClassName end)
+        return ok and ("inst:"..tostring(cn)) or "userdata"
+    elseif t == "table" then return "table"
+    elseif t == "nil" then return "nil"
+    else return t end
+end
+
+-- ── Token heuristic ───────────────────────────────────────────
+-- Detects sequence counters (incrementing ints) and session tokens
+-- (long opaque strings that repeat per-session but change cross-session)
+local function isTokenCandidate(argType, value, remoteName, posIdx)
+    if argType == "token" or argType == "blob" then return true end
+    if argType == "int" then
+        local rec = registry[remoteName]
+        if rec and rec.argSigs[posIdx] then
+            local samples = rec.argSigs[posIdx].samples
+            if #samples >= 2 then
+                local last = samples[#samples]
+                local prev = samples[#samples - 1]
+                if type(last) == "number" and type(prev) == "number" then
+                    local delta = last - prev
+                    if delta == 1 or delta == -1 then return true end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- ── Record a remote call ──────────────────────────────────────
+local function PROT_Record(remoteName, fullPath, args, isInvoke)
+    if not registry[remoteName] then
+        registry[remoteName] = {
+            name             = remoteName,
+            fullPath         = fullPath,
+            calls            = 0,
+            firstSeen        = os.clock(),
+            lastSeen         = os.clock(),
+            lastCallTime     = nil,
+            argSigs          = {},
+            callGaps         = {},
+            tokenCandidates  = {},
+            responsePatterns = {},
+            stateDeltas      = {},
+            isInvoke         = isInvoke or false,
+        }
+    end
+    local rec = registry[remoteName]
+    local now = os.clock()
+    rec.calls    = rec.calls + 1
+    rec.lastSeen = now
+
+    -- Inter-call gap for rate limit inference
+    if rec.lastCallTime then
+        local gap = now - rec.lastCallTime
+        table.insert(rec.callGaps, gap)
+        if #rec.callGaps > 60 then table.remove(rec.callGaps, 1) end
+    end
+    rec.lastCallTime = now
+
+    -- Argument signature update
+    for posIdx, argVal in ipairs(args) do
+        if not rec.argSigs[posIdx] then
+            rec.argSigs[posIdx] = { types={}, samples={}, tokenCandidate=false }
+        end
+        local sig    = rec.argSigs[posIdx]
+        local argT   = classifyArg(argVal)
+        sig.types[argT] = (sig.types[argT] or 0) + 1
+        -- Keep last 10 samples per position
+        table.insert(sig.samples, argVal)
+        if #sig.samples > 10 then table.remove(sig.samples, 1) end
+        -- Token candidate detection
+        if isTokenCandidate(argT, argVal, remoteName, posIdx) then
+            sig.tokenCandidate = true
+            rec.tokenCandidates[posIdx] = true
+        end
+    end
+
+    -- Snapshot LWM delta immediately after call (for state correlation)
+    local delta = LWM.GetDelta()
+    if delta then
+        table.insert(rec.stateDeltas, {
+            physDelta    = delta.physDelta    or 0,
+            remoteFires  = delta.remoteFires  or 0,
+            t            = now,
+        })
+        if #rec.stateDeltas > 20 then table.remove(rec.stateDeltas, 1) end
+    end
+
+    -- Global call log
+    table.insert(callLog, {
+        name     = remoteName,
+        path     = fullPath,
+        args     = args,
+        t        = now,
+        isInvoke = isInvoke or false,
+    })
+    if #callLog > CAP_LOG then table.remove(callLog, 1) end
+end
+
+-- ── Hook into existing metatable namecall ─────────────────────
+-- Attaches PROT recording to the __namecall hook that already exists.
+-- We use the LogService approach since the metatable hook runs first.
+local function PROT_AttachListeners()
+    -- Primary: poll remote registry from LWM (non-invasive)
+    local lastKnown = {}
+    local conn = RunService.Heartbeat:Connect(function()
+        local reg = LWM.GetRemoteRegistry and LWM.GetRemoteRegistry() or {}
+        for name, data in pairs(reg) do
+            if not lastKnown[name] then
+                lastKnown[name] = data.FireCount or 0
+            else
+                local current = data.FireCount or 0
+                if current > lastKnown[name] then
+                    -- New calls detected — record with available info
+                    PROT_Record(name, data.FullPath or name, {}, false)
+                    lastKnown[name] = current
+                end
+            end
+        end
+    end)
+    table.insert(listeners, conn)
+end
+
+-- ── Save / Load ───────────────────────────────────────────────
+local function PROT_Save()
+    pcall(function()
+        local serializable = {}
+        for k, v in pairs(registry) do
+            -- Strip non-serializable samples (userdata)
+            local clean = { name=v.name, fullPath=v.fullPath,
+                calls=v.calls, firstSeen=v.firstSeen, lastSeen=v.lastSeen,
+                callGapCount=#v.callGaps, argCount=#v.argSigs,
+                tokenCandidates=v.tokenCandidates }
+            serializable[k] = clean
+        end
+        _G[PROT_PERSIST] = serializable
+    end)
+end
+
+local function PROT_Load()
+    pcall(function()
+        local stored = _G[PROT_PERSIST]
+        if type(stored) == "table" then
+            for k, v in pairs(stored) do
+                if not registry[k] then
+                    registry[k] = {
+                        name=v.name or k, fullPath=v.fullPath or k,
+                        calls=v.calls or 0,
+                        firstSeen=v.firstSeen or os.clock(),
+                        lastSeen=v.lastSeen or os.clock(),
+                        lastCallTime=nil, argSigs={}, callGaps={},
+                        tokenCandidates=v.tokenCandidates or {},
+                        responsePatterns={}, stateDeltas={}, isInvoke=false,
+                    }
+                end
+            end
+        end
+    end)
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function PROT.GetRegistry()   return registry end
+function PROT.GetCallLog()    return callLog   end
+function PROT.GetRemote(name) return registry[name] end
+function PROT.Save()          PROT_Save()      end
+function PROT.Load()          PROT_Load()      end
+
+-- Returns remotes sorted by call count descending
+function PROT.GetTopRemotes(n)
+    n = n or 10
+    local list = {}
+    for _, rec in pairs(registry) do table.insert(list, rec) end
+    table.sort(list, function(a,b) return a.calls > b.calls end)
+    local out = {}
+    for i = 1, math.min(n, #list) do out[i] = list[i] end
+    return out
+end
+
+-- Returns estimated minimum call interval for a remote (rate limit proxy)
+function PROT.GetMinCallGap(remoteName)
+    local rec = registry[remoteName]
+    if not rec or #rec.callGaps == 0 then return nil end
+    local min = math.huge
+    for _, g in ipairs(rec.callGaps) do min = math.min(min, g) end
+    return min < math.huge and min or nil
+end
+
+-- Returns dominant argument type per position for a remote
+function PROT.GetArgSignature(remoteName)
+    local rec = registry[remoteName]
+    if not rec then return {} end
+    local sig = {}
+    for posIdx, info in pairs(rec.argSigs) do
+        local bestType, bestCount = "unknown", 0
+        for t, c in pairs(info.types) do
+            if c > bestCount then bestType=t; bestCount=c end
+        end
+        sig[posIdx] = { dominantType=bestType, tokenCandidate=info.tokenCandidate }
+    end
+    return sig
+end
+
+-- Manually record a remote call (called from metatable hook enrichment)
+function PROT.Record(remoteName, fullPath, args, isInvoke)
+    PROT_Record(remoteName, fullPath, args, isInvoke)
+end
+
+-- Boot
+PROT_Load()
+PROT_AttachListeners()
+
+return PROT
+end)()
+
+-- ============================================================
+-- RSM — REMOTE SIGNATURE MAPPER
+-- ============================================================
+-- Uses PROT traffic to build deep per-remote profiles:
+-- argument type inference, state-change correlation, remote
+-- dependency graph, and value scoring for exploitation priority.
+-- ============================================================
+local RSM = (function()
+local RSM = {}
+
+local PERSIST_KEY = "RSM_Profiles_" .. tostring(game.PlaceId)
+
+-- profiles[remoteName] = {
+--   argTypes     = {posIdx → dominant type},
+--   stateCorr    = {lwmField → correlation score},
+--   depScore     = float (how much state change this remote causes),
+--   dependencies = {otherRemote → {followsWithin=t, stateChange=bool}},
+--   mutationMap  = {posIdx → {safe mutations tried}},
+--   exploitScore = float 0..1 (overall usefulness estimate),
+--   notes        = string,
+-- }
+local profiles = {}
+
+-- ── Correlation engine ────────────────────────────────────────
+-- Computes Pearson-style correlation between call frequency of a
+-- remote and the magnitude of observed LWM state deltas.
+local function computeStateCorrelation(remoteName)
+    local rec = PROT.GetRemote(remoteName)
+    if not rec or #rec.stateDeltas < 3 then return {} end
+    local corr = {}
+    local fields = {"physDelta", "remoteFires"}
+    for _, field in ipairs(fields) do
+        local vals = {}
+        for _, d in ipairs(rec.stateDeltas) do
+            table.insert(vals, math.abs(d[field] or 0))
+        end
+        local n = #vals
+        if n >= 3 then
+            local sum = 0; for _, v in ipairs(vals) do sum = sum + v end
+            local mean = sum / n
+            local variance = 0
+            for _, v in ipairs(vals) do variance = variance + (v-mean)^2 end
+            local stddev = math.sqrt(variance / n)
+            corr[field] = stddev > 0.001 and mean / (stddev + 0.001) or 0
+        end
+    end
+    return corr
+end
+
+-- ── Dependency detection ──────────────────────────────────────
+-- Looks for pairs of remotes that tend to be called in sequence
+-- (within 2 seconds). High co-occurrence = dependency candidate.
+local function detectDependencies(targetName)
+    local callLog = PROT.GetCallLog()
+    local deps    = {}
+    for i, entry in ipairs(callLog) do
+        if entry.name == targetName then
+            -- Look forward in log for calls within 2s
+            for j = i+1, math.min(i+15, #callLog) do
+                local next = callLog[j]
+                if next and (next.t - entry.t) <= 2.0 then
+                    if next.name ~= targetName then
+                        local key = next.name
+                        deps[key] = deps[key] or {count=0, totalDelay=0}
+                        deps[key].count      = deps[key].count + 1
+                        deps[key].totalDelay = deps[key].totalDelay + (next.t - entry.t)
+                    end
+                else
+                    break
+                end
+            end
+        end
+    end
+    return deps
+end
+
+-- ── Exploit score calculator ──────────────────────────────────
+-- Estimates how useful a remote is to probe/exploit.
+-- High score = fires frequently + causes big state changes + has token candidates.
+local function calcExploitScore(remoteName)
+    local rec  = PROT.GetRemote(remoteName)
+    if not rec then return 0 end
+    local score = 0
+    -- Call frequency (normalized: 100+ calls = max)
+    score = score + math.min(rec.calls / 100, 1.0) * 0.25
+    -- Token candidates present = higher value
+    local tokenCount = 0
+    for _ in pairs(rec.tokenCandidates) do tokenCount = tokenCount + 1 end
+    score = score + math.min(tokenCount / 3, 1.0) * 0.20
+    -- State delta magnitude
+    local totalDelta = 0
+    for _, d in ipairs(rec.stateDeltas) do
+        totalDelta = totalDelta + math.abs(d.physDelta or 0)
+    end
+    score = score + math.min(totalDelta / 50, 1.0) * 0.25
+    -- ETM prediction confidence (higher conf = known target = more useful)
+    local prob, conv, _ = ETM.Predict("rsm_" .. remoteName,
+        RAE_State and RAE_State.CurrentSig or "unknown")
+    score = score + (prob or 0.5) * 0.30
+    return math.clamp(score, 0, 1)
+end
+
+-- ── Profile update ────────────────────────────────────────────
+local function RSM_UpdateProfile(remoteName)
+    local rec = PROT.GetRemote(remoteName)
+    if not rec then return end
+    if not profiles[remoteName] then
+        profiles[remoteName] = {
+            argTypes=PROT.GetArgSignature(remoteName),
+            stateCorr={}, depScore=0, dependencies={},
+            mutationMap={}, exploitScore=0, notes=""
+        }
+    end
+    local p = profiles[remoteName]
+    p.argTypes     = PROT.GetArgSignature(remoteName)
+    p.stateCorr    = computeStateCorrelation(remoteName)
+    p.dependencies = detectDependencies(remoteName)
+    p.exploitScore = calcExploitScore(remoteName)
+    -- Dependency score: sum of dependent remote counts
+    local depTotal = 0
+    for _, d in pairs(p.dependencies) do depTotal = depTotal + d.count end
+    p.depScore = depTotal
+    -- Note generation
+    local notes = {}
+    if p.exploitScore > 0.7 then table.insert(notes, "HIGH VALUE") end
+    if rec.isInvoke           then table.insert(notes, "invoke(bidirectional)") end
+    local tokenPositions = {}
+    for pos in pairs(rec.tokenCandidates) do
+        table.insert(tokenPositions, "pos"..pos)
+    end
+    if #tokenPositions > 0 then
+        table.insert(notes, "tokens@["..table.concat(tokenPositions,",").."]")
+    end
+    p.notes = table.concat(notes, " | ")
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function RSM.Update()
+    local reg = PROT.GetRegistry()
+    for name in pairs(reg) do RSM_UpdateProfile(name) end
+end
+
+function RSM.GetProfile(remoteName)    return profiles[remoteName] end
+function RSM.GetAllProfiles()          return profiles              end
+
+function RSM.GetTopTargets(n)
+    n = n or 5
+    local list = {}
+    for name, p in pairs(profiles) do
+        table.insert(list, { name=name, score=p.exploitScore, profile=p })
+    end
+    table.sort(list, function(a,b) return a.score > b.score end)
+    local out = {}
+    for i = 1, math.min(n, #list) do out[i] = list[i] end
+    return out
+end
+
+-- Returns the dependency chain leading to/from a remote
+function RSM.GetDependencyChain(remoteName)
+    local p = profiles[remoteName]
+    if not p then return {} end
+    local chain = {}
+    for name, d in pairs(p.dependencies) do
+        local avgDelay = d.count > 0 and (d.totalDelay / d.count) or 0
+        table.insert(chain, {
+            remote=name, coOccurrences=d.count, avgDelayMs=avgDelay*1000
+        })
+    end
+    table.sort(chain, function(a,b) return a.coOccurrences > b.coOccurrences end)
+    return chain
+end
+
+-- Save / Load
+function RSM.Save()
+    pcall(function()
+        local out = {}
+        for k, v in pairs(profiles) do
+            out[k] = { exploitScore=v.exploitScore, notes=v.notes,
+                       depScore=v.depScore }
+        end
+        _G[PERSIST_KEY] = out
+    end)
+end
+
+function RSM.Load()
+    pcall(function()
+        local stored = _G[PERSIST_KEY]
+        if type(stored) == "table" then
+            for k, v in pairs(stored) do
+                if not profiles[k] then
+                    profiles[k] = { argTypes={}, stateCorr={},
+                        depScore=v.depScore or 0, dependencies={},
+                        mutationMap={}, exploitScore=v.exploitScore or 0,
+                        notes=v.notes or "" }
+                end
+            end
+        end
+    end)
+end
+
+RSM.Load()
+return RSM
+end)()
+
+-- ============================================================
+-- SRM — STATE RECONSTRUCTION MODULE
+-- ============================================================
+-- Builds a probabilistic shadow model of server-side state by
+-- observing client-visible deltas and applying Bayesian inference
+-- over hidden variable distributions. Infers cooldowns, permission
+-- flags, economy thresholds, and anti-cheat counters.
+-- ============================================================
+local SRM = (function()
+local SRM = {}
+
+local PERSIST_KEY = "SRM_Shadow_" .. tostring(game.PlaceId)
+
+-- shadowState[varName] = {
+--   mean, variance, samples, lastUpdated,
+--   inferredType (cooldown|flag|counter|economy),
+--   confidence
+-- }
+local shadowState   = {}
+local observationLog = {} -- ordered list of {field, delta, t, remoteBefore}
+local CAP_OBS       = 300
+
+-- ── Observation ───────────────────────────────────────────────
+-- Called every few seconds to snapshot observable client state
+-- and diff against prior snapshot. Diffs feed the shadow model.
+local lastSnapshot = {}
+local function SRM_Snapshot()
+    local snap = {}
+    local char  = player.Character
+    local hum   = char and char:FindFirstChildOfClass("Humanoid")
+    local ls    = player:FindFirstChild("leaderstats")
+    -- Player stats
+    snap["player.health"]  = hum and hum.Health    or 0
+    snap["player.maxhealth"]= hum and hum.MaxHealth or 0
+    snap["player.walkspeed"]= hum and hum.WalkSpeed or 0
+    snap["player.jumppower"]= hum and hum.JumpPower  or 0
+    -- Leaderstats
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            if v:IsA("IntValue") or v:IsA("NumberValue") or v:IsA("StringValue") then
+                snap["leaderstats."..v.Name] = v.Value
+            end
+        end
+    end
+    return snap
+end
+
+local function SRM_ComputeDeltas(prev, curr)
+    local deltas = {}
+    for k, v in pairs(curr) do
+        local old = prev[k]
+        if old ~= nil and old ~= v then
+            deltas[k] = { from=old, to=v,
+                delta = type(v)=="number" and (v - old) or nil }
+        elseif old == nil then
+            deltas[k] = { from=nil, to=v, delta=nil }
+        end
+    end
+    return deltas
+end
+
+-- ── Bayesian update for a shadow variable ────────────────────
+local function SRM_BayesUpdate(varName, observedValue)
+    if not shadowState[varName] then
+        shadowState[varName] = {
+            mean=observedValue, variance=1.0,
+            samples={}, lastUpdated=os.clock(),
+            inferredType="unknown", confidence=0.0
+        }
+    end
+    local sv = shadowState[varName]
+    table.insert(sv.samples, observedValue)
+    if #sv.samples > 30 then table.remove(sv.samples, 1) end
+    -- Running mean/variance (Welford's)
+    local n    = #sv.samples
+    local sum  = 0; for _, s in ipairs(sv.samples) do sum = sum + (type(s)=="number" and s or 0) end
+    sv.mean    = sum / n
+    local varSum = 0
+    for _, s in ipairs(sv.samples) do
+        varSum = varSum + (type(s)=="number" and (s - sv.mean)^2 or 0)
+    end
+    sv.variance     = n > 1 and varSum/(n-1) or 1.0
+    sv.lastUpdated  = os.clock()
+    sv.confidence   = math.min(n / 15, 1.0)
+    -- Type inference from distribution shape
+    if type(observedValue) == "number" then
+        if observedValue >= 0 and sv.variance < 0.1 then
+            sv.inferredType = "counter"
+        elseif sv.variance > 100 then
+            sv.inferredType = "economy"
+        elseif sv.mean > 0 and sv.mean < 600 then
+            sv.inferredType = "cooldown"
+        else
+            sv.inferredType = "numeric"
+        end
+    elseif type(observedValue) == "boolean" then
+        sv.inferredType = "flag"
+    end
+end
+
+-- ── Cooldown inference ────────────────────────────────────────
+-- Looks for variables that go to 0 and then recover over time.
+-- Classic server cooldown signature: spike down → linear recovery.
+local function SRM_InferCooldowns()
+    local cooldowns = {}
+    for varName, sv in pairs(shadowState) do
+        if sv.inferredType == "cooldown" or sv.inferredType == "counter" then
+            if #sv.samples >= 4 then
+                -- Check for monotone recovery pattern
+                local rising = 0; local falling = 0
+                for i = 2, #sv.samples do
+                    local a = sv.samples[i-1]
+                    local b = sv.samples[i]
+                    if type(a)=="number" and type(b)=="number" then
+                        if b > a then rising  = rising  + 1
+                        elseif b < a then falling = falling + 1 end
+                    end
+                end
+                if rising > falling * 1.5 then
+                    -- Recovering variable — likely a cooldown timer
+                    cooldowns[varName] = {
+                        estimatedMax  = sv.mean + math.sqrt(sv.variance),
+                        recoveryRate  = sv.mean / math.max(#sv.samples, 1),
+                        confidence    = sv.confidence,
+                    }
+                end
+            end
+        end
+    end
+    return cooldowns
+end
+
+-- ── Hidden variable estimator ─────────────────────────────────
+-- Estimates server-only variables we can't observe directly,
+-- using the observable delta as a proxy signal.
+local function SRM_EstimateHiddenVars()
+    local hidden = {}
+    -- Anti-cheat counter proxy: sustained high remoteFires rate
+    local avgFires = LWM.GetTemporalAverage("remoteFires", 5)
+    if avgFires and avgFires > 8 then
+        hidden["ac_counter_est"] = {
+            estimate   = avgFires * 1.5,
+            confidence = 0.4,
+            note       = "elevated remoteFires suggests AC counter incrementing"
+        }
+    end
+    -- Permission level proxy: infer from which remotes succeed vs fail
+    -- (populated by SBI later)
+    -- Economy threshold proxy: look for large discrete leaderstats jumps
+    for varName, sv in pairs(shadowState) do
+        if sv.inferredType == "economy" and #sv.samples >= 2 then
+            local maxDelta = 0
+            for i = 2, #sv.samples do
+                local d = math.abs((sv.samples[i] or 0) - (sv.samples[i-1] or 0))
+                maxDelta = math.max(maxDelta, d)
+            end
+            if maxDelta > 0 then
+                hidden["economy_threshold_" .. varName] = {
+                    estimate   = maxDelta,
+                    confidence = sv.confidence * 0.6,
+                    note       = "largest observed discrete jump = likely transaction unit"
+                }
+            end
+        end
+    end
+    return hidden
+end
+
+-- ── Heartbeat update loop ─────────────────────────────────────
+local SRM_SnapInterval = 2.0
+local SRM_LastSnap     = 0
+
+local function SRM_Tick()
+    local now = os.clock()
+    if now - SRM_LastSnap < SRM_SnapInterval then return end
+    SRM_LastSnap = now
+    local curr    = SRM_Snapshot()
+    local deltas  = SRM_ComputeDeltas(lastSnapshot, curr)
+    for varName, info in pairs(deltas) do
+        if type(info.to) == "number" then
+            SRM_BayesUpdate(varName, info.to)
+        end
+        table.insert(observationLog, {
+            field=varName, delta=info.delta,
+            from=info.from, to=info.to, t=now,
+        })
+        if #observationLog > CAP_OBS then table.remove(observationLog, 1) end
+    end
+    lastSnapshot = curr
+end
+
+RunService.Heartbeat:Connect(SRM_Tick)
+
+-- ── Save / Load ───────────────────────────────────────────────
+function SRM.Save()
+    pcall(function()
+        local out = {}
+        for k, v in pairs(shadowState) do
+            out[k] = { mean=v.mean, variance=v.variance,
+                inferredType=v.inferredType, confidence=v.confidence }
+        end
+        _G[PERSIST_KEY] = out
+    end)
+end
+
+function SRM.Load()
+    pcall(function()
+        local stored = _G[PERSIST_KEY]
+        if type(stored) == "table" then
+            for k, v in pairs(stored) do
+                if not shadowState[k] then
+                    shadowState[k] = {
+                        mean=v.mean or 0, variance=v.variance or 1,
+                        samples={v.mean or 0}, lastUpdated=os.clock(),
+                        inferredType=v.inferredType or "unknown",
+                        confidence=v.confidence or 0
+                    }
+                end
+            end
+        end
+    end)
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function SRM.GetShadowState()        return shadowState                       end
+function SRM.GetObservationLog()     return observationLog                    end
+function SRM.GetInferredCooldowns()  return SRM_InferCooldowns()              end
+function SRM.GetHiddenVarEstimates() return SRM_EstimateHiddenVars()          end
+function SRM.GetVar(name)            return shadowState[name]                 end
+
+SRM.Load()
+return SRM
+end)()
+
+-- ============================================================
+-- SBI — SERVER BEHAVIOR INFERENCE
+-- ============================================================
+-- Classifies server validation logic per remote by combining
+-- PROT traffic patterns, SRM shadow state, and SARP correction
+-- signals. Outputs bypass-strategy hints for SARP Phoenix.
+-- ============================================================
+local SBI = (function()
+local SBI = {}
+
+local PERSIST_KEY = "SBI_Inference_" .. tostring(game.PlaceId)
+
+-- inferences[remoteName] = {
+--   guards = { {type, threshold, confidence, bypassHint} },
+--   validationClass = string,
+--   bypassStrategy  = string,
+--   lastUpdated     = number,
+-- }
+local inferences   = {}
+local bypassLog    = {} -- {remote, strategy, success, t}
+
+-- Guard types:
+--   RATE_LIMIT   — server throttles call frequency
+--   COOLDOWN     — server-side timer between calls
+--   ECONOMY      — resource balance check
+--   PERMISSION   — role/level/flag check
+--   SEQUENCE     — expects monotone counter / token
+--   UNKNOWN      — not yet classified
+
+-- ── Rate limit inference ──────────────────────────────────────
+local function inferRateLimit(remoteName)
+    local minGap = PROT.GetMinCallGap(remoteName)
+    if not minGap then return nil end
+    if minGap < 0.05 then return nil end -- too fast to be a limit
+    return {
+        type       = "RATE_LIMIT",
+        threshold  = minGap,
+        confidence = math.min(minGap * 2, 0.85),
+        bypassHint = string.format(
+            "Wait >= %.2fs between calls. Use SARP desync delay >= %.2fs.",
+            minGap, minGap * 1.1)
+    }
+end
+
+-- ── Cooldown inference ────────────────────────────────────────
+local function inferCooldowns(remoteName)
+    local guards = {}
+    local cooldowns = SRM.GetInferredCooldowns()
+    -- Match cooldown variables correlated to this remote's call patterns
+    local rec = PROT.GetRemote(remoteName)
+    if not rec then return guards end
+    for varName, cd in pairs(cooldowns) do
+        table.insert(guards, {
+            type       = "COOLDOWN",
+            variable   = varName,
+            threshold  = cd.estimatedMax,
+            confidence = cd.confidence * 0.7,
+            bypassHint = string.format(
+                "Cooldown on '%s' (est. max %.1f). "..
+                "Wait for variable to recover before retry.", varName, cd.estimatedMax)
+        })
+    end
+    return guards
+end
+
+-- ── Economy guard inference ───────────────────────────────────
+local function inferEconomyGuards(remoteName)
+    local guards  = {}
+    local hidden  = SRM.GetHiddenVarEstimates()
+    for varName, est in pairs(hidden) do
+        if varName:find("economy") then
+            table.insert(guards, {
+                type       = "ECONOMY",
+                variable   = varName,
+                threshold  = est.estimate,
+                confidence = est.confidence,
+                bypassHint = string.format(
+                    "Economy gate on '%s' (est. %.0f units). "..
+                    "Ensure balance >= threshold before firing.", varName, est.estimate)
+            })
+        end
+    end
+    return guards
+end
+
+-- ── Sequence/token guard inference ───────────────────────────
+local function inferSequenceGuard(remoteName)
+    local sig = PROT.GetArgSignature(remoteName)
+    for posIdx, info in pairs(sig) do
+        if info.tokenCandidate then
+            return {
+                type       = "SEQUENCE",
+                position   = posIdx,
+                confidence = 0.65,
+                bypassHint = string.format(
+                    "Arg position %d appears to be a sequence counter or session token. "..
+                    "Mirror last observed value. Do not mutate this position.", posIdx)
+            }
+        end
+    end
+    return nil
+end
+
+-- ── Classify overall validation ───────────────────────────────
+local function classify(guards)
+    local types = {}
+    for _, g in ipairs(guards) do types[g.type] = true end
+    if types["RATE_LIMIT"] and types["ECONOMY"] then
+        return "GUARDED_ECONOMY", "Time-gate before retry + balance check"
+    elseif types["COOLDOWN"] then
+        return "COOLDOWN_GATED",  "Wait for server cooldown expiry"
+    elseif types["RATE_LIMIT"] then
+        return "RATE_LIMITED",    "Respect minimum call interval"
+    elseif types["SEQUENCE"] then
+        return "TOKEN_GATED",     "Mirror sequence tokens exactly"
+    elseif types["ECONOMY"] then
+        return "ECONOMY_GATED",   "Satisfy resource balance condition"
+    else
+        return "UNKNOWN",         "No clear guard identified — probe required"
+    end
+end
+
+-- ── Update inference for a remote ────────────────────────────
+local function SBI_Update(remoteName)
+    local guards = {}
+    local rl = inferRateLimit(remoteName)
+    if rl then table.insert(guards, rl) end
+    for _, g in ipairs(inferCooldowns(remoteName)) do table.insert(guards, g) end
+    for _, g in ipairs(inferEconomyGuards(remoteName)) do table.insert(guards, g) end
+    local sq = inferSequenceGuard(remoteName)
+    if sq then table.insert(guards, sq) end
+    local vClass, strategy = classify(guards)
+    inferences[remoteName] = {
+        guards          = guards,
+        validationClass = vClass,
+        bypassStrategy  = strategy,
+        lastUpdated     = os.clock(),
+    }
+end
+
+-- ── Incorporate SARP correction fingerprints ─────────────────
+-- Called when SARP Phoenix returns a fingerprint so SBI can
+-- update its guard model with real server correction evidence.
+function SBI.IngestFingerprint(remoteName, fingerprint, channel)
+    if not remoteName or not fingerprint then return end
+    local inf = inferences[remoteName]
+    if not inf then
+        inferences[remoteName] = { guards={}, validationClass="UNKNOWN",
+            bypassStrategy="", lastUpdated=os.clock() }
+        inf = inferences[remoteName]
+    end
+    -- Fingerprint → guard hint
+    local hint = nil
+    if fingerprint == "POLICY:ZERO" then
+        hint = { type="ECONOMY", threshold=0, confidence=0.7,
+            bypassHint="Server zeros numeric values — economy floor check confirmed." }
+    elseif fingerprint == "POLICY:REVERT" then
+        hint = { type="RATE_LIMIT", threshold=0.5, confidence=0.6,
+            bypassHint="Server reverts to prior value — write rejected, rate limit likely." }
+    elseif fingerprint == "POLICY:CLEAR" then
+        hint = { type="PERMISSION", threshold=0, confidence=0.6,
+            bypassHint="Server clears attribute — permission or validation rejection." }
+    end
+    if hint then
+        table.insert(inf.guards, hint)
+        local vC, strat = classify(inf.guards)
+        inf.validationClass = vC
+        inf.bypassStrategy  = strat
+        inf.lastUpdated     = os.clock()
+    end
+    -- Log bypass attempt
+    table.insert(bypassLog, {
+        remote=remoteName, channel=channel,
+        fingerprint=fingerprint, t=os.clock()
+    })
+    if #bypassLog > 100 then table.remove(bypassLog, 1) end
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function SBI.UpdateAll()
+    RSM.Update()
+    local reg = PROT.GetRegistry()
+    for name in pairs(reg) do SBI_Update(name) end
+end
+
+function SBI.GetInference(remoteName) return inferences[remoteName] end
+function SBI.GetAllInferences()       return inferences              end
+function SBI.GetBypassLog()           return bypassLog               end
+
+function SBI.GetBypassHints(remoteName)
+    local inf = inferences[remoteName]
+    if not inf then return "No inference available — run SBI.UpdateAll() first." end
+    local lines = { "ValidationClass: " .. inf.validationClass }
+    table.insert(lines, "Strategy: " .. inf.bypassStrategy)
+    for _, g in ipairs(inf.guards) do
+        table.insert(lines, string.format("  [%s %.0f%%] %s",
+            g.type, (g.confidence or 0)*100, g.bypassHint or ""))
+    end
+    return table.concat(lines, "
+")
+end
+
+function SBI.Save()
+    pcall(function()
+        local out = {}
+        for k, v in pairs(inferences) do
+            out[k] = { validationClass=v.validationClass,
+                bypassStrategy=v.bypassStrategy,
+                guardCount=#v.guards }
+        end
+        _G[PERSIST_KEY] = out
+    end)
+end
+
+function SBI.Load()
+    pcall(function()
+        local stored = _G[PERSIST_KEY]
+        if type(stored) == "table" then
+            for k, v in pairs(stored) do
+                if not inferences[k] then
+                    inferences[k] = { guards={},
+                        validationClass=v.validationClass or "UNKNOWN",
+                        bypassStrategy=v.bypassStrategy or "",
+                        lastUpdated=os.clock() }
+                end
+            end
+        end
+    end)
+end
+
+SBI.Load()
+return SBI
+end)()
+
+-- ============================================================
+-- CKG — CROSS-SESSION KNOWLEDGE GRAPH
+-- ============================================================
+-- Persistent PlaceId-keyed knowledge store that accumulates
+-- discovered mechanics, remote patterns, anti-cheat signals,
+-- economy maps, and exploration session logs across sessions.
+-- The longer it runs the smarter every system becomes.
+-- ============================================================
+local CKG = (function()
+local CKG = {}
+
+local KEY_MECHANICS  = "CKG_Mechanics_"  .. tostring(game.PlaceId)
+local KEY_REMOTES    = "CKG_Remotes_"    .. tostring(game.PlaceId)
+local KEY_ACSIGNALS  = "CKG_ACSignals_"  .. tostring(game.PlaceId)
+local KEY_ECONOMY    = "CKG_Economy_"    .. tostring(game.PlaceId)
+local KEY_SESSIONS   = "CKG_Sessions_"   .. tostring(game.PlaceId)
+local KEY_HYPOTHESES = "CKG_Hypotheses_" .. tostring(game.PlaceId)
+
+-- In-memory tables (all saved to _G)
+local mechanics   = {} -- {id → {type, remote, args, successRate, discoveredAt}}
+local remotes     = {} -- {name → {pattern, behavior, priority, lastSeen}}
+local acSignals   = {} -- {signalType → {pattern, threshold, evadeHint, occurrences}}
+local economy     = {} -- {currency → {earnRemotes, spendRemotes, detectedRate}}
+local sessions    = {} -- {sessionIdx → {hypothesis, actions, outcome, t}}
+local hypotheses  = {} -- {id → {statement, tested, result, confidence}}
+
+local sessionIdx  = 0
+
+-- ── Load all from _G ─────────────────────────────────────────
+local function CKG_Load()
+    pcall(function()
+        if type(_G[KEY_MECHANICS])  == "table" then mechanics  = _G[KEY_MECHANICS]  end
+        if type(_G[KEY_REMOTES])    == "table" then remotes    = _G[KEY_REMOTES]    end
+        if type(_G[KEY_ACSIGNALS])  == "table" then acSignals  = _G[KEY_ACSIGNALS]  end
+        if type(_G[KEY_ECONOMY])    == "table" then economy    = _G[KEY_ECONOMY]    end
+        if type(_G[KEY_SESSIONS])   == "table" then sessions   = _G[KEY_SESSIONS]   end
+        if type(_G[KEY_HYPOTHESES]) == "table" then hypotheses = _G[KEY_HYPOTHESES] end
+        -- Determine sessionIdx from stored sessions
+        for k in pairs(sessions) do
+            local idx = tonumber(k)
+            if idx and idx > sessionIdx then sessionIdx = idx end
+        end
+        sessionIdx = sessionIdx + 1
+    end)
+end
+
+local function CKG_SaveAll()
+    pcall(function()
+        _G[KEY_MECHANICS]  = mechanics
+        _G[KEY_REMOTES]    = remotes
+        _G[KEY_ACSIGNALS]  = acSignals
+        _G[KEY_ECONOMY]    = economy
+        _G[KEY_SESSIONS]   = sessions
+        _G[KEY_HYPOTHESES] = hypotheses
+    end)
+end
+
+-- ── Mechanic registry ─────────────────────────────────────────
+function CKG.RegisterMechanic(mechType, remoteName, args, success)
+    local id = mechType .. "_" .. remoteName
+    if not mechanics[id] then
+        mechanics[id] = {
+            type=mechType, remote=remoteName, args=args or {},
+            successCount=0, totalCount=0,
+            discoveredAt=os.clock(), lastSeen=os.clock()
+        }
+    end
+    local m = mechanics[id]
+    m.totalCount   = m.totalCount + 1
+    m.lastSeen     = os.clock()
+    if success then m.successCount = m.successCount + 1 end
+    m.successRate  = m.successCount / m.totalCount
+    CKG_SaveAll()
+end
+
+function CKG.GetMechanics() return mechanics end
+
+-- ── Remote pattern library ────────────────────────────────────
+function CKG.UpdateRemote(remoteName, data)
+    if not remotes[remoteName] then
+        remotes[remoteName] = { pattern="", behavior="unknown",
+            priority=0, lastSeen=0, callCount=0 }
+    end
+    local r = remotes[remoteName]
+    if data.pattern  then r.pattern  = data.pattern  end
+    if data.behavior then r.behavior = data.behavior end
+    if data.priority then r.priority = data.priority end
+    r.lastSeen  = os.clock()
+    r.callCount = (r.callCount or 0) + 1
+    CKG_SaveAll()
+end
+
+function CKG.GetRemoteKnowledge(name) return remotes[name] end
+function CKG.GetAllRemoteKnowledge()  return remotes       end
+
+-- ── Anti-cheat signal catalog ─────────────────────────────────
+function CKG.RegisterACSignal(signalType, pattern, threshold, evadeHint)
+    if not acSignals[signalType] then
+        acSignals[signalType] = { pattern=pattern, threshold=threshold,
+            evadeHint=evadeHint, occurrences=0, firstSeen=os.clock() }
+    end
+    acSignals[signalType].occurrences = acSignals[signalType].occurrences + 1
+    acSignals[signalType].lastSeen    = os.clock()
+    if evadeHint then acSignals[signalType].evadeHint = evadeHint end
+    CKG_SaveAll()
+end
+
+function CKG.GetACSignals() return acSignals end
+
+-- ── Economy map ───────────────────────────────────────────────
+function CKG.MapEconomy(currency, earnRemote, spendRemote, rate)
+    if not economy[currency] then
+        economy[currency] = { earnRemotes={}, spendRemotes={}, rates={} }
+    end
+    local e = economy[currency]
+    if earnRemote  then e.earnRemotes[earnRemote]   = true end
+    if spendRemote then e.spendRemotes[spendRemote] = true end
+    if rate        then table.insert(e.rates, rate) end
+    CKG_SaveAll()
+end
+
+function CKG.GetEconomyMap() return economy end
+
+-- ── Session log ───────────────────────────────────────────────
+function CKG.OpenSession(hypothesis)
+    local rec = {
+        idx=sessionIdx, hypothesis=hypothesis or "exploration",
+        actions={}, outcome=nil, t=os.clock()
+    }
+    sessions[tostring(sessionIdx)] = rec
+    CKG_SaveAll()
+    return sessionIdx
+end
+
+function CKG.LogSessionAction(sidx, action, result)
+    local rec = sessions[tostring(sidx)]
+    if rec then
+        table.insert(rec.actions, { action=action, result=result, t=os.clock() })
+        CKG_SaveAll()
+    end
+end
+
+function CKG.CloseSession(sidx, outcome)
+    local rec = sessions[tostring(sidx)]
+    if rec then
+        rec.outcome  = outcome
+        rec.duration = os.clock() - rec.t
+        CKG_SaveAll()
+    end
+end
+
+function CKG.GetSessions() return sessions end
+
+-- ── Hypothesis registry ───────────────────────────────────────
+function CKG.AddHypothesis(statement)
+    local id = tostring(os.clock()):gsub("%.", "_")
+    hypotheses[id] = {
+        id=id, statement=statement,
+        tested=false, result=nil,
+        confidence=0.5, addedAt=os.clock()
+    }
+    CKG_SaveAll()
+    return id
+end
+
+function CKG.MarkHypothesisTested(hid, result, confidence)
+    local h = hypotheses[hid]
+    if h then
+        h.tested     = true
+        h.result     = result
+        h.confidence = confidence or 0.5
+        h.testedAt   = os.clock()
+        CKG_SaveAll()
+    end
+end
+
+function CKG.GetUntestedHypotheses()
+    local out = {}
+    for _, h in pairs(hypotheses) do
+        if not h.tested then table.insert(out, h) end
+    end
+    table.sort(out, function(a,b) return a.confidence > b.confidence end)
+    return out
+end
+
+function CKG.GetHypotheses() return hypotheses end
+function CKG.Save()          CKG_SaveAll()     end
+
+-- ── Auto-populate from live analysis ─────────────────────────
+-- Runs periodically to feed CKG from PROT/RSM/SRM/SBI analysis
+function CKG.AutoPopulate()
+    -- Register high-value remotes from RSM
+    local topTargets = RSM.GetTopTargets(10)
+    for _, t in ipairs(topTargets) do
+        CKG.UpdateRemote(t.name, {
+            priority = t.score,
+            behavior = t.profile and t.profile.notes or "",
+            pattern  = (function()
+                local sig = PROT.GetArgSignature(t.name)
+                local parts = {}
+                for pos, info in pairs(sig) do
+                    parts[pos] = info.dominantType
+                end
+                return table.concat(parts, ",")
+            end)()
+        })
+    end
+    -- Catalog AC signals from LWM
+    local avgFires = LWM.GetTemporalAverage("remoteFires", 5)
+    if avgFires and avgFires > 15 then
+        CKG.RegisterACSignal("HIGH_REMOTE_FIRES",
+            "remoteFires/tick > 15",
+            15,
+            "Throttle remote calls. Use Gamma-jittered delays between SARP flights.")
+    end
+    -- Auto-generate hypotheses from SBI inferences
+    local infs = SBI.GetAllInferences()
+    for remote, inf in pairs(infs) do
+        if inf.validationClass ~= "UNKNOWN" then
+            local stmt = string.format(
+                "Remote '%s' uses %s guard — can bypass via: %s",
+                remote, inf.validationClass, inf.bypassStrategy)
+            -- Only add if not already hypothesized
+            local exists = false
+            for _, h in pairs(hypotheses) do
+                if h.statement:find(remote, 1, true) then exists=true; break end
+            end
+            if not exists then CKG.AddHypothesis(stmt) end
+        end
+    end
+    CKG_SaveAll()
+end
+
+CKG_Load()
+return CKG
+end)()
+
+-- ============================================================
+-- APE — ACTIVE PROBING ENGINE
+-- ============================================================
+-- Systematically probes the game environment to discover hidden
+-- mechanics, map server validation, and expand the action space.
+-- Techniques: parameter fuzzing, type mutation, timing attacks,
+-- remote permutation scanning, dependency tracing.
+-- ============================================================
+local APE = (function()
+local APE = {}
+
+local PERSIST_KEY = "APE_Results_" .. tostring(game.PlaceId)
+
+-- results[remoteName] = {
+--   fuzzeTrials = {}, typeMutations = {}, timingMap = {},
+--   discoveredArgs = {}, status = "pending|active|complete"
+-- }
+local results     = {}
+local activeProbes = {}
+local probeQueue  = {} -- ordered list of pending probe tasks
+local APE_Running = false
+
+-- ── Fuzzing primitives ────────────────────────────────────────
+local FUZZ_STRING_CANDIDATES = {
+    "", "0", "1", "-1", "true", "false", "nil",
+    "admin", "give", "grant", "reward", "coins", "cash", "gems",
+    string.rep("A", 32), string.rep("0", 16),
+}
+local FUZZ_NUMBER_CANDIDATES = {
+    0, 1, -1, 2, 10, 100, 999, 9999, math.huge, -math.huge,
+    0.5, 0.001, 1e6,
+}
+local FUZZ_TYPE_SEQUENCE = {
+    "string", "number", "boolean", "nil"
+}
+
+-- Generate type mutation variants for a given argument signature
+local function APE_GenMutations(remoteName)
+    local sig      = PROT.GetArgSignature(remoteName)
+    local rec      = PROT.GetRemote(remoteName)
+    local variants = {}
+    if not rec then return variants end
+    -- For each arg position, generate type-mutated candidates
+    -- Skip token positions (don't want to corrupt auth)
+    for posIdx, info in pairs(sig) do
+        if not info.tokenCandidate then
+            -- String mutations
+            for _, sv in ipairs(FUZZ_STRING_CANDIDATES) do
+                table.insert(variants, {
+                    position=posIdx, value=sv, mutType="string"
+                })
+            end
+            -- Number mutations
+            for _, nv in ipairs(FUZZ_NUMBER_CANDIDATES) do
+                table.insert(variants, {
+                    position=posIdx, value=nv, mutType="number"
+                })
+            end
+            -- Boolean
+            table.insert(variants, { position=posIdx, value=true,  mutType="bool" })
+            table.insert(variants, { position=posIdx, value=false, mutType="bool" })
+        end
+    end
+    return variants
+end
+
+-- ── Timing attack ─────────────────────────────────────────────
+-- Fires a remote at progressively shorter intervals and observes
+-- when the server starts rejecting/rate-limiting.
+local function APE_TimingAttack(remoteName, baseArgs, onComplete)
+    local intervals = { 2.0, 1.0, 0.5, 0.25, 0.1, 0.05 }
+    local results_t = {}
+    local idx       = 0
+    local function nextInterval()
+        idx = idx + 1
+        if idx > #intervals then
+            onComplete(results_t); return
+        end
+        local iv  = intervals[idx]
+        -- Take a pre-shot LWM snapshot
+        local preDelta = LWM.GetDelta()
+        task.wait(iv)
+        -- We don't actually fire the remote (avoid bans) —
+        -- instead we measure whether the LWM remoteFires counter
+        -- changed during the window, which tells us if the interval
+        -- is below the server's floor.
+        local postDelta = LWM.GetDelta()
+        local fired = postDelta and preDelta and
+            (postDelta.remoteFires or 0) ~= (preDelta.remoteFires or 0)
+        table.insert(results_t, {
+            interval=iv, observedActivity=fired, t=os.clock()
+        })
+        nextInterval()
+    end
+    task.spawn(nextInterval)
+end
+
+-- ── Remote permutation scanner ────────────────────────────────
+-- Generates plausible remote names from known patterns and checks
+-- if they exist in ReplicatedStorage. Non-invasive — only checks
+-- existence, doesn't fire.
+local function APE_ScanPermutations(onResult)
+    local prefixes  = {"Give", "Grant", "Add", "Set", "Update",
+                       "Buy", "Sell", "Trade", "Request", "Get",
+                       "Fire", "Trigger", "Activate", "Use", "Open"}
+    local suffixes  = {"Coins", "Cash", "Gems", "XP", "Level",
+                       "Item", "Tool", "Reward", "Admin", "Role",
+                       "Permission", "Flag", "Status", "Quest"}
+    local discovered = {}
+    local rs = game:GetService("ReplicatedStorage")
+    for _, pref in ipairs(prefixes) do
+        for _, suff in ipairs(suffixes) do
+            local name = pref .. suff
+            local found = rs:FindFirstChild(name, true)
+            if found then
+                table.insert(discovered, {
+                    name     = name,
+                    class    = found.ClassName,
+                    fullPath = found:GetFullName(),
+                })
+                -- Register in PROT if not already known
+                if not PROT.GetRemote(name) then
+                    PROT.Record(name, found:GetFullName(), {}, false)
+                end
+                CKG.UpdateRemote(name, {
+                    behavior="discovered_by_scan", priority=0.3
+                })
+            end
+        end
+    end
+    if onResult then onComplete(discovered) end
+    return discovered
+end
+
+-- ── Dependency tracer ─────────────────────────────────────────
+-- Checks if firing remote A changes the behavior/success of remote B
+-- by observing LWM state between the two calls.
+local function APE_TraceDepend(remoteA, remoteB, onResult)
+    local beforeDelta = LWM.GetDelta()
+    -- We observe, not fire — compare what the LWM shows
+    -- in the window between two observed calls in the PROT log
+    local callLog = PROT.GetCallLog()
+    local seqPairs = {}
+    for i, entry in ipairs(callLog) do
+        if entry.name == remoteA then
+            for j = i+1, math.min(i+10, #callLog) do
+                if callLog[j].name == remoteB then
+                    table.insert(seqPairs, {
+                        gap    = callLog[j].t - entry.t,
+                        aIdx   = i,
+                        bIdx   = j,
+                    })
+                    break
+                end
+            end
+        end
+    end
+    if onResult then
+        onResult({
+            remoteA   = remoteA,
+            remoteB   = remoteB,
+            pairsFound= #seqPairs,
+            avgGap    = (function()
+                if #seqPairs == 0 then return nil end
+                local s=0; for _,p in ipairs(seqPairs) do s=s+p.gap end
+                return s/#seqPairs
+            end)(),
+            note      = #seqPairs > 0
+                and string.format("%s typically precedes %s by %.2fs",
+                    remoteA, remoteB,
+                    (function() local s=0
+                        for _,p in ipairs(seqPairs) do s=s+p.gap end
+                        return #seqPairs>0 and s/#seqPairs or 0
+                    end)())
+                or "No sequential pair found in log"
+        })
+    end
+end
+
+-- ── Queue-based probe executor ────────────────────────────────
+local function APE_Dequeue()
+    if #probeQueue == 0 then APE_Running = false; return end
+    APE_Running = true
+    local task_t = table.remove(probeQueue, 1)
+    task.spawn(function()
+        task_t.fn()
+        task.wait(0.3 + math.random() * 0.2)
+        APE_Dequeue()
+    end)
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function APE.QueueTimingAttack(remoteName, args)
+    table.insert(probeQueue, { fn=function()
+        if not results[remoteName] then results[remoteName]={} end
+        APE_TimingAttack(remoteName, args, function(res)
+            results[remoteName].timingMap = res
+            -- Feed min safe interval into SBI
+            local minSafe = math.huge
+            for _, r in ipairs(res) do
+                if r.observedActivity and r.interval < minSafe then
+                    minSafe = r.interval
+                end
+            end
+            if minSafe < math.huge then
+                SBI.IngestFingerprint(remoteName,
+                    "RATE_LIMIT_MEASURED:" .. tostring(minSafe), "APE")
+            end
+            APE.Save()
+        end)
+    end})
+    if not APE_Running then APE_Dequeue() end
+end
+
+function APE.QueuePermutationScan()
+    table.insert(probeQueue, { fn=function()
+        local found = APE_ScanPermutations(nil)
+        CKG.LogSessionAction(CKG_SessionID or 0,
+            "permutation_scan", string.format("found %d remotes", #found))
+        APE.Save()
+    end})
+    if not APE_Running then APE_Dequeue() end
+end
+
+function APE.QueueDependencyTrace(remoteA, remoteB)
+    table.insert(probeQueue, { fn=function()
+        APE_TraceDepend(remoteA, remoteB, function(res)
+            if not results[remoteA] then results[remoteA] = {} end
+            results[remoteA].dependencies = results[remoteA].dependencies or {}
+            results[remoteA].dependencies[remoteB] = res
+            -- Feed into RSM profile
+            local profile = RSM.GetProfile(remoteA)
+            if profile then
+                profile.dependencies[remoteB] = {
+                    count      = res.pairsFound,
+                    totalDelay = (res.avgGap or 0) * res.pairsFound,
+                }
+            end
+            APE.Save()
+        end)
+    end})
+    if not APE_Running then APE_Dequeue() end
+end
+
+function APE.QueueMutationMap(remoteName)
+    table.insert(probeQueue, { fn=function()
+        if not results[remoteName] then results[remoteName] = {} end
+        local mutations = APE_GenMutations(remoteName)
+        results[remoteName].mutationCandidates = mutations
+        results[remoteName].mutationCount = #mutations
+        APE.Save()
+    end})
+    if not APE_Running then APE_Dequeue() end
+end
+
+function APE.RunFullProbe(remoteName)
+    APE.QueueTimingAttack(remoteName, {})
+    APE.QueueMutationMap(remoteName)
+    -- Trace dependencies with top 3 other remotes
+    local tops = RSM.GetTopTargets(4)
+    for _, t in ipairs(tops) do
+        if t.name ~= remoteName then
+            APE.QueueDependencyTrace(remoteName, t.name)
+        end
+    end
+end
+
+function APE.RunBootProbe()
+    APE.QueuePermutationScan()
+    local tops = RSM.GetTopTargets(5)
+    for _, t in ipairs(tops) do
+        APE.RunFullProbe(t.name)
+    end
+end
+
+function APE.GetResults()              return results        end
+function APE.GetResult(remoteName)     return results[remoteName] end
+function APE.IsRunning()               return APE_Running    end
+function APE.GetQueueLength()          return #probeQueue    end
+
+function APE.Save()
+    pcall(function()
+        local out = {}
+        for k, v in pairs(results) do
+            out[k] = {
+                mutationCount = v.mutationCount or 0,
+                timingMapLen  = v.timingMap and #v.timingMap or 0,
+                status        = v.status or "partial",
+            }
+        end
+        _G[PERSIST_KEY] = out
+    end)
+end
+
+function APE.Load()
+    pcall(function()
+        local stored = _G[PERSIST_KEY]
+        if type(stored) == "table" then
+            for k, v in pairs(stored) do
+                results[k] = { status=v.status or "partial",
+                    mutationCount=v.mutationCount or 0 }
+            end
+        end
+    end)
+end
+
+APE.Load()
+return APE
+end)()
+
+-- ============================================================
+-- ASE — AUTONOMOUS STRATEGY ENGINE
+-- ============================================================
+-- Generates and executes multi-session exploration strategies.
+-- Reads from CKG for prior knowledge, generates hypotheses,
+-- schedules APE probes and SARP flights to test them, and
+-- coordinates cross-session learning into exploit pathways.
+-- ============================================================
+local ASE = (function()
+local ASE = {}
+
+local PERSIST_KEY = "ASE_State_" .. tostring(game.PlaceId)
+
+-- Strategy state
+local currentPlan      = nil  -- {steps=[], stepIdx, sessionID, goal}
+local exploitPathways  = {}   -- discovered chains that produce value
+local ASE_SessionID    = nil
+local strategyLog      = {}   -- ordered log of strategy events
+local CAP_STRAT_LOG    = 200
+local ASE_Active       = false
+
+-- ── Hypothesis generator ──────────────────────────────────────
+-- Generates testable hypotheses from RSM/SBI/CKG state.
+-- Returns a prioritized list of hypothesis objects.
+local function ASE_GenerateHypotheses()
+    local hyps = {}
+    -- From RSM top targets
+    local tops = RSM.GetTopTargets(8)
+    for _, t in ipairs(tops) do
+        local inf = SBI.GetInference(t.name)
+        if inf and inf.validationClass ~= "UNKNOWN" then
+            table.insert(hyps, {
+                type       = "BYPASS",
+                target     = t.name,
+                statement  = string.format(
+                    "Bypass %s guard on '%s' (score %.2f)",
+                    inf.validationClass, t.name, t.score),
+                confidence = t.score * 0.8,
+                action     = "SARP_EXECUTE",
+                params     = { remote=t.name, channel="Attribute" },
+            })
+        end
+    end
+    -- From untested CKG hypotheses
+    local untested = CKG.GetUntestedHypotheses()
+    for _, h in ipairs(untested) do
+        table.insert(hyps, {
+            type       = "PRIOR",
+            hid        = h.id,
+            statement  = h.statement,
+            confidence = h.confidence,
+            action     = "PROBE",
+            params     = {},
+        })
+    end
+    -- From SRM cooldown inferences
+    local cooldowns = SRM.GetInferredCooldowns()
+    for varName, cd in pairs(cooldowns) do
+        table.insert(hyps, {
+            type       = "COOLDOWN_MAP",
+            statement  = string.format(
+                "Map cooldown on '%s' (est max %.1f, conf %.0f%%)",
+                varName, cd.estimatedMax, cd.confidence*100),
+            confidence = cd.confidence,
+            action     = "OBSERVE",
+            params     = { variable=varName },
+        })
+    end
+    -- Sort by confidence desc
+    table.sort(hyps, function(a,b) return a.confidence > b.confidence end)
+    return hyps
+end
+
+-- ── Plan builder ──────────────────────────────────────────────
+local function ASE_BuildPlan(goal)
+    local hyps  = ASE_GenerateHypotheses()
+    local steps = {}
+    -- Step 1: Always run SBI update and APE permutation scan
+    table.insert(steps, { type="ANALYZE",  desc="Update SBI inference" })
+    table.insert(steps, { type="SCAN",     desc="APE permutation scan" })
+    -- Step 2: For top hypotheses, add probe or execute steps
+    for i, h in ipairs(hyps) do
+        if i > 5 then break end
+        if h.action == "SARP_EXECUTE" then
+            table.insert(steps, {
+                type   = "EXECUTE",
+                desc   = "SARP flight: " .. h.statement,
+                params = h.params,
+                hid    = h.hid,
+            })
+        elseif h.action == "PROBE" then
+            table.insert(steps, {
+                type   = "PROBE",
+                desc   = "APE probe: " .. h.statement,
+                params = h.params,
+                hid    = h.hid,
+            })
+        elseif h.action == "OBSERVE" then
+            table.insert(steps, {
+                type   = "OBSERVE",
+                desc   = "SRM observe: " .. h.statement,
+                params = h.params,
+            })
+        end
+    end
+    -- Step 3: Auto-populate CKG with findings
+    table.insert(steps, { type="PERSIST", desc="Save all modules to _G" })
+    return {
+        goal     = goal or "autonomous_exploration",
+        steps    = steps,
+        stepIdx  = 0,
+        built    = os.clock(),
+    }
+end
+
+-- ── Step executor ─────────────────────────────────────────────
+local function ASE_ExecuteStep(step, onDone)
+    table.insert(strategyLog, {
+        step=step.type, desc=step.desc, t=os.clock()
+    })
+    if #strategyLog > CAP_STRAT_LOG then table.remove(strategyLog, 1) end
+
+    if step.type == "ANALYZE" then
+        SBI.UpdateAll()
+        RSM.Update()
+        onDone(true, "SBI+RSM updated")
+
+    elseif step.type == "SCAN" then
+        APE.QueuePermutationScan()
+        onDone(true, "permutation scan queued")
+
+    elseif step.type == "PROBE" then
+        local target = step.params and step.params.remote
+        if target then APE.RunFullProbe(target) end
+        if step.hid then
+            CKG.MarkHypothesisTested(step.hid, "probed", 0.5)
+        end
+        onDone(true, "probe queued for " .. tostring(target))
+
+    elseif step.type == "EXECUTE" then
+        -- Build a SARP flight for the target remote via AttachmentBridge
+        -- (safest channel for discovery — least likely to cause AC spike)
+        local params = step.params or {}
+        local payload = params.remote or "ase_probe"
+        local wrapped, simResult, err = SARP.Build(
+            "AttachmentBridge", payload, nil, nil, "Self")
+        if err then
+            onDone(false, "SARP build failed: " .. err)
+            return
+        end
+        SARP.Execute(wrapped, simResult, "Self", function(success, rec, finalStr)
+            local outcome = success and "lingered" or ("failed: "..(finalStr or ""))
+            -- Feed result back into CKG and SBI
+            CKG.RegisterMechanic("sarp_flight", params.remote or "unknown",
+                params, success)
+            if step.hid then
+                CKG.MarkHypothesisTested(step.hid, outcome,
+                    success and 0.85 or 0.35)
+            end
+            -- Discover exploit pathway if successful
+            if success then
+                table.insert(exploitPathways, {
+                    remote    = params.remote,
+                    channel   = params.channel or "AttachmentBridge",
+                    discoveredAt = os.clock(),
+                    note      = step.desc,
+                })
+            end
+            onDone(success, outcome)
+        end)
+
+    elseif step.type == "OBSERVE" then
+        -- Just snapshot SRM and note it
+        local variable = step.params and step.params.variable
+        local sv = variable and SRM.GetVar(variable)
+        local note = sv and string.format(
+            "mean=%.2f var=%.2f type=%s conf=%.0f%%",
+            sv.mean, sv.variance, sv.inferredType, sv.confidence*100)
+            or "variable not yet in shadow state"
+        onDone(true, note)
+
+    elseif step.type == "PERSIST" then
+        PROT.Save(); RSM.Save(); SRM.Save()
+        SBI.Save();  CKG.Save(); APE.Save()
+        ASE.Save()
+        onDone(true, "all modules persisted")
+
+    else
+        onDone(false, "unknown step type: " .. tostring(step.type))
+    end
+end
+
+-- ── Plan runner ───────────────────────────────────────────────
+local function ASE_RunNextStep()
+    if not currentPlan then ASE_Active=false; return end
+    local steps = currentPlan.steps
+    currentPlan.stepIdx = currentPlan.stepIdx + 1
+    if currentPlan.stepIdx > #steps then
+        -- Plan complete
+        ASE_Active = false
+        CKG.CloseSession(ASE_SessionID, "plan_complete")
+        sendNotification(string.format(
+            "ASE plan complete — %d steps, %d pathways found.",
+            #steps, #exploitPathways), "Success")
+        ASE.Save()
+        return
+    end
+    local step = steps[currentPlan.stepIdx]
+    ASE_ExecuteStep(step, function(success, note)
+        CKG.LogSessionAction(ASE_SessionID,
+            step.type .. ":" .. step.desc,
+            (success and "OK" or "FAIL") .. " " .. tostring(note))
+        -- Humanized inter-step delay
+        local delay = 0.5 + math.random() * 1.0
+        task.delay(delay, ASE_RunNextStep)
+    end)
+end
+
+-- ── Public API ────────────────────────────────────────────────
+function ASE.Start(goal)
+    if ASE_Active then
+        sendNotification("ASE already running.", "Warning"); return
+    end
+    ASE_Active    = true
+    currentPlan   = ASE_BuildPlan(goal)
+    ASE_SessionID = CKG.OpenSession(goal or "autonomous_exploration")
+    sendNotification(string.format(
+        "ASE started — %d step plan. Goal: %s",
+        #currentPlan.steps, currentPlan.goal), "Info")
+    task.spawn(ASE_RunNextStep)
+end
+
+function ASE.Stop()
+    ASE_Active  = false
+    currentPlan = nil
+    CKG.CloseSession(ASE_SessionID, "user_stopped")
+    sendNotification("ASE stopped.", "Warning")
+end
+
+function ASE.GetPlan()             return currentPlan     end
+function ASE.GetPathways()         return exploitPathways end
+function ASE.GetStrategyLog()      return strategyLog     end
+function ASE.IsActive()            return ASE_Active      end
+function ASE.GetGeneratedHyps()    return ASE_GenerateHypotheses() end
+
+function ASE.Save()
+    pcall(function()
+        _G[PERSIST_KEY] = {
+            exploitPathways = exploitPathways,
+            strategyLogLen  = #strategyLog,
+        }
+    end)
+end
+
+function ASE.Load()
+    pcall(function()
+        local stored = _G[PERSIST_KEY]
+        if type(stored) == "table" then
+            if type(stored.exploitPathways) == "table" then
+                exploitPathways = stored.exploitPathways
+            end
+        end
+    end)
+end
+
+-- Boot: update RSM/SBI on load so data is ready immediately
+task.delay(5, function()
+    RSM.Update()
+    SBI.UpdateAll()
+    CKG.AutoPopulate()
+    APE.RunBootProbe()
+end)
+
+ASE.Load()
+return ASE
+end)()
+
 -- ============================================================
 -- NAVIGATION SYSTEM
 -- ============================================================
@@ -6874,10 +8640,19 @@ _G.RAE_Engine = {
     CDG    = CDG,
     LWM    = LWM,
     Intel  = Intel,
-    StateSignature = StateSignature,
-    SaveSession    = SaveSession,
-    LoadSession    = LoadSession,
+    StateSignature    = StateSignature,
+    SaveSession       = SaveSession,
+    LoadSession       = LoadSession,
     ComputeBrierScore = ComputeBrierScore,
+    -- Deep Stack (v5)
+    PROT = PROT,
+    RSM  = RSM,
+    SRM  = SRM,
+    SBI  = SBI,
+    APE  = APE,
+    CKG  = CKG,
+    ASE  = ASE,
+    SARP = SARP,
 }
 
 -- ============================================================
@@ -6907,5 +8682,27 @@ end
 
 if player.Character then task.spawn(bootRAE)
 else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
+
+-- ── Deep stack periodic sync ──────────────────────────────────
+-- Every 30 seconds: refresh RSM profiles, update SBI inferences,
+-- auto-populate CKG, and persist everything to _G.
+local DS_SyncInterval = 30
+task.spawn(function()
+    while true do
+        task.wait(DS_SyncInterval)
+        pcall(function()
+            RSM.Update()
+            SBI.UpdateAll()
+            CKG.AutoPopulate()
+            PROT.Save()
+            RSM.Save()
+            SRM.Save()
+            SBI.Save()
+            CKG.Save()
+            APE.Save()
+            ASE.Save()
+        end)
+    end
+end)
 
 -- END OF SCRIPT
