@@ -5622,11 +5622,13 @@ function PR_ProtocolFingerprint.Compute()
     end
     table.sort(entries)
     local concat = table.concat(entries, "|")
-    -- Simple FNV-1a-style hash over the string
-    local hash = 2166136261
+    -- Simple FNV-1a-style hash (pure arithmetic, no bit32 dependency)
+    -- XOR via: a XOR b = (a + b) - 2*(a AND b)
+    -- Faster alternative: avoid XOR entirely, use djb2-style additive hash
+    local hash = 5381
     for i = 1, #concat do
-        hash = bit32.bxor(hash, string.byte(concat, i))
-        hash = (hash * 16777619) % (2^32)
+        local b = string.byte(concat, i)
+        hash = ((hash * 31) + b) % 4294967296
     end
     -- Role map: count per semantic role
     local roleMap = {}
@@ -7333,7 +7335,11 @@ function SARP.Execute(wrapped, simResult, targetName, onComplete)
     -- PR channel override: if Protocol Reconstruction has a high-confidence channel
     -- suggestion (e.g. AC pressure → AttachmentBridge, calibrated echo → Attribute),
     -- re-wrap the payload on the suggested channel before flight.
-    local prChannel = pcall(PR_Bridge.GetSuggestedChannel) and PR_Bridge.GetSuggestedChannel() or nil
+    local prChannel = nil
+    if type(PR_Bridge) == "table" and type(PR_Bridge.GetSuggestedChannel) == "function" then
+        local _ok, _ch = pcall(PR_Bridge.GetSuggestedChannel)
+        if _ok and type(_ch) == "string" then prChannel = _ch end
+    end
     if prChannel and prChannel ~= wrapped.Channel then
         local reWrapped, reErr
         if prChannel == "Attribute" then
@@ -8371,11 +8377,13 @@ do
         for _, entry in ipairs(sorted) do
             local name = entry.name
             local rec  = entry.rec
-            -- Apply filters
-            if PR_FilterRole  ~= "ALL" and rec.SemanticRole ~= PR_FilterRole  then goto continue end
-            if PR_FilterClass ~= "ALL" and rec.FreqClass    ~= PR_FilterClass  then goto continue end
-            if PR_FilterDir   ~= "ALL" and rec.Direction    ~= PR_FilterDir    then goto continue end
-            if searchLower ~= "" and not name:lower():find(searchLower, 1, true) then goto continue end
+            -- Apply filters (no goto — maximum executor compatibility)
+            local skip = false
+            if PR_FilterRole  ~= "ALL" and rec.SemanticRole ~= PR_FilterRole  then skip = true end
+            if PR_FilterClass ~= "ALL" and rec.FreqClass    ~= PR_FilterClass  then skip = true end
+            if PR_FilterDir   ~= "ALL" and rec.Direction    ~= PR_FilterDir    then skip = true end
+            if searchLower ~= "" and not name:lower():find(searchLower, 1, true) then skip = true end
+            if not skip then
             shown = shown + 1
             if shown > 120 then break end  -- cap render
 
@@ -8413,7 +8421,7 @@ do
                 Position=UDim2.new(0,6,0,33),Size=UDim2.new(1,-12,0,12),
                 TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
 
-            ::continue::
+            end -- if not skip
         end
         if shown == 0 then
             mk("TextLabel",{Text="No remotes match current filter.",BackgroundTransparency=1,
