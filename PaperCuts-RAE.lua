@@ -4786,18 +4786,22 @@ function PR_Interceptor.HookOutgoing()
         return false
     end
     local ok, err = pcall(function()
-        local mt = getrawmetatable(game)
-        local oldNC = mt.__namecall
+        local mt  = getrawmetatable(game)
+        local oldNC = rawget(mt, "__namecall")  -- use rawget so nil is valid
         setreadonly(mt, false)
         local function newNC(self, ...)
             local method = getnamecallmethod()
             if method == "FireServer" or method == "InvokeServer" then
-                local name = self.Name
-                if PR_Registry[name] then
+                local name
+                local nameOk = pcall(function() name = self.Name end)
+                if nameOk and name and PR_Registry[name] then
                     PR_Interceptor.OnFire(name, "C2S", {...}, os.clock())
                 end
             end
-            return oldNC(self, ...)
+            -- Guard: only call oldNC if it exists and is callable
+            if oldNC then
+                return oldNC(self, ...)
+            end
         end
         mt.__namecall = newcclosure and newcclosure(newNC) or newNC
         setreadonly(mt, true)
