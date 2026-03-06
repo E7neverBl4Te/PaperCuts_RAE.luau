@@ -234,7 +234,7 @@ _G.PCU = {
     getCharacter=getCharacter, getHumanoid=getHumanoid,
     applyHumanoidSetting=applyHumanoidSetting,
     persistent=persistent, blur=blur,
-    window=window, topbar=topbar, controls=controls,
+    screenGui=screenGui, window=window, topbar=topbar, controls=controls,
     btnMin=btnMin, btnClose=btnClose,
     body=body, bodyRow=bodyRow, sidebar=sidebar,
     navHolder=navHolder, contentCard=contentCard,

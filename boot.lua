@@ -26,6 +26,7 @@ local StateSignature = _C.StateSignature
 local ComputeBrierScore = _C.ComputeBrierScore
 local sendNotification = _U.sendNotification
 local window         = _U.window
+local screenGui      = _U.screenGui
 local topbar         = _U.topbar
 local btnMin         = _U.btnMin
 local btnClose       = _U.btnClose
