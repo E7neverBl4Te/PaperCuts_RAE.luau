@@ -1799,6 +1799,7 @@ local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
 local pageSARP      = makePage("SARP")
+local pagePR        = makePage("PR")
 
 -- ============================================================
 -- PAGE: Overview
@@ -3319,7 +3320,7 @@ do
         Text="Paper & Clay + RAE v2.0 — Deep Intelligence Edition\n\nRAE (Recursive Autonomous Engine) is a 7-layer autonomous agent extended with four new deep intelligence modules:\n\n• StateSignature φ(S): Compact, canonical, hash-stable state token enabling state-conditional learning.\n• LWM (Living World Model): Ring-buffer temporal model with delta tracking and remote co-firing registry.\n• ETM (Empirical Transition Model): State-conditional Bayesian P(success|card, φ(S)) with Welford variance and convergence detection.\n• CDG (Causal Dependency Graph): Co-execution effect size and confidence tracking for causal chain reordering.\n• Risk-Adjusted MCTS: E[U(π)] − λ·Var[U(π)] planning criterion with ETM-blended rollouts.\n• Session Persistence: IntelMem, ETM, CDG tables stored in _G across sessions.\n• Brier Calibration: Predicted probability vs actual outcome tracking.",
         TextColor3=Color3.fromRGB(72,66,60),TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Size=UDim2.new(1,0,0,200),Parent=sAbout})
     local _, sLinks=makeSection(pageAbout,"Quick Nav")
-    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"},{"Open SARP Tab","SARP"}}
+    local navLinks={{"Open RAE Tab","RAE"},{"Open Analytics Tab","Analytics"},{"Open Recursive Tab","Recursive"},{"Open Forge Tab","Forge"},{"Open SARP Tab","SARP"},{"Open PR Tab","PR"}}
     for _,nl in ipairs(navLinks) do
         local nb=makeButton(sLinks,nl[1],UDim2.new(0,220,0,36),"→"); nb.Button.BackgroundColor3=Color3.fromRGB(220,230,255)
         local targetName=nl[2]
@@ -3330,7 +3331,7 @@ do
                 Overview=pageOverview, Player=pagePlayer, Camera=pageCamera, World=pageWorld,
                 Discovery=pageDiscovery, RAE=pageRAE, Recursive=pageRecursive, Bridge=pageBridge,
                 Analytics=pageAnalytics, Chain=pageChain, Utilities=pageUtils, About=pageAbout,
-                Forge=pageForge, SARP=pageSARP
+                Forge=pageForge, SARP=pageSARP, PR=pagePR
             }
             if pages[targetName] then pages[targetName].Visible=true; panelTitle.Text=targetName end
         end)
@@ -5281,6 +5282,483 @@ end
 function PR_Analytics.Print() print(PR_Analytics.GetReport()) end
 
 -- ============================================================
+-- ============================================================
+-- CLASSIFIER — semantic role detection per remote
+-- Classifies each remote into one of: MOVEMENT, COMBAT, ECONOMY,
+-- ANTICHEAT, UI, SYNC, HEARTBEAT, CHAT, SPAWN, UNKNOWN.
+-- Uses arg schema, fire pattern, name heuristics, and sequence
+-- context. Results stored in rec.SemanticRole.
+-- ============================================================
+local PR_Classifier = {}
+
+-- Name-based keyword heuristics
+local PR_ROLE_KEYWORDS = {
+    MOVEMENT  = { "move","walk","run","jump","dash","fly","swim","tele","warp","pos","cframe","velocity","sprint" },
+    COMBAT    = { "shoot","fire","damage","hurt","kill","attack","hit","bullet","weapon","gun","sword","ability","skill","ability","cast","boom","explode" },
+    ECONOMY   = { "buy","sell","purchase","trade","coin","cash","credit","gem","currency","reward","shop","store","price","gold","money","balance" },
+    ANTICHEAT = { "ac","anticheat","check","verify","report","kick","ban","detect","monitor","flag","trust","auth","token","heartbeat" },
+    UI        = { "gui","ui","menu","open","close","show","hide","button","click","tab","panel","hud","notif","popup","dialog","alert" },
+    SYNC      = { "sync","update","replicate","state","status","refresh","init","ready","tick","frame","interval","poll" },
+    HEARTBEAT = { "heart","ping","pong","alive","keepalive","pulse","beat","tick" },
+    CHAT      = { "chat","message","msg","say","whisper","channel","voice" },
+    SPAWN     = { "spawn","respawn","load","join","enter","leave","exit","char","character" },
+}
+
+function PR_Classifier.ClassifyByName(name)
+    local lower = name:lower()
+    for role, keywords in pairs(PR_ROLE_KEYWORDS) do
+        for _, kw in ipairs(keywords) do
+            if lower:find(kw, 1, true) then return role end
+        end
+    end
+    return nil
+end
+
+function PR_Classifier.ClassifyByPattern(rec)
+    -- HEARTBEAT: very high-frequency, low arg-count, PERIODIC
+    if rec.FreqClass == "PERIODIC" and rec.AvgHz > 0.5 and rec.ArgCountMax <= 2 then
+        return "HEARTBEAT"
+    end
+    -- ANTICHEAT: periodic with no observed C2S origin, or exclusively S2C
+    if rec.FreqClass == "PERIODIC" and rec.Direction == "S2C" and rec.ArgCountMax <= 3 then
+        return "ANTICHEAT"
+    end
+    -- MOVEMENT: periodic C2S or BOTH, 3-7 args, typically has Vector3/CFrame schema
+    if rec.FreqClass == "PERIODIC" and (rec.Direction == "C2S" or rec.Direction == "BOTH") then
+        for _, slot in ipairs(rec.ArgSchema) do
+            if slot.DominantType == "CFrame" or slot.DominantType == "Vector3" then
+                return "MOVEMENT"
+            end
+        end
+    end
+    -- ECONOMY: burst C2S with number args
+    if rec.FreqClass == "BURST" and rec.C2SCount > 0 then
+        for _, slot in ipairs(rec.ArgSchema) do
+            if slot.DominantType == "number" and slot.NumberMin and slot.NumberMin >= 0 then
+                return "ECONOMY"
+            end
+        end
+    end
+    -- SYNC: BURST or EVENT, S2C dominant, medium arg count
+    if rec.Direction == "S2C" and rec.FreqClass ~= "RARE" then
+        return "SYNC"
+    end
+    return nil
+end
+
+function PR_Classifier.ClassifyBySchema(rec)
+    local hasCFrame, hasString, hasNumber, hasBool = false, false, false, false
+    for _, slot in ipairs(rec.ArgSchema) do
+        PR_SchemaInfer.FinalizeSlot(slot)
+        if slot.DominantType == "CFrame" or slot.DominantType == "Vector3" then hasCFrame = true end
+        if slot.DominantType == "string"  then hasString = true end
+        if slot.DominantType == "number"  then hasNumber = true end
+        if slot.DominantType == "boolean" then hasBool   = true end
+    end
+    if hasCFrame then return "MOVEMENT" end
+    if hasString and hasBool and rec.C2SCount > 0 then return "UI" end
+    return nil
+end
+
+function PR_Classifier.Classify(rec)
+    -- Name heuristic is highest priority
+    local role = PR_Classifier.ClassifyByName(rec.Name)
+    if not role then role = PR_Classifier.ClassifyByPattern(rec) end
+    if not role then role = PR_Classifier.ClassifyBySchema(rec) end
+    rec.SemanticRole = role or "UNKNOWN"
+    return rec.SemanticRole
+end
+
+function PR_Classifier.ClassifyAll()
+    for _, rec in pairs(PR_Registry) do
+        PR_Classifier.Classify(rec)
+    end
+end
+
+-- ============================================================
+-- ANOMALY DETECTOR — baseline deviation + AC-signature alerting
+-- Learns normal firing rates per remote, flags deviations.
+-- Detects: sudden rate spikes (potential AC probe response),
+-- protocol silence (server-side suppression?), novel arg patterns.
+-- ============================================================
+local PR_AnomalyDetector = {}
+
+-- Baseline learned per remote: { meanHz, stddevHz, sampleCount, lastHz }
+local PR_AnomalyBaseline = {}
+-- Ring buffer of anomaly events (cap 50)
+local PR_AnomalyLog      = {}
+
+local PR_ANOMALY_ZSCORE_THRESH = 3.2   -- z-score threshold for spike detection
+local PR_ANOMALY_SILENCE_SEC   = 12.0  -- periodic remote silent > this → anomaly
+
+function PR_AnomalyDetector.UpdateBaseline(name, rec)
+    if rec.AvgHz <= 0 then return end
+    if not PR_AnomalyBaseline[name] then
+        PR_AnomalyBaseline[name] = { mean=rec.AvgHz, m2=0, n=0, lastHz=rec.AvgHz }
+    end
+    local b = PR_AnomalyBaseline[name]
+    b.n = b.n + 1
+    local delta = rec.AvgHz - b.mean
+    b.mean = b.mean + delta / b.n
+    b.m2   = b.m2 + delta * (rec.AvgHz - b.mean)
+    b.lastHz = rec.AvgHz
+end
+
+function PR_AnomalyDetector.CheckSpike(name, rec)
+    local b = PR_AnomalyBaseline[name]
+    if not b or b.n < 8 then return end
+    local variance = b.n > 1 and (b.m2 / (b.n - 1)) or 0
+    local stddev   = variance > 0 and math.sqrt(variance) or 0
+    if stddev < 1e-6 then return end
+    local z = math.abs(rec.AvgHz - b.mean) / stddev
+    if z >= PR_ANOMALY_ZSCORE_THRESH then
+        local event = {
+            t       = os.clock(),
+            name    = name,
+            kind    = rec.AvgHz > b.mean and "RATE_SPIKE" or "RATE_DROP",
+            zScore  = z,
+            currentHz = rec.AvgHz,
+            baselineHz = b.mean,
+            role    = rec.SemanticRole or "UNKNOWN",
+        }
+        table.insert(PR_AnomalyLog, event)
+        if #PR_AnomalyLog > 50 then table.remove(PR_AnomalyLog, 1) end
+    end
+end
+
+function PR_AnomalyDetector.CheckSilence(name, rec, now)
+    if rec.FreqClass ~= "PERIODIC" then return end
+    if rec.LastFireTime <= 0 then return end
+    local elapsed = now - rec.LastFireTime
+    if elapsed > PR_ANOMALY_SILENCE_SEC then
+        -- Only log once per silence event (don't spam)
+        local lastLog = PR_AnomalyLog[#PR_AnomalyLog]
+        if lastLog and lastLog.name == name and lastLog.kind == "SILENCE" then return end
+        local event = {
+            t       = now,
+            name    = name,
+            kind    = "SILENCE",
+            zScore  = 0,
+            silenceSec = elapsed,
+            role    = rec.SemanticRole or "UNKNOWN",
+        }
+        table.insert(PR_AnomalyLog, event)
+        if #PR_AnomalyLog > 50 then table.remove(PR_AnomalyLog, 1) end
+    end
+end
+
+function PR_AnomalyDetector.SweepAll()
+    local now = os.clock()
+    for name, rec in pairs(PR_Registry) do
+        PR_FreqProfiler.Classify(rec)
+        PR_AnomalyDetector.UpdateBaseline(name, rec)
+        PR_AnomalyDetector.CheckSpike(name, rec)
+        PR_AnomalyDetector.CheckSilence(name, rec, now)
+    end
+end
+
+function PR_AnomalyDetector.GetRecentEvents(n)
+    n = n or 10
+    local out = {}
+    for i = math.max(1, #PR_AnomalyLog - n + 1), #PR_AnomalyLog do
+        table.insert(out, PR_AnomalyLog[i])
+    end
+    return out
+end
+
+function PR_AnomalyDetector.HasACPattern()
+    -- Heuristic: if ANTICHEAT-role remotes recently had a RATE_SPIKE, flag it
+    for i = #PR_AnomalyLog, math.max(1, #PR_AnomalyLog - 5), -1 do
+        local e = PR_AnomalyLog[i]
+        if e and e.kind == "RATE_SPIKE" and (e.role == "ANTICHEAT" or e.role == "HEARTBEAT") then
+            if os.clock() - e.t < 30 then return true, e end
+        end
+    end
+    return false, nil
+end
+
+-- ============================================================
+-- ECHO CALIBRATOR — uses observed PERIODIC S2C inter-fire deltas
+-- to actively tighten SARP echo window estimates.
+-- Strategy: find the highest-EchoRelevance PERIODIC S2C remote,
+-- accumulate its inter-fire deltas via OnClientEvent, compute a
+-- trimmed mean, and push refined estimate to SARP_CFG.
+-- ============================================================
+local PR_EchoCalibrator = {}
+
+local PR_EchoCalibrator_Deltas     = {}   -- live delta samples from calibrator remote
+local PR_EchoCalibrator_Remote     = nil  -- currently watched remote record
+local PR_EchoCalibrator_Conn       = nil  -- event connection
+local PR_EchoCalibrator_LastT      = 0
+local PR_EchoCalibrator_MinSamples = 12
+local PR_EchoCalibrator_MaxSamples = 64
+local PR_EchoCalibrator_RefinedHz  = 0
+local PR_EchoCalibrator_Active     = false
+
+function PR_EchoCalibrator.SelectBest()
+    local best, bestScore = nil, -1
+    for _, rec in pairs(PR_Registry) do
+        if rec.FreqClass == "PERIODIC" and rec.S2CCount > 4
+            and rec.EchoRelevance > bestScore then
+            best = rec; bestScore = rec.EchoRelevance
+        end
+    end
+    return best
+end
+
+function PR_EchoCalibrator.Attach(rec)
+    if PR_EchoCalibrator_Conn then
+        pcall(function() PR_EchoCalibrator_Conn:Disconnect() end)
+        PR_EchoCalibrator_Conn = nil
+    end
+    if not rec or rec.RemoteType ~= "RemoteEvent" then return false end
+    local ok, conn = pcall(function()
+        return rec.Remote.OnClientEvent:Connect(function()
+            local now = os.clock()
+            if PR_EchoCalibrator_LastT > 0 then
+                local delta = now - PR_EchoCalibrator_LastT
+                if delta > 0.005 and delta < 5.0 then
+                    table.insert(PR_EchoCalibrator_Deltas, delta)
+                    if #PR_EchoCalibrator_Deltas > PR_EchoCalibrator_MaxSamples then
+                        table.remove(PR_EchoCalibrator_Deltas, 1)
+                    end
+                end
+            end
+            PR_EchoCalibrator_LastT = now
+        end)
+    end)
+    if ok and conn then
+        PR_EchoCalibrator_Conn    = conn
+        PR_EchoCalibrator_Remote  = rec
+        PR_EchoCalibrator_Active  = true
+        return true
+    end
+    return false
+end
+
+function PR_EchoCalibrator.Compute()
+    -- Trimmed mean: drop top/bottom 10% to reject outliers
+    local n = #PR_EchoCalibrator_Deltas
+    if n < PR_EchoCalibrator_MinSamples then return nil end
+    local sorted = {}
+    for _, v in ipairs(PR_EchoCalibrator_Deltas) do table.insert(sorted, v) end
+    table.sort(sorted)
+    local trim = math.max(1, math.floor(n * 0.1))
+    local sum, count = 0, 0
+    for i = trim + 1, n - trim do
+        sum = sum + sorted[i]; count = count + 1
+    end
+    if count == 0 then return nil end
+    return sum / count   -- mean inter-fire period in seconds
+end
+
+function PR_EchoCalibrator.PushToSARP()
+    -- Only available after SARP is initialized (checked via _G bridge)
+    local period = PR_EchoCalibrator.Compute()
+    if not period then return false end
+    PR_EchoCalibrator_RefinedHz = period > 0 and (1 / period) or 0
+    -- Push into SARP through the _G PR_LWM bridge (SARP reads _G.PR_LWM_INJECT)
+    -- We also directly attempt to refine echo window if SARP is in scope via _G
+    if type(_G.SARP_EchoWindowOverride) == "number" then
+        -- External override already set — don't clobber
+    else
+        -- Use period * 0.35 as refined echo window estimate
+        -- (35% of the replication period is the empirical echo window sweet spot)
+        local refined = period * 0.35
+        _G.PR_ECHO_WINDOW_REFINED = refined
+    end
+    -- Also update LWM inject
+    if type(_G.PR_LWM_INJECT) == "table" then
+        _G.PR_LWM_INJECT.pr_calibratorHz  = PR_EchoCalibrator_RefinedHz
+        _G.PR_LWM_INJECT.pr_echoPeriod    = period
+        _G.PR_LWM_INJECT.pr_echoRefined   = _G.PR_ECHO_WINDOW_REFINED or 0
+    end
+    return true
+end
+
+function PR_EchoCalibrator.Start()
+    task.spawn(function()
+        task.wait(5) -- wait for initial manifest build
+        while true do
+            -- Re-select best calibrator every 30s (protocol can change)
+            local best = PR_EchoCalibrator.SelectBest()
+            if best and best ~= PR_EchoCalibrator_Remote then
+                PR_EchoCalibrator.Attach(best)
+            end
+            -- Push refined estimate whenever we have enough samples
+            PR_EchoCalibrator.PushToSARP()
+            task.wait(30)
+        end
+    end)
+end
+
+function PR_EchoCalibrator.GetStatus()
+    return {
+        Active      = PR_EchoCalibrator_Active,
+        RemoteName  = PR_EchoCalibrator_Remote and PR_EchoCalibrator_Remote.Name or nil,
+        SampleCount = #PR_EchoCalibrator_Deltas,
+        RefinedHz   = PR_EchoCalibrator_RefinedHz,
+        RefinedWindow = _G.PR_ECHO_WINDOW_REFINED,
+    }
+end
+
+-- ============================================================
+-- PROTOCOL FINGERPRINT — compact hash of protocol structure
+-- for cross-session identity verification and drift detection.
+-- ============================================================
+local PR_ProtocolFingerprint = {}
+
+local PR_PFP_KEY        = "PR_Fingerprint_" .. tostring(game.PlaceId)
+local PR_CurrentPFP     = nil   -- {hash, remoteCount, roleMap, builtAt}
+local PR_LastPFP        = nil   -- loaded from _G on startup
+
+function PR_ProtocolFingerprint.Compute()
+    -- Build a stable hash from: sorted remote names + their FreqClass + Direction
+    local entries = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.FireCount > 0 then
+            table.insert(entries, name .. ":" .. rec.FreqClass .. ":" .. rec.Direction)
+        end
+    end
+    table.sort(entries)
+    local concat = table.concat(entries, "|")
+    -- Simple FNV-1a-style hash over the string
+    local hash = 2166136261
+    for i = 1, #concat do
+        hash = bit32.bxor(hash, string.byte(concat, i))
+        hash = (hash * 16777619) % (2^32)
+    end
+    -- Role map: count per semantic role
+    local roleMap = {}
+    for _, rec in pairs(PR_Registry) do
+        if rec.SemanticRole then
+            roleMap[rec.SemanticRole] = (roleMap[rec.SemanticRole] or 0) + 1
+        end
+    end
+    local pfp = {
+        hash        = string.format("%08X", hash),
+        remoteCount = 0,
+        roleMap     = roleMap,
+        builtAt     = os.clock(),
+        entries     = entries,
+    }
+    for _ in pairs(PR_Registry) do pfp.remoteCount = pfp.remoteCount + 1 end
+    PR_CurrentPFP = pfp
+    return pfp
+end
+
+function PR_ProtocolFingerprint.Save()
+    if not PR_CFG.PersistEnabled then return end
+    if PR_CurrentPFP then
+        pcall(function()
+            _G[PR_PFP_KEY] = {
+                hash        = PR_CurrentPFP.hash,
+                remoteCount = PR_CurrentPFP.remoteCount,
+                roleMap     = PR_CurrentPFP.roleMap,
+                builtAt     = PR_CurrentPFP.builtAt,
+            }
+        end)
+    end
+end
+
+function PR_ProtocolFingerprint.Load()
+    pcall(function()
+        local saved = _G[PR_PFP_KEY]
+        if saved and type(saved) == "table" then
+            PR_LastPFP = saved
+        end
+    end)
+end
+
+function PR_ProtocolFingerprint.GetDrift()
+    -- Returns drift report: nil if no previous fingerprint
+    if not PR_LastPFP or not PR_CurrentPFP then return nil end
+    local hashChanged  = PR_LastPFP.hash ~= PR_CurrentPFP.hash
+    local countDelta   = PR_CurrentPFP.remoteCount - PR_LastPFP.remoteCount
+    local roleChanges  = {}
+    for role, count in pairs(PR_CurrentPFP.roleMap) do
+        local prev = PR_LastPFP.roleMap and PR_LastPFP.roleMap[role] or 0
+        if count ~= prev then
+            table.insert(roleChanges, string.format("%s: %d→%d", role, prev, count))
+        end
+    end
+    return {
+        Changed     = hashChanged,
+        CountDelta  = countDelta,
+        RoleChanges = roleChanges,
+        PrevHash    = PR_LastPFP.hash,
+        CurrHash    = PR_CurrentPFP.hash,
+    }
+end
+
+function PR_ProtocolFingerprint.GetStr()
+    if not PR_CurrentPFP then return "not built" end
+    local drift = PR_ProtocolFingerprint.GetDrift()
+    local driftStr = drift and (drift.Changed and " ⚠ DRIFT" or " ✓ STABLE") or " (no baseline)"
+    return string.format("FP: %s | %d remotes%s", PR_CurrentPFP.hash, PR_CurrentPFP.remoteCount, driftStr)
+end
+
+-- ============================================================
+-- PR BRIDGE — additional methods: CalibrateSARP, GetSuggestedChannel
+-- ============================================================
+
+function PR_Bridge.CalibrateSARP()
+    -- Direct echo window refinement: reads PR_EchoCalibrator output
+    -- and applies it to SARP via _G bridge. SARP's LoadSARP/SARP_GetLiveLoadFactor
+    -- checks _G.PR_ECHO_WINDOW_REFINED on each flight.
+    PR_EchoCalibrator.PushToSARP()
+    local refined = _G.PR_ECHO_WINDOW_REFINED
+    if refined and refined > 0.01 and refined < 0.5 then
+        -- Also store in per-place persist so SARP warm-starts with it
+        local key = "SARP_EchoWin_" .. tostring(game.PlaceId)
+        pcall(function()
+            if not _G[key] or math.abs(_G[key] - refined) > 0.005 then
+                _G[key] = refined
+            end
+        end)
+        return refined
+    end
+    return nil
+end
+
+function PR_Bridge.GetSuggestedChannel()
+    -- Returns: "Attribute" | "OwnedCarrier" | "AttachmentBridge" | nil
+    -- Decision logic based on PR knowledge:
+    --  · If we see high-EchoRelevance PERIODIC S2C remote → Attribute (echo window is predictable)
+    --  · If game has no observed C2S traffic at all → OwnedCarrier (avoid attribute rate-limits)
+    --  · If ANTICHEAT remotes show recent anomaly → AttachmentBridge (lower signal profile)
+    --  · Otherwise → nil (SARP should use its own ETM preference)
+    local acFlag, _ = PR_AnomalyDetector.HasACPattern()
+    if acFlag then return "AttachmentBridge" end  -- low-profile under AC pressure
+
+    local bestEcho = PR_EchoCalibrator.SelectBest()
+    if bestEcho and bestEcho.EchoRelevance > 0.6 then
+        return "Attribute"   -- echo window is well-calibrated
+    end
+
+    local c2sCount = 0
+    for _, rec in pairs(PR_Registry) do
+        if rec.C2SCount > 0 then c2sCount = c2sCount + 1 end
+    end
+    if c2sCount == 0 then return "OwnedCarrier" end
+
+    return nil   -- let SARP ETM decide
+end
+
+function PR_Bridge.Sync()
+    PR_ManifestBuilder.Rebuild()
+    PR_Classifier.ClassifyAll()
+    PR_AnomalyDetector.SweepAll()
+    PR_ProtocolFingerprint.Compute()
+    PR_Bridge.FeedETM()
+    PR_Bridge.FeedCDG()
+    PR_Bridge.FeedLWM()
+    PR_Bridge.CalibrateSARP()
+    PR_ProtocolFingerprint.Save()
+    PR_Persist.Save()
+end
+
+-- ============================================================
 -- STATUS PANEL (inline, reuses existing mk/addCorner helpers)
 -- ============================================================
 local function PR_BuildPanel()
@@ -5337,6 +5815,11 @@ local function PR_BuildPanel()
                     string.format("%s (%.2f)", s.TopByPayload[1].name, s.TopByPayload[1].score) or "\226\128\148"
                 local chainStr = s.DepChains[1] and table.concat(s.DepChains[1],"->"):sub(1,30) or "\226\128\148"
                 if body and body.Parent then
+                    local acFlag, _ = PR_AnomalyDetector.HasACPattern()
+                    local calSt = PR_EchoCalibrator.GetStatus()
+                    local calStr = calSt.Active
+                        and string.format("CAL:%s(%.2fHz)", calSt.RemoteName and calSt.RemoteName:sub(1,10) or "?", calSt.RefinedHz)
+                        or "CAL:idle"
                     body.Text = table.concat({
                         string.format("Remotes: %d  (sync: %s)", s.TotalRemotes, elapsed),
                         string.format("PERIODIC:%-3d BURST:%-3d EVENT:%d", s.PERIODIC,s.BURST,s.EVENT),
@@ -5345,7 +5828,8 @@ local function PR_BuildPanel()
                         "Top fired: " .. topFire,
                         "Top pay:   " .. topPay,
                         "Dep chain: " .. chainStr,
-                        string.format("Probe: %s", PR_CFG.ProbeEnabled and "ON" or "off"),
+                        string.format("Probe: %s  AC: %s", PR_CFG.ProbeEnabled and "ON" or "off", acFlag and "PATTERN" or "ok"),
+                        calStr .. "  FP:" .. (PR_CurrentPFP and PR_CurrentPFP.hash:sub(1,8) or "..."),
                     }, "\n")
                 end
                 task.wait(PR_CFG.PanelRefreshSec)
@@ -5364,13 +5848,18 @@ local function PR_Start()
         local discovered = PR_Interceptor.ScanRoots()
         print(string.format("[PR] Discovered %d remotes.", discovered))
         PR_Persist.Load()
+        PR_ProtocolFingerprint.Load()
         local outOk = PR_Interceptor.HookOutgoing()
         print(outOk and "[PR] C2S hook active." or "[PR] C2S hook unavailable — S2C only.")
         PR_Interceptor.WatchForNew()
         task.wait(2)
         PR_ManifestBuilder.Rebuild()
-        print("[PR] Initial manifest built.")
+        PR_Classifier.ClassifyAll()
+        PR_ProtocolFingerprint.Compute()
+        print("[PR] Initial manifest built. " .. PR_ProtocolFingerprint.GetStr())
         PR_Analytics.Print()
+        -- Echo calibrator: start attaching to best PERIODIC S2C remote
+        PR_EchoCalibrator.Start()
         -- Bridge sync loop
         task.spawn(function()
             while PR_Started do
@@ -5386,11 +5875,13 @@ local function PR_Start()
                 task.wait(30)
             end
         end)
-        -- Frequency reclassification loop
+        -- Frequency reclassification + anomaly sweep loop
         task.spawn(function()
             while PR_Started do
                 task.wait(15)
                 for _, rec in pairs(PR_Registry) do PR_FreqProfiler.Classify(rec) end
+                PR_Classifier.ClassifyAll()
+                PR_AnomalyDetector.SweepAll()
             end
         end)
         PR_BuildPanel()
@@ -5691,6 +6182,12 @@ local function LoadSARP()
         -- Warm-start echo window from prior session calibration for this PlaceId
         if SARP_CFG.PlaceIdPersistEnabled and type(_G[SARP_PERSIST_ECHO_WIN]) == "number" then
             SARP_CFG.EchoWindowEst = _G[SARP_PERSIST_ECHO_WIN]
+        end
+        -- PR Echo Calibrator override: if PR has produced a refined echo window
+        -- from live PERIODIC S2C observation, prefer it over the static persist.
+        -- PR calibration is higher-fidelity because it measures actual replication period.
+        if type(_G.PR_ECHO_WINDOW_REFINED) == "number" and _G.PR_ECHO_WINDOW_REFINED > 0.01 then
+            SARP_CFG.EchoWindowEst = _G.PR_ECHO_WINDOW_REFINED
         end
     end)
 end
@@ -6833,6 +7330,23 @@ function SARP.Execute(wrapped, simResult, targetName, onComplete)
             return
         end
     end
+    -- PR channel override: if Protocol Reconstruction has a high-confidence channel
+    -- suggestion (e.g. AC pressure → AttachmentBridge, calibrated echo → Attribute),
+    -- re-wrap the payload on the suggested channel before flight.
+    local prChannel = pcall(PR_Bridge.GetSuggestedChannel) and PR_Bridge.GetSuggestedChannel() or nil
+    if prChannel and prChannel ~= wrapped.Channel then
+        local reWrapped, reErr
+        if prChannel == "Attribute" then
+            reWrapped, reErr = SARP.Crafter.WrapAttribute(wrapped.Payload, nil, nil)
+        elseif prChannel == "OwnedCarrier" then
+            reWrapped, reErr = SARP.Crafter.WrapOwnedCarrier(wrapped.Payload, nil)
+        elseif prChannel == "AttachmentBridge" then
+            reWrapped, reErr = SARP.Crafter.WrapAttachmentBridge(wrapped.Payload, targetName)
+        end
+        if reWrapped and not reErr then
+            wrapped = reWrapped
+        end
+    end
     SARP.Phoenix.Run(wrapped, targetName, simResult, onComplete)
 end
 
@@ -7648,6 +8162,443 @@ return SARP
 end)()
 
 -- ============================================================
+-- PAGE: PR — Protocol Reconstruction
+-- Full browsable manifest tab: remote list, role badges, chain
+-- viewer, anomaly log, echo calibrator status, fingerprint drift.
+-- ============================================================
+do
+    -- ── Header ──────────────────────────────────────────────────
+    local _, sPRHdr = makeSection(pagePR, "PR — Protocol Reconstruction")
+    mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamMedium,
+        Text="Passive + active protocol layer. Intercepts S2C/C2S remotes, classifies by role and frequency, builds dependency chains, detects anomalies, and feeds calibrated echo-window estimates directly into SARP's flight engine.",
+        TextColor3=Color3.fromRGB(60,80,120),TextSize=12,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,56),Parent=sPRHdr})
+
+    local prFPLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Fingerprint: initializing...",
+        TextColor3=Color3.fromRGB(80,100,160),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,16),Parent=sPRHdr})
+
+    local prStatusLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Remotes: 0  |  C2S hook: pending  |  Calibrator: idle",
+        TextColor3=Color3.fromRGB(70,70,90),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,16),Parent=sPRHdr})
+
+    -- ── Echo Calibrator Status ──────────────────────────────────
+    local _, sCalib = makeSection(pagePR, "Echo Calibrator")
+    local calibStatusLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Waiting for PERIODIC S2C remote...",
+        TextColor3=Color3.fromRGB(70,110,80),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,52),Parent=sCalib})
+
+    local calibRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,36),Parent=sCalib})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=calibRow})
+    local calibForceBtn = makeButton(calibRow,"⟳ Force Calibrate",UDim2.new(0,180,0,32),"")
+    calibForceBtn.Button.BackgroundColor3 = Color3.fromRGB(220,240,210)
+    local calibPushBtn  = makeButton(calibRow,"→ Push to SARP",UDim2.new(0,160,0,32),"")
+    calibPushBtn.Button.BackgroundColor3  = Color3.fromRGB(200,220,240)
+
+    calibForceBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(calibForceBtn.Button)
+        local best = PR_EchoCalibrator.SelectBest()
+        if best then
+            local ok = PR_EchoCalibrator.Attach(best)
+            sendNotification(ok and ("Calibrator attached to: " .. best.Name) or "No eligible remote found.", ok and "Info" or "Warning")
+        else
+            sendNotification("No PERIODIC S2C remote with sufficient EchoRelevance.", "Warning")
+        end
+    end)
+
+    calibPushBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(calibPushBtn.Button)
+        local refined = PR_Bridge.CalibrateSARP()
+        if refined then
+            sendNotification(string.format("Echo window refined to %.4fs and pushed to SARP.", refined), "Success")
+        else
+            sendNotification("Not enough calibration samples yet. Let it run longer.", "Warning")
+        end
+    end)
+
+    -- ── Anomaly Log ─────────────────────────────────────────────
+    local _, sAnomaly = makeSection(pagePR, "Anomaly Detector")
+    local anomalyACBadge = mk("TextLabel",{
+        Text="AC STATUS: UNKNOWN",Font=Enum.Font.GothamBold,TextSize=11,
+        TextColor3=Color3.fromRGB(255,255,255),BackgroundColor3=Color3.fromRGB(120,120,120),
+        Size=UDim2.new(1,0,0,26),TextXAlignment=Enum.TextXAlignment.Center,Parent=sAnomaly})
+    addCorner(anomalyACBadge,UDim.new(0,6))
+
+    local anomalyScroll = mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(248,244,240),
+        Size=UDim2.new(1,0,0,160),CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sAnomaly})
+    addCorner(anomalyScroll,UDim.new(0,6)); addStroke(anomalyScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=anomalyScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6),Parent=anomalyScroll})
+
+    local anomalyCtrlRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,34),Parent=sAnomaly})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=anomalyCtrlRow})
+    local anomalyRefreshBtn = makeButton(anomalyCtrlRow,"↻ Refresh",UDim2.new(0,130,0,30),"")
+    anomalyRefreshBtn.Button.BackgroundColor3 = Color3.fromRGB(220,230,255)
+    local anomalySweepBtn   = makeButton(anomalyCtrlRow,"⚡ Force Sweep",UDim2.new(0,150,0,30),"")
+    anomalySweepBtn.Button.BackgroundColor3   = Color3.fromRGB(255,240,210)
+
+    local function doRefreshAnomalies()
+        anomalyScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,3),Parent=anomalyScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6),Parent=anomalyScroll})
+        local events = PR_AnomalyDetector.GetRecentEvents(20)
+        if #events == 0 then
+            mk("TextLabel",{Text="No anomalies detected.",BackgroundTransparency=1,
+                Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=Color3.fromRGB(130,130,130),
+                Size=UDim2.new(1,0,0,22),Parent=anomalyScroll})
+        end
+        for i = #events, 1, -1 do
+            local e = events[i]
+            local isAC = e.role == "ANTICHEAT" or e.role == "HEARTBEAT"
+            local color = e.kind == "RATE_SPIKE" and (isAC and Color3.fromRGB(255,220,210) or Color3.fromRGB(255,248,220))
+                       or e.kind == "SILENCE"    and Color3.fromRGB(230,220,255)
+                       or Color3.fromRGB(240,248,255)
+            local row = mk("Frame",{BackgroundColor3=color,Size=UDim2.new(1,0,0,40),Parent=anomalyScroll})
+            addCorner(row,UDim.new(0,4)); addStroke(row,1,0.2)
+            local kindStr = e.kind
+            if e.kind == "RATE_SPIKE" then kindStr = string.format("SPIKE z=%.1f (%.2f→%.2f Hz)", e.zScore, e.baselineHz, e.currentHz)
+            elseif e.kind == "RATE_DROP" then kindStr = string.format("DROP z=%.1f (%.2f→%.2f Hz)", e.zScore, e.baselineHz, e.currentHz)
+            elseif e.kind == "SILENCE" then kindStr = string.format("SILENCE %.0fs", e.silenceSec or 0) end
+            mk("TextLabel",{Text=string.format("[%s] %s — %s", e.role, e.name:sub(1,28), kindStr),
+                Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Color3.fromRGB(40,40,60),
+                Position=UDim2.new(0,6,0,4),Size=UDim2.new(1,-12,0,14),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+            mk("TextLabel",{Text=string.format("T+%.0fs ago", os.clock() - e.t),
+                Font=Enum.Font.Code,TextSize=9,TextColor3=Color3.fromRGB(110,110,130),
+                Position=UDim2.new(0,6,0,22),Size=UDim2.new(1,-12,0,12),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+        end
+        -- Update AC badge
+        local acFlag, _ = PR_AnomalyDetector.HasACPattern()
+        if acFlag then
+            anomalyACBadge.Text = "⚠ AC PATTERN DETECTED — AttachmentBridge recommended"
+            anomalyACBadge.BackgroundColor3 = Color3.fromRGB(200,60,60)
+        else
+            anomalyACBadge.Text = "✓ AC STATUS: NOMINAL"
+            anomalyACBadge.BackgroundColor3 = Color3.fromRGB(60,160,80)
+        end
+    end
+
+    anomalyRefreshBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); doRefreshAnomalies()
+    end)
+    anomalySweepBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(anomalySweepBtn.Button)
+        PR_AnomalyDetector.SweepAll()
+        doRefreshAnomalies()
+        sendNotification("Anomaly sweep complete.", "Info")
+    end)
+
+    -- ── Remote Manifest Browser ─────────────────────────────────
+    local _, sManifest = makeSection(pagePR, "Remote Manifest Browser")
+
+    -- Filter row
+    local filterRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,32),Parent=sManifest})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=filterRow})
+
+    local PR_FilterRole  = "ALL"
+    local PR_FilterClass = "ALL"
+    local PR_FilterDir   = "ALL"
+    local PR_SearchText  = ""
+
+    local roleFilters  = {"ALL","MOVEMENT","COMBAT","ECONOMY","ANTICHEAT","UI","SYNC","HEARTBEAT","CHAT","SPAWN","UNKNOWN"}
+    local classFilters = {"ALL","PERIODIC","BURST","EVENT","RARE"}
+    local dirFilters   = {"ALL","S2C","C2S","BOTH"}
+
+    local roleFilterIdx  = 1
+    local classFilterIdx = 1
+    local dirFilterIdx   = 1
+
+    local function makeCycleBtn(parent, label, width, onCycle)
+        local btn = makeButton(parent, label, UDim2.new(0,width,0,28), "")
+        btn.Button.BackgroundColor3 = Color3.fromRGB(225,220,255)
+        btn.Button.MouseButton1Click:Connect(function()
+            clickSound(); onCycle()
+        end)
+        return btn
+    end
+
+    local roleBtnRef  = makeCycleBtn(filterRow, "Role: ALL", 120, function() end)
+    local classBtnRef = makeCycleBtn(filterRow, "Class: ALL", 120, function() end)
+    local dirBtnRef   = makeCycleBtn(filterRow, "Dir: ALL", 90, function() end)
+
+    local searchBox = mk("TextBox",{PlaceholderText="Search name...",Text="",
+        BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(0,140,0,28),
+        Font=Enum.Font.Code,TextSize=11,ClearTextOnFocus=false,Parent=filterRow})
+    addCorner(searchBox,UDim.new(0,5)); addStroke(searchBox,1,0.3)
+    mk("UIPadding",{PaddingLeft=UDim.new(0,6),Parent=searchBox})
+
+    -- Manifest scroll
+    local manifestScroll = mk("ScrollingFrame",{BackgroundColor3=Color3.fromRGB(246,244,240),
+        Size=UDim2.new(1,0,0,300),CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=4,Parent=sManifest})
+    addCorner(manifestScroll,UDim.new(0,6)); addStroke(manifestScroll,1,0.3)
+    mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=manifestScroll})
+    mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4),Parent=manifestScroll})
+
+    local ROLE_COLORS = {
+        MOVEMENT  = Color3.fromRGB(210,240,255),
+        COMBAT    = Color3.fromRGB(255,220,215),
+        ECONOMY   = Color3.fromRGB(220,255,225),
+        ANTICHEAT = Color3.fromRGB(255,235,200),
+        UI        = Color3.fromRGB(240,230,255),
+        SYNC      = Color3.fromRGB(225,245,225),
+        HEARTBEAT = Color3.fromRGB(255,245,215),
+        CHAT      = Color3.fromRGB(240,255,245),
+        SPAWN     = Color3.fromRGB(235,235,255),
+        UNKNOWN   = Color3.fromRGB(242,240,238),
+    }
+
+    local function doRefreshManifest()
+        manifestScroll:ClearAllChildren()
+        mk("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,2),Parent=manifestScroll})
+        mk("UIPadding",{PaddingTop=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4),Parent=manifestScroll})
+        local searchLower = searchBox.Text:lower()
+        local shown = 0
+        -- Sort: first by role, then by FireCount desc
+        local sorted = {}
+        for name, rec in pairs(PR_Registry) do
+            table.insert(sorted, { name=name, rec=rec })
+        end
+        table.sort(sorted, function(a, b)
+            if a.rec.FireCount ~= b.rec.FireCount then return a.rec.FireCount > b.rec.FireCount end
+            return a.name < b.name
+        end)
+        for _, entry in ipairs(sorted) do
+            local name = entry.name
+            local rec  = entry.rec
+            -- Apply filters
+            if PR_FilterRole  ~= "ALL" and rec.SemanticRole ~= PR_FilterRole  then goto continue end
+            if PR_FilterClass ~= "ALL" and rec.FreqClass    ~= PR_FilterClass  then goto continue end
+            if PR_FilterDir   ~= "ALL" and rec.Direction    ~= PR_FilterDir    then goto continue end
+            if searchLower ~= "" and not name:lower():find(searchLower, 1, true) then goto continue end
+            shown = shown + 1
+            if shown > 120 then break end  -- cap render
+
+            local role   = rec.SemanticRole or "UNKNOWN"
+            local rowCol = ROLE_COLORS[role] or ROLE_COLORS.UNKNOWN
+            local row = mk("Frame",{BackgroundColor3=rowCol,Size=UDim2.new(1,0,0,52),Parent=manifestScroll})
+            addCorner(row,UDim.new(0,4)); addStroke(row,1,0.15)
+
+            -- Remote name + role badge
+            mk("TextLabel",{
+                Text=string.format("[%s] %s", role:sub(1,3), name:sub(1,36)),
+                Font=Enum.Font.GothamBold,TextSize=11,
+                TextColor3=Color3.fromRGB(30,30,50),
+                Position=UDim2.new(0,6,0,3),Size=UDim2.new(1,-12,0,14),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+
+            -- Stats line 1
+            mk("TextLabel",{
+                Text=string.format("Fires:%-4d  S2C:%-3d  C2S:%-3d  Dir:%-4s  Class:%-8s  Hz:%.2f",
+                    rec.FireCount, rec.S2CCount, rec.C2SCount,
+                    rec.Direction, rec.FreqClass, rec.AvgHz),
+                Font=Enum.Font.Code,TextSize=9,
+                TextColor3=Color3.fromRGB(60,60,80),
+                Position=UDim2.new(0,6,0,19),Size=UDim2.new(1,-12,0,12),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+
+            -- Stats line 2: schema + scores
+            local schemaStr = rec.ArgSchema and #rec.ArgSchema > 0 and PR_SchemaInfer.GetSchemaStr(rec) or "(no args)"
+            if #schemaStr > 50 then schemaStr = schemaStr:sub(1,47) .. "..." end
+            mk("TextLabel",{
+                Text=string.format("Echo:%.2f  Pay:%.2f  Dep:%.2f  | %s",
+                    rec.EchoRelevance or 0, rec.PayloadScore or 0, rec.DepImportance or 0, schemaStr),
+                Font=Enum.Font.Code,TextSize=9,
+                TextColor3=Color3.fromRGB(90,80,110),
+                Position=UDim2.new(0,6,0,33),Size=UDim2.new(1,-12,0,12),
+                TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+
+            ::continue::
+        end
+        if shown == 0 then
+            mk("TextLabel",{Text="No remotes match current filter.",BackgroundTransparency=1,
+                Font=Enum.Font.GothamMedium,TextSize=11,TextColor3=Color3.fromRGB(140,130,130),
+                Size=UDim2.new(1,0,0,24),Parent=manifestScroll})
+        end
+    end
+
+    -- Wire filter buttons
+    roleBtnRef.Button.MouseButton1Click:Connect(function()
+        clickSound(); roleFilterIdx = (roleFilterIdx % #roleFilters) + 1
+        PR_FilterRole = roleFilters[roleFilterIdx]
+        roleBtnRef.Label.Text = "Role: " .. PR_FilterRole
+        doRefreshManifest()
+    end)
+    classBtnRef.Button.MouseButton1Click:Connect(function()
+        clickSound(); classFilterIdx = (classFilterIdx % #classFilters) + 1
+        PR_FilterClass = classFilters[classFilterIdx]
+        classBtnRef.Label.Text = "Class: " .. PR_FilterClass
+        doRefreshManifest()
+    end)
+    dirBtnRef.Button.MouseButton1Click:Connect(function()
+        clickSound(); dirFilterIdx = (dirFilterIdx % #dirFilters) + 1
+        PR_FilterDir = dirFilters[dirFilterIdx]
+        dirBtnRef.Label.Text = "Dir: " .. PR_FilterDir
+        doRefreshManifest()
+    end)
+    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        PR_SearchText = searchBox.Text
+        doRefreshManifest()
+    end)
+
+    local manifestCtrlRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,34),Parent=sManifest})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=manifestCtrlRow})
+    local manifestRefreshBtn = makeButton(manifestCtrlRow,"↻ Refresh List",UDim2.new(0,150,0,30),"")
+    manifestRefreshBtn.Button.BackgroundColor3 = Color3.fromRGB(220,230,255)
+    local manifestRebuildBtn = makeButton(manifestCtrlRow,"⟳ Rebuild Manifest",UDim2.new(0,180,0,30),"")
+    manifestRebuildBtn.Button.BackgroundColor3 = Color3.fromRGB(230,220,255)
+    local manifestProbeBtn   = makeButton(manifestCtrlRow,"⚡ Probe Top-3",UDim2.new(0,140,0,30),"")
+    manifestProbeBtn.Button.BackgroundColor3   = Color3.fromRGB(255,235,205)
+
+    manifestRefreshBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); doRefreshManifest()
+    end)
+    manifestRebuildBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(manifestRebuildBtn.Button)
+        PR_ManifestBuilder.Rebuild()
+        PR_Classifier.ClassifyAll()
+        PR_ProtocolFingerprint.Compute()
+        doRefreshManifest()
+        sendNotification("Manifest rebuilt. " .. PR_ProtocolFingerprint.GetStr(), "Info")
+    end)
+    manifestProbeBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(manifestProbeBtn.Button)
+        if not PR_CFG.ProbeEnabled then
+            sendNotification("Active probing is disabled. Enable PR_CFG.ProbeEnabled first.", "Warning")
+        else
+            PR_ActiveProber.SweepTopCandidates(3)
+            sendNotification("Probing top-3 C2S candidates...", "Info")
+        end
+    end)
+
+    -- ── Dependency Chain Viewer ──────────────────────────────────
+    local _, sChainPR = makeSection(pagePR, "Dependency Chain Viewer")
+    local chainViewLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="Select a remote below to trace its dependency chain.",
+        TextColor3=Color3.fromRGB(80,80,110),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,16),Parent=sChainPR})
+
+    local chainResultLabel = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,
+        Text="",TextColor3=Color3.fromRGB(50,50,80),TextSize=11,TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,60),Parent=sChainPR})
+
+    local chainRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,32),Parent=sChainPR})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,8),Parent=chainRow})
+
+    local chainEntryBox = mk("TextBox",{PlaceholderText="Remote name...",Text="",
+        BackgroundColor3=Color3.fromRGB(255,255,255),Size=UDim2.new(0,220,0,28),
+        Font=Enum.Font.Code,TextSize=11,ClearTextOnFocus=false,Parent=chainRow})
+    addCorner(chainEntryBox,UDim.new(0,5)); addStroke(chainEntryBox,1,0.3)
+    mk("UIPadding",{PaddingLeft=UDim.new(0,6),Parent=chainEntryBox})
+
+    local chainTraceBtn = makeButton(chainRow,"Trace Chain",UDim2.new(0,130,0,28),"→")
+    chainTraceBtn.Button.BackgroundColor3 = Color3.fromRGB(220,235,255)
+    local chainEntryBtn = makeButton(chainRow,"Show Entry Points",UDim2.new(0,160,0,28),"")
+    chainEntryBtn.Button.BackgroundColor3 = Color3.fromRGB(230,240,220)
+
+    chainTraceBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(chainTraceBtn.Button)
+        local name = chainEntryBox.Text
+        if name == "" then sendNotification("Enter a remote name to trace.", "Warning"); return end
+        local chain = PR_DepGraph.GetChain(name)
+        if #chain == 0 then
+            chainResultLabel.Text = "No chain found for: " .. name
+        else
+            local lines = { "Chain from " .. name .. ":" }
+            for i, n in ipairs(chain) do
+                local rec = PR_Registry[n]
+                local role = rec and rec.SemanticRole or "?"
+                local hz   = rec and string.format("%.2fHz", rec.AvgHz) or "?"
+                table.insert(lines, string.format("  [%d] %s (%s, %s)", i, n, role, hz))
+            end
+            chainResultLabel.Text = table.concat(lines, "\n")
+        end
+    end)
+
+    chainEntryBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(chainEntryBtn.Button)
+        local eps = PR_DepGraph.GetEntryPoints()
+        if #eps == 0 then
+            chainResultLabel.Text = "No entry points detected yet."
+        else
+            local lines = { "Entry points (no predecessors):" }
+            for i, ep in ipairs(eps) do
+                if i > 8 then break end
+                local rec = PR_Registry[ep.Name]
+                local role = rec and rec.SemanticRole or "?"
+                table.insert(lines, string.format("  [%d] %s (%s, %d fires)", i, ep.Name, role, ep.FireCount))
+            end
+            chainResultLabel.Text = table.concat(lines, "\n")
+        end
+    end)
+
+    -- ── PR Settings Row ─────────────────────────────────────────
+    local _, sPRSet = makeSection(pagePR, "PR Settings")
+    local prSetRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
+        AutomaticSize=Enum.AutomaticSize.Y,Parent=sPRSet})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,14),Parent=prSetRow})
+
+    local _tProbe = makeToggle(prSetRow,"Active Probe",false,function(on)
+        PR_CFG.ProbeEnabled = on
+    end)
+    if _tProbe and _tProbe.Root then _tProbe.Root.Size = UDim2.new(0,140,0,34) end
+
+    local _tPersist = makeToggle(prSetRow,"Persist",true,function(on)
+        PR_CFG.PersistEnabled = on
+    end)
+    if _tPersist and _tPersist.Root then _tPersist.Root.Size = UDim2.new(0,110,0,34) end
+
+    local _tPanel = makeToggle(prSetRow,"Float Panel",true,function(on)
+        PR_CFG.ShowPanel = on
+    end)
+    if _tPanel and _tPanel.Root then _tPanel.Root.Size = UDim2.new(0,110,0,34) end
+
+    local prClearBtn = makeButton(prSetRow,"🗑 Clear PR Persist",UDim2.new(0,180,0,34),"")
+    prClearBtn.Button.BackgroundColor3 = Color3.fromRGB(255,230,230)
+    prClearBtn.Button.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(prClearBtn.Button)
+        pcall(function() _G[PR_CFG.PersistKey] = nil end)
+        pcall(function() _G[PR_PFP_KEY] = nil end)
+        pcall(function() _G.PR_ECHO_WINDOW_REFINED = nil end)
+        sendNotification("PR persist cleared. Reload to start fresh.", "Warning")
+    end)
+
+    -- ── Live refresh loop for PR tab ─────────────────────────────
+    local prTabActive = false
+    pagePR:GetPropertyChangedSignal("Visible"):Connect(function()
+        prTabActive = pagePR.Visible
+        if prTabActive then
+            -- Refresh all sub-panels when tab becomes visible
+            local cal = PR_EchoCalibrator.GetStatus()
+            local calStr = cal.Active
+                and string.format("Remote: %s | Samples: %d | Hz: %.2f | Refined window: %s",
+                    cal.RemoteName or "?", cal.SampleCount, cal.RefinedHz,
+                    cal.RefinedWindow and string.format("%.4fs", cal.RefinedWindow) or "pending")
+                or "No calibrator attached. Click Force Calibrate."
+            calibStatusLabel.Text = calStr
+
+            prFPLabel.Text = PR_ProtocolFingerprint.GetStr()
+            local s = PR_Analytics.GetSummary()
+            prStatusLabel.Text = string.format(
+                "Remotes: %d  |  PERIODIC:%-3d  BURST:%-3d  C2S:%-3d  S2C:%-3d  Pay-ready:%-3d",
+                s.TotalRemotes, s.PERIODIC, s.BURST, s.C2S, s.S2C,
+                (function()
+                    local n = 0
+                    for _, rec in pairs(PR_Registry) do if rec.PayloadScore > 0.4 then n = n+1 end end
+                    return n
+                end)())
+            doRefreshAnomalies()
+            doRefreshManifest()
+        end
+    end)
+end   -- end PR UI do-block
+
+-- ============================================================
 -- NAVIGATION SYSTEM
 -- ============================================================
 local TAB_DEFS = {
@@ -7663,6 +8614,7 @@ local TAB_DEFS = {
     { Name="Chain",      Page=pageChain,     Icon="⛓" },
     { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
+    { Name="PR",         Page=pagePR,        Icon="📡" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
