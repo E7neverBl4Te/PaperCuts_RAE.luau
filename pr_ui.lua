@@ -263,8 +263,7 @@ do
             local rec = PR_Registry[n]
             table.insert(parts, string.format("  [%d] %s (%s)",i,n,rec and rec.SemanticRole or "?"))
         end
-        chainResult.Text = table.concat(parts,"
-")
+        chainResult.Text = table.concat(parts,"\n")
     end)
     cEPBtn.Button.MouseButton1Click:Connect(function()
         clickSound()
@@ -275,8 +274,7 @@ do
             if i>6 then break end
             table.insert(parts, string.format("  [%d] %s (%d fires)",i,ep.Name,ep.FireCount))
         end
-        chainResult.Text = table.concat(parts,"
-")
+        chainResult.Text = table.concat(parts,"\n")
     end)
 
     -- PR Settings

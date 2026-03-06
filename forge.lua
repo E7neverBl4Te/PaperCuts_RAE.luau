@@ -1098,15 +1098,3 @@ end
 LoadForge()
 
 -- ============================================================
---  ██████╗ ██████╗      PROTOCOL RECONSTRUCTION LAYER
---  ██╔══██╗██╔══██╗     Layer 2 of the Deep Intelligence Stack
---  ██████╔╝██████╔╝     
---  ██╔═══╝ ██╔══██╗     Modules:
---  ██║     ██║  ██║       Interceptor  · SchemaInfer  · FreqProfiler
---  ╚═╝     ╚═╝  ╚═╝       SeqAnalyzer  · DepGraph     · ActiveProber
---                          Manifest     · Persist       · Bridge
---  Feeds into: ETM · CDG · LWM · SARP channels
--- ============================================================
-
--- ── PR Configuration ──────────────────────────────────────────
-local PR_CFG = {
