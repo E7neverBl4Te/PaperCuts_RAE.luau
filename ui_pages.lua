@@ -66,8 +66,13 @@ local pageBridge = _U.pageBridge
 local pageAnalytics = _U.pageAnalytics
 local pageChain = _U.pageChain
 local pageUtils = _U.pageUtils
-local pageAbout = _U.pageAbout
-local contentCard = _U.contentCard
+local pageAbout      = _U.pageAbout
+local pageForge      = _U.pageForge
+local pageSARP       = _U.pageSARP
+local contentCard    = _U.contentCard
+local pagesFolder    = _U.pagesFolder
+local panelTitle     = _U.panelTitle
+local window         = _U.window
 -- PAGE: Overview
 -- ============================================================
 do

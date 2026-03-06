@@ -23,6 +23,7 @@ local PR_AnomalyDetector  = _C.PR_AnomalyDetector
 local PR_EchoCalibrator   = _C.PR_EchoCalibrator
 local PR_ProtocolFingerprint = _C.PR_ProtocolFingerprint
 local PR_PFP              = _C.PR_PFP
+local window              = _G.PCU.window
 
 -- ============================================================
 -- PAGE: PR — Protocol Reconstruction

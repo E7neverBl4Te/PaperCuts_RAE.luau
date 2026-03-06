@@ -22,6 +22,7 @@ local pageSARP = _U.pageSARP
 local contentCard = _U.contentCard
 local SARP = _G.PC.SARP
 local SARP_CFG = _G.PC.SARP_CFG
+local window = _G.PCU.window
 -- PAGE: SARP (UI)
 -- ============================================================
 do
