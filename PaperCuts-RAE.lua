@@ -19,7 +19,7 @@
     ║     RAE · Recursive · Bridge · Analytics · Chain · Utilities · About║
     ╚══════════════════════════════════════════════════════════════════════╝
 --]]
-;(function()
+local function _main()
 
 
 -- ============================================================
@@ -4438,7 +4438,7 @@ local PR_EchoCalibrator, PR_ProtocolFingerprint, PR_PFP_KEY
 
 -- ── PR IIFE: entire Protocol Reconstruction module lives in its own function ──
 -- scope so its ~150 internal locals don't consume main-chunk registers.
-;(function()
+(function()
 PR_CFG = {
     ScanRoots         = { ReplicatedStorage, Workspace },
     ScanDepthLimit    = 8,
@@ -8884,5 +8884,6 @@ end
 if player.Character then task.spawn(bootRAE)
 else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
 
-end)()
+end
+_main()
 -- END OF SCRIPT
