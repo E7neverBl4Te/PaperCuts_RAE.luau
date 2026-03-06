@@ -1,4 +1,3 @@
--- ── Imports ─────────────────────────────────────────────────────────────────
 local _C = _G.PC
 local _U = _G.PCU
 local mk             = _C.mk
@@ -27,15 +26,15 @@ local StateSignature = _C.StateSignature
 local ComputeBrierScore = _C.ComputeBrierScore
 local sendNotification = _U.sendNotification
 local window         = _U.window
+local topbar         = _U.topbar
 local btnMin         = _U.btnMin
 local btnClose       = _U.btnClose
-local topbar         = _U.topbar
+local body           = _U.body
 local sidebar        = _U.sidebar
 local navHolder      = _U.navHolder
 local panelTitle     = _U.panelTitle
 local contentCard    = _U.contentCard
 local pagesFolder    = _U.pagesFolder
-local body           = _U.body
 local bodyRow        = _U.bodyRow
 local pageOverview   = _U.pageOverview
 local pagePlayer     = _U.pagePlayer
@@ -52,20 +51,8 @@ local pageAbout      = _U.pageAbout
 local pageForge      = _U.pageForge
 local pageSARP       = _U.pageSARP
 local pagePR         = _U.pagePR
-local SARP           = _C.SARP
+local SARP           = _G.PC.SARP
 
--- Load persisted SARP data
-LoadSARP()
-
--- Expose SARP in global API
-task.defer(function()
-    if _G.RAE_Engine then _G.RAE_Engine.SARP = SARP end
-end)
--- ── v4: Begin sub-tick phase calibration ──────────────────────
-task.spawn(SARP_StartPhaseMeasurement)
-
-return SARP
-end)()
 
 -- ============================================================
 -- NAVIGATION SYSTEM

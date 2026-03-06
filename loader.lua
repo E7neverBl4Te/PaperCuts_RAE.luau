@@ -13,7 +13,6 @@ local chunks = {
     "ui_pages.lua",  -- page builders: Overview → About
     "forge.lua",     -- Forge backend + UI
     "sarp.lua",      -- SARP v4 engine
-    "sarp_ui.lua",   -- SARP UI tab
     "pr.lua",        -- PR v5 module (protocol reconstruction)
     "pr_ui.lua",     -- PR UI tab
     "boot.lua",      -- navigation, drag, global API, bootRAE
