@@ -4414,6 +4414,988 @@ end
 LoadForge()
 
 -- ============================================================
+--  ██████╗ ██████╗      PROTOCOL RECONSTRUCTION LAYER
+--  ██╔══██╗██╔══██╗     Layer 2 of the Deep Intelligence Stack
+--  ██████╔╝██████╔╝     
+--  ██╔═══╝ ██╔══██╗     Modules:
+--  ██║     ██║  ██║       Interceptor  · SchemaInfer  · FreqProfiler
+--  ╚═╝     ╚═╝  ╚═╝       SeqAnalyzer  · DepGraph     · ActiveProber
+--                          Manifest     · Persist       · Bridge
+--  Feeds into: ETM · CDG · LWM · SARP channels
+-- ============================================================
+
+-- ── PR Configuration ──────────────────────────────────────────
+local PR_CFG = {
+    ScanRoots         = { ReplicatedStorage, Workspace },
+    ScanDepthLimit    = 8,
+    MaxTrackedRemotes = 256,
+    MaxArgSamples     = 32,
+    MaxArgPositions   = 16,
+    StringSampleCap   = 12,
+    DeltaCap          = 64,
+    SeqLogCap         = 512,
+    CoFireWindowSec   = 0.25,
+    MinCoFireCount    = 3,
+    MaxPredecessors   = 8,
+    PeriodicCVThresh  = 0.18,
+    BurstGapRatio     = 4.0,
+    RareFireCap       = 5,
+    ProbeEnabled      = false,
+    ProbeRateLimit    = 0.8,
+    ProbeMaxPerRemote = 6,
+    ProbeSafeRE       = true,
+    PersistEnabled    = true,
+    PersistKey        = "PR_Manifest_" .. tostring(game.PlaceId),
+    BridgePollSec     = 8.0,
+    ShowPanel         = true,
+    PanelRefreshSec   = 3.0,
+}
+
+-- ── PR Core State ─────────────────────────────────────────────
+local PR_Registry  = {}   -- [remoteName] = RemoteRecord
+local PR_SeqLog    = {}   -- ring buffer: {name, dir, t, argCount}
+local PR_SeqLogPtr = 0
+local PR_DepEdges  = {}   -- [fromName][toName] = {count, totalDelay, minDelay, maxDelay}
+local PR_Manifest  = {}
+local PR_Hooks_PR  = {}   -- connection cleanup list (named to avoid collision)
+local PR_LastProbe = 0
+local PR_Started   = false
+
+-- ── Record constructor ────────────────────────────────────────
+local function PR_NewRecord(name, remote, path, remoteType)
+    return {
+        Name=name, Remote=remote, Path=path or remote:GetFullName(),
+        RemoteType=remoteType or "RemoteEvent",
+        FireCount=0, S2CCount=0, C2SCount=0, LastFireTime=0,
+        Deltas={}, DeltaPtr=0, Direction="UNKNOWN",
+        ArgSchema={},
+        ArgCountMin=math.huge, ArgCountMax=0, ArgCountSum=0, ArgCountSamples=0,
+        FreqClass="UNKNOWN", AvgHz=0, AvgDeltaSec=0, DeltaCV=0,
+        ProbeResults={}, Predecessors={}, Successors={},
+        EchoRelevance=0, PayloadScore=0, DepImportance=0,
+        FirstSeen=os.clock(), LastSeen=os.clock(),
+    }
+end
+
+-- ── Arg slot constructor ──────────────────────────────────────
+local function PR_NewArgSlot()
+    return {
+        TypeFreq={}, DominantType="unknown", Nullable=false,
+        Samples={}, StringSet={},
+        NumberMin=math.huge, NumberMax=-math.huge,
+        NumberSum=0, NumberCount=0,
+        IsEnum=false, TotalCount=0,
+    }
+end
+
+-- ============================================================
+-- SCHEMA INFERENCER
+-- ============================================================
+local PR_SchemaInfer = {}
+
+function PR_SchemaInfer.InferType(v)
+    if v == nil then return "nil" end
+    local t = typeof(v)
+    if t == "number"    then return "number"    end
+    if t == "string"    then return "string"    end
+    if t == "boolean"   then return "boolean"   end
+    if t == "table"     then return "table"     end
+    if t == "function"  then return "function"  end
+    if t == "Vector3"   then return "Vector3"   end
+    if t == "Vector2"   then return "Vector2"   end
+    if t == "CFrame"    then return "CFrame"    end
+    if t == "Color3"    then return "Color3"    end
+    if t == "UDim2"     then return "UDim2"     end
+    if t == "EnumItem"  then return "EnumItem"  end
+    if t == "BrickColor" then return "BrickColor" end
+    if t == "Instance"  then
+        local ok, cn = pcall(function() return v.ClassName end)
+        return ok and ("Instance:"..cn) or "Instance:?"
+    end
+    return t
+end
+
+function PR_SchemaInfer.UpdateSlot(slot, v)
+    slot.TotalCount = slot.TotalCount + 1
+    local typeName = PR_SchemaInfer.InferType(v)
+    slot.TypeFreq[typeName] = (slot.TypeFreq[typeName] or 0) + 1
+    if v == nil then slot.Nullable = true; return end
+    if #slot.Samples < PR_CFG.MaxArgSamples then
+        table.insert(slot.Samples, v)
+    end
+    if typeName == "number" then
+        slot.NumberMin   = math.min(slot.NumberMin, v)
+        slot.NumberMax   = math.max(slot.NumberMax, v)
+        slot.NumberSum   = slot.NumberSum + v
+        slot.NumberCount = slot.NumberCount + 1
+    elseif typeName == "string" then
+        if not slot.StringSet[v] then
+            local setSize = 0
+            for _ in pairs(slot.StringSet) do setSize = setSize + 1 end
+            if setSize < PR_CFG.StringSampleCap then
+                slot.StringSet[v] = 1
+            end
+        else
+            slot.StringSet[v] = slot.StringSet[v] + 1
+        end
+    end
+end
+
+function PR_SchemaInfer.FinalizeSlot(slot)
+    local bestType, bestCount = "unknown", 0
+    for t, c in pairs(slot.TypeFreq) do
+        if c > bestCount then bestType = t; bestCount = c end
+    end
+    slot.DominantType = bestType
+    if bestType == "string" then
+        local setSize = 0
+        for _ in pairs(slot.StringSet) do setSize = setSize + 1 end
+        slot.IsEnum = (setSize > 0 and setSize <= 8)
+    end
+    if slot.NumberCount > 0 then
+        slot.NumberAvg = slot.NumberSum / slot.NumberCount
+    end
+end
+
+function PR_SchemaInfer.UpdateRecord(record, args)
+    local n = #args
+    record.ArgCountSamples = record.ArgCountSamples + 1
+    record.ArgCountMin     = math.min(record.ArgCountMin, n)
+    record.ArgCountMax     = math.max(record.ArgCountMax, n)
+    record.ArgCountSum     = record.ArgCountSum + n
+    local cap = math.min(n, PR_CFG.MaxArgPositions)
+    for i = 1, cap do
+        if not record.ArgSchema[i] then record.ArgSchema[i] = PR_NewArgSlot() end
+        PR_SchemaInfer.UpdateSlot(record.ArgSchema[i], args[i])
+    end
+    for i = n + 1, #record.ArgSchema do
+        record.ArgSchema[i].Nullable = true
+    end
+end
+
+function PR_SchemaInfer.GetSchemaStr(record)
+    if #record.ArgSchema == 0 then return "(no args observed)" end
+    local parts = {}
+    for i, slot in ipairs(record.ArgSchema) do
+        PR_SchemaInfer.FinalizeSlot(slot)
+        local s = slot.DominantType
+        if slot.IsEnum then
+            local keys = {}
+            for k in pairs(slot.StringSet) do table.insert(keys, k) end
+            s = "enum{" .. table.concat(keys, "|") .. "}"
+        elseif s == "number" and slot.NumberCount > 1 then
+            s = string.format("number[%.1f\226\128\147%.1f]", slot.NumberMin, slot.NumberMax)
+        end
+        if slot.Nullable then s = s .. "?" end
+        table.insert(parts, string.format("[%d]%s", i, s))
+    end
+    return table.concat(parts, ", ")
+end
+
+-- ============================================================
+-- FREQUENCY PROFILER
+-- ============================================================
+local PR_FreqProfiler = {}
+
+function PR_FreqProfiler.RecordDelta(record, t)
+    if record.LastFireTime > 0 then
+        local delta = t - record.LastFireTime
+        if delta > 0 and delta < 300 then
+            record.DeltaPtr = record.DeltaPtr + 1
+            if record.DeltaPtr > PR_CFG.DeltaCap then record.DeltaPtr = 1 end
+            record.Deltas[record.DeltaPtr] = delta
+        end
+    end
+end
+
+function PR_FreqProfiler.Classify(record)
+    local n = #record.Deltas
+    if record.FireCount < PR_CFG.RareFireCap then record.FreqClass = "RARE"; return end
+    if n < 3 then record.FreqClass = "EVENT"; return end
+    local sum, sumSq = 0, 0
+    local dMin, dMax = math.huge, -math.huge
+    for _, d in ipairs(record.Deltas) do
+        sum = sum + d; sumSq = sumSq + d*d
+        dMin = math.min(dMin, d); dMax = math.max(dMax, d)
+    end
+    local mean     = sum / n
+    local variance = (sumSq / n) - (mean * mean)
+    local stddev   = variance > 0 and math.sqrt(variance) or 0
+    local cv       = mean > 0 and (stddev / mean) or 1
+    record.AvgDeltaSec = mean
+    record.AvgHz       = mean > 0 and (1 / mean) or 0
+    record.DeltaCV     = cv
+    if cv < PR_CFG.PeriodicCVThresh then
+        record.FreqClass = "PERIODIC"
+    elseif dMax / math.max(mean, 0.001) > PR_CFG.BurstGapRatio then
+        record.FreqClass = "BURST"
+    else
+        record.FreqClass = "EVENT"
+    end
+end
+
+-- ============================================================
+-- SEQUENCE ANALYZER
+-- ============================================================
+local PR_SeqAnalyzer = {}
+
+function PR_SeqAnalyzer.Record(name, dir, t, argCount)
+    PR_SeqLogPtr = PR_SeqLogPtr + 1
+    if PR_SeqLogPtr > PR_CFG.SeqLogCap then PR_SeqLogPtr = 1 end
+    PR_SeqLog[PR_SeqLogPtr] = { name=name, dir=dir, t=t, argc=argCount }
+end
+
+function PR_SeqAnalyzer.UpdateEdges(targetName, targetTime)
+    local window = PR_CFG.CoFireWindowSec
+    local ptr    = PR_SeqLogPtr - 1
+    local count  = 0
+    while count < PR_CFG.SeqLogCap do
+        if ptr < 1 then ptr = PR_CFG.SeqLogCap end
+        local entry = PR_SeqLog[ptr]
+        if not entry then break end
+        local age = targetTime - entry.t
+        if age > window then break end
+        if entry.name ~= targetName and age > 0 then
+            local from = entry.name
+            if not PR_DepEdges[from] then PR_DepEdges[from] = {} end
+            if not PR_DepEdges[from][targetName] then
+                PR_DepEdges[from][targetName] = {
+                    count=0, totalDelay=0, minDelay=math.huge, maxDelay=0
+                }
+            end
+            local edge = PR_DepEdges[from][targetName]
+            edge.count      = edge.count + 1
+            edge.totalDelay = edge.totalDelay + age
+            edge.minDelay   = math.min(edge.minDelay, age)
+            edge.maxDelay   = math.max(edge.maxDelay, age)
+        end
+        ptr = ptr - 1; count = count + 1
+    end
+end
+
+function PR_SeqAnalyzer.FlushEdges()
+    for fromName, targets in pairs(PR_DepEdges) do
+        for toName, edge in pairs(targets) do
+            if edge.count >= PR_CFG.MinCoFireCount then
+                local fromRec = PR_Registry[fromName]
+                local toRec   = PR_Registry[toName]
+                if fromRec and toRec then
+                    fromRec.Successors[toName] = {
+                        count=edge.count,
+                        avgDelay=edge.totalDelay/edge.count,
+                        minDelay=edge.minDelay, maxDelay=edge.maxDelay,
+                    }
+                    local predCount = 0
+                    for _ in pairs(toRec.Predecessors) do predCount = predCount + 1 end
+                    if predCount < PR_CFG.MaxPredecessors then
+                        toRec.Predecessors[fromName] = {
+                            count=edge.count,
+                            avgDelay=edge.totalDelay/edge.count,
+                        }
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- DEPENDENCY GRAPH
+-- ============================================================
+local PR_DepGraph = {}
+
+function PR_DepGraph.GetEntryPoints()
+    local entries = {}
+    for name, rec in pairs(PR_Registry) do
+        local predCount = 0
+        for _ in pairs(rec.Predecessors) do predCount = predCount + 1 end
+        if predCount == 0 and rec.FireCount > 0 then
+            table.insert(entries, { Name=name, Record=rec, FireCount=rec.FireCount })
+        end
+    end
+    table.sort(entries, function(a, b) return a.FireCount > b.FireCount end)
+    return entries
+end
+
+function PR_DepGraph.GetChain(startName, visited, depth)
+    visited = visited or {}; depth = depth or 0
+    if depth > 10 or visited[startName] then return {} end
+    visited[startName] = true
+    local rec = PR_Registry[startName]
+    if not rec then return {} end
+    local chain = { startName }
+    local bestSucc, bestCount = nil, 0
+    for succName, edge in pairs(rec.Successors) do
+        if edge.count > bestCount then bestSucc=succName; bestCount=edge.count end
+    end
+    if bestSucc then
+        local rest = PR_DepGraph.GetChain(bestSucc, visited, depth + 1)
+        for _, n in ipairs(rest) do table.insert(chain, n) end
+    end
+    return chain
+end
+
+function PR_DepGraph.GetImportanceScore(record)
+    local score = 0
+    for _, edge in pairs(record.Successors) do
+        score = score + math.log(1 + edge.count) * (1 / math.max(edge.avgDelay, 0.001))
+    end
+    return score
+end
+
+-- ============================================================
+-- INTERCEPTOR
+-- ============================================================
+local PR_Interceptor = {}
+
+function PR_Interceptor.OnFire(name, direction, args, t)
+    local rec = PR_Registry[name]
+    if not rec then return end
+    rec.FireCount = rec.FireCount + 1
+    rec.LastSeen  = t
+    if direction == "S2C" then
+        rec.S2CCount = rec.S2CCount + 1
+        if rec.Direction == "UNKNOWN" then rec.Direction = "S2C"
+        elseif rec.Direction == "C2S"  then rec.Direction = "BOTH" end
+    elseif direction == "C2S" then
+        rec.C2SCount = rec.C2SCount + 1
+        if rec.Direction == "UNKNOWN" then rec.Direction = "C2S"
+        elseif rec.Direction == "S2C"  then rec.Direction = "BOTH" end
+    end
+    PR_SchemaInfer.UpdateRecord(rec, args)
+    PR_FreqProfiler.RecordDelta(rec, t)
+    rec.LastFireTime = t
+    if rec.FireCount % 8 == 0 then PR_FreqProfiler.Classify(rec) end
+    PR_SeqAnalyzer.Record(name, direction, t, #args)
+    PR_SeqAnalyzer.UpdateEdges(name, t)
+end
+
+function PR_Interceptor.HookIncoming(rec)
+    if rec.RemoteType ~= "RemoteEvent" then return end
+    local ok, conn = pcall(function()
+        return rec.Remote.OnClientEvent:Connect(function(...)
+            PR_Interceptor.OnFire(rec.Name, "S2C", {...}, os.clock())
+        end)
+    end)
+    if ok and conn then table.insert(PR_Hooks_PR, conn) end
+end
+
+function PR_Interceptor.HookOutgoing()
+    if not (getrawmetatable and setreadonly and getnamecallmethod) then
+        warn("[PR] C2S hook unavailable — executor missing getrawmetatable/getnamecallmethod")
+        return false
+    end
+    local ok, err = pcall(function()
+        local mt = getrawmetatable(game)
+        local oldNC = mt.__namecall
+        setreadonly(mt, false)
+        local function newNC(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" or method == "InvokeServer" then
+                local name = self.Name
+                if PR_Registry[name] then
+                    PR_Interceptor.OnFire(name, "C2S", {...}, os.clock())
+                end
+            end
+            return oldNC(self, ...)
+        end
+        mt.__namecall = newcclosure and newcclosure(newNC) or newNC
+        setreadonly(mt, true)
+    end)
+    if not ok then warn("[PR] C2S hook failed: " .. tostring(err)); return false end
+    return true
+end
+
+function PR_Interceptor.ScanRoots()
+    local discovered = 0
+    local queue = {}
+    for _, root in ipairs(PR_CFG.ScanRoots) do
+        table.insert(queue, { node=root, depth=0 })
+    end
+    local qi = 1
+    while qi <= #queue do
+        local item = queue[qi]; qi = qi + 1
+        if item.depth <= PR_CFG.ScanDepthLimit then
+            local ok, children = pcall(function() return item.node:GetChildren() end)
+            if ok then
+                for _, child in ipairs(children) do
+                    local cls = child.ClassName
+                    if cls == "RemoteEvent" or cls == "RemoteFunction" then
+                        local name = child.Name
+                        if not PR_Registry[name] and discovered < PR_CFG.MaxTrackedRemotes then
+                            local rec = PR_NewRecord(name, child, child:GetFullName(), cls)
+                            PR_Registry[name] = rec
+                            PR_Interceptor.HookIncoming(rec)
+                            discovered = discovered + 1
+                        end
+                    end
+                    table.insert(queue, { node=child, depth=item.depth + 1 })
+                end
+            end
+        end
+        if qi % 200 == 0 then task.wait() end
+    end
+    return discovered
+end
+
+function PR_Interceptor.WatchForNew()
+    for _, root in ipairs(PR_CFG.ScanRoots) do
+        local conn = root.DescendantAdded:Connect(function(desc)
+            local cls = desc.ClassName
+            if cls == "RemoteEvent" or cls == "RemoteFunction" then
+                local name = desc.Name
+                if not PR_Registry[name] then
+                    local rec = PR_NewRecord(name, desc, desc:GetFullName(), cls)
+                    PR_Registry[name] = rec
+                    PR_Interceptor.HookIncoming(rec)
+                end
+            end
+        end)
+        table.insert(PR_Hooks_PR, conn)
+    end
+end
+
+-- ============================================================
+-- ACTIVE PROBER
+-- ============================================================
+local PR_ActiveProber = {}
+
+function PR_ActiveProber.GenPermutations(record)
+    local perms = {}
+    local schema = record.ArgSchema
+    if #schema == 0 then table.insert(perms, {}); return perms end
+    local baseline = {}
+    for i, slot in ipairs(schema) do
+        PR_SchemaInfer.FinalizeSlot(slot)
+        local dt = slot.DominantType
+        if dt == "number" then baseline[i] = slot.NumberAvg or 0
+        elseif dt == "string" then
+            baseline[i] = next(slot.StringSet) or ""
+        elseif dt == "boolean" then baseline[i] = true
+        else baseline[i] = nil end
+    end
+    table.insert(perms, baseline)
+    for i = 1, math.min(#schema, 4) do
+        if not schema[i].Nullable then
+            local perm = {}
+            for j, v in ipairs(baseline) do perm[j] = v end
+            perm[i] = nil
+            table.insert(perms, perm)
+            if #perms >= PR_CFG.ProbeMaxPerRemote then break end
+        end
+    end
+    for i, slot in ipairs(schema) do
+        if #perms >= PR_CFG.ProbeMaxPerRemote then break end
+        local perm = {}
+        for j, v in ipairs(baseline) do perm[j] = v end
+        if slot.DominantType == "number" then perm[i] = "pr_probe"
+        elseif slot.DominantType == "string" then perm[i] = 0 end
+        table.insert(perms, perm)
+    end
+    return perms
+end
+
+function PR_ActiveProber.ProbeRemote(name)
+    if not PR_CFG.ProbeEnabled then return end
+    local now = os.clock()
+    if now - PR_LastProbe < PR_CFG.ProbeRateLimit then return end
+    PR_LastProbe = now
+    local rec = PR_Registry[name]
+    if not rec then return end
+    if PR_CFG.ProbeSafeRE and rec.C2SCount == 0 then return end
+    if rec.RemoteType ~= "RemoteEvent" then return end
+    local perms = PR_ActiveProber.GenPermutations(rec)
+    for _, args in ipairs(perms) do
+        task.spawn(function()
+            local outcome = "ok"
+            local ok, err = pcall(function() rec.Remote:FireServer(table.unpack(args)) end)
+            if not ok then outcome = "error:" .. tostring(err):sub(1, 60) end
+            table.insert(rec.ProbeResults, { args=args, outcome=outcome, t=os.clock() })
+            if #rec.ProbeResults > 32 then table.remove(rec.ProbeResults, 1) end
+        end)
+        task.wait(0.1)
+    end
+end
+
+function PR_ActiveProber.SweepTopCandidates(n)
+    if not PR_CFG.ProbeEnabled then return end
+    n = n or 5
+    local candidates = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.C2SCount > 0 and rec.RemoteType == "RemoteEvent" then
+            table.insert(candidates, { Name=name, Score=rec.C2SCount })
+        end
+    end
+    table.sort(candidates, function(a, b) return a.Score > b.Score end)
+    for i = 1, math.min(n, #candidates) do
+        task.spawn(function()
+            task.wait((i-1) * 1.5)
+            PR_ActiveProber.ProbeRemote(candidates[i].Name)
+        end)
+    end
+end
+
+-- ============================================================
+-- MANIFEST BUILDER
+-- ============================================================
+local PR_ManifestBuilder = {}
+
+function PR_ManifestBuilder.Rebuild()
+    PR_SeqAnalyzer.FlushEdges()
+    local manifest = {
+        PlaceId      = tostring(game.PlaceId),
+        BuiltAt      = os.clock(),
+        TotalRemotes = 0,
+        ByFreqClass  = { PERIODIC={}, BURST={}, EVENT={}, RARE={}, UNKNOWN={} },
+        ByDirection  = { S2C={}, C2S={}, BOTH={}, UNKNOWN={} },
+        EntryPoints  = PR_DepGraph.GetEntryPoints(),
+        TopByFires   = {},
+        TopByPayload = {},
+        DepChains    = {},
+        Remotes      = {},
+    }
+    for name, rec in pairs(PR_Registry) do
+        PR_FreqProfiler.Classify(rec)
+        for _, slot in ipairs(rec.ArgSchema) do PR_SchemaInfer.FinalizeSlot(slot) end
+        rec.DepImportance = PR_DepGraph.GetImportanceScore(rec)
+        -- EchoRelevance: stable periodic S2C remotes are best for timing calibration
+        local echoScore = 0
+        if rec.FreqClass == "PERIODIC" and rec.S2CCount > 0 then
+            echoScore = math.clamp(1 - rec.DeltaCV, 0, 1)
+        end
+        rec.EchoRelevance = echoScore
+        -- PayloadScore: C2S remotes with string args make good carriers
+        local payScore = 0
+        if rec.C2SCount > 2 then
+            for _, slot in ipairs(rec.ArgSchema) do
+                if slot.DominantType == "string" then payScore = payScore + 0.3 end
+            end
+            payScore = math.clamp(payScore, 0, 1)
+        end
+        rec.PayloadScore = payScore
+        manifest.TotalRemotes = manifest.TotalRemotes + 1
+        if manifest.ByFreqClass[rec.FreqClass] then
+            table.insert(manifest.ByFreqClass[rec.FreqClass], name)
+        end
+        if manifest.ByDirection[rec.Direction] then
+            table.insert(manifest.ByDirection[rec.Direction], name)
+        end
+        local predCount, succCount = 0, 0
+        for _ in pairs(rec.Predecessors) do predCount = predCount + 1 end
+        for _ in pairs(rec.Successors)   do succCount  = succCount  + 1 end
+        manifest.Remotes[name] = {
+            Path=rec.Path, Type=rec.RemoteType, Direction=rec.Direction,
+            FireCount=rec.FireCount, S2CCount=rec.S2CCount, C2SCount=rec.C2SCount,
+            FreqClass=rec.FreqClass, AvgHz=rec.AvgHz, DeltaCV=rec.DeltaCV,
+            ArgCountMin=rec.ArgCountMin, ArgCountMax=rec.ArgCountMax,
+            SchemaStr=PR_SchemaInfer.GetSchemaStr(rec),
+            EchoRelevance=rec.EchoRelevance, PayloadScore=rec.PayloadScore,
+            DepImportance=rec.DepImportance, PredCount=predCount, SuccCount=succCount,
+        }
+    end
+    local byFires = {}
+    for name, rec in pairs(PR_Registry) do
+        table.insert(byFires, { name=name, fires=rec.FireCount })
+    end
+    table.sort(byFires, function(a, b) return a.fires > b.fires end)
+    for i = 1, math.min(10, #byFires) do table.insert(manifest.TopByFires, byFires[i]) end
+    local byPayload = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.PayloadScore > 0 then
+            table.insert(byPayload, { name=name, score=rec.PayloadScore })
+        end
+    end
+    table.sort(byPayload, function(a, b) return a.score > b.score end)
+    for i = 1, math.min(10, #byPayload) do table.insert(manifest.TopByPayload, byPayload[i]) end
+    for _, ep in ipairs(manifest.EntryPoints) do
+        local chain = PR_DepGraph.GetChain(ep.Name)
+        if #chain > 1 then table.insert(manifest.DepChains, chain) end
+        if #manifest.DepChains >= 8 then break end
+    end
+    PR_Manifest = manifest
+    return manifest
+end
+
+-- ============================================================
+-- PERSISTENCE
+-- ============================================================
+local PR_Persist = {}
+
+function PR_Persist.Serialize()
+    local data = { version="PR_v1", placeId=tostring(game.PlaceId), savedAt=os.clock(), remotes={} }
+    for name, rec in pairs(PR_Registry) do
+        local schema = {}
+        for i, slot in ipairs(rec.ArgSchema) do
+            PR_SchemaInfer.FinalizeSlot(slot)
+            schema[i] = {
+                DominantType=slot.DominantType, Nullable=slot.Nullable,
+                IsEnum=slot.IsEnum, StringSet=slot.StringSet,
+                NumberMin=slot.NumberMin~=math.huge and slot.NumberMin or nil,
+                NumberMax=slot.NumberMax~=-math.huge and slot.NumberMax or nil,
+                NumberAvg=slot.NumberAvg, TypeFreq=slot.TypeFreq,
+                TotalCount=slot.TotalCount,
+            }
+        end
+        local preds, succs = {}, {}
+        for k, v in pairs(rec.Predecessors) do preds[k]={count=v.count,avgDelay=v.avgDelay} end
+        for k, v in pairs(rec.Successors) do
+            succs[k]={count=v.count,avgDelay=v.avgDelay,minDelay=v.minDelay,maxDelay=v.maxDelay}
+        end
+        data.remotes[name] = {
+            Path=rec.Path, RemoteType=rec.RemoteType,
+            FireCount=rec.FireCount, S2CCount=rec.S2CCount, C2SCount=rec.C2SCount,
+            Direction=rec.Direction, FreqClass=rec.FreqClass,
+            AvgHz=rec.AvgHz, DeltaCV=rec.DeltaCV,
+            EchoRelevance=rec.EchoRelevance, PayloadScore=rec.PayloadScore,
+            DepImportance=rec.DepImportance, ArgSchema=schema,
+            Predecessors=preds, Successors=succs, FirstSeen=rec.FirstSeen,
+        }
+    end
+    return data
+end
+
+function PR_Persist.Restore(data)
+    if not data or data.version~="PR_v1" or data.placeId~=tostring(game.PlaceId) then return end
+    for name, saved in pairs(data.remotes) do
+        local rec = PR_Registry[name]
+        if rec then
+            rec.FireCount     = math.max(rec.FireCount, saved.FireCount)
+            rec.S2CCount      = math.max(rec.S2CCount,  saved.S2CCount)
+            rec.C2SCount      = math.max(rec.C2SCount,  saved.C2SCount)
+            if rec.Direction == "UNKNOWN" then rec.Direction = saved.Direction end
+            rec.FreqClass     = saved.FreqClass
+            rec.AvgHz         = saved.AvgHz
+            rec.DeltaCV       = saved.DeltaCV
+            rec.EchoRelevance = saved.EchoRelevance
+            rec.PayloadScore  = saved.PayloadScore
+            rec.DepImportance = saved.DepImportance
+            for i, savedSlot in ipairs(saved.ArgSchema or {}) do
+                if not rec.ArgSchema[i] then rec.ArgSchema[i] = PR_NewArgSlot() end
+                local slot = rec.ArgSchema[i]
+                for t, c in pairs(savedSlot.TypeFreq or {}) do
+                    slot.TypeFreq[t] = (slot.TypeFreq[t] or 0) + c
+                end
+                slot.TotalCount = slot.TotalCount + (savedSlot.TotalCount or 0)
+                if savedSlot.Nullable then slot.Nullable = true end
+                if savedSlot.IsEnum   then slot.IsEnum   = true end
+                for k, v in pairs(savedSlot.StringSet or {}) do
+                    slot.StringSet[k] = (slot.StringSet[k] or 0) + v
+                end
+                if savedSlot.NumberMin then
+                    slot.NumberMin = math.min(slot.NumberMin, savedSlot.NumberMin)
+                end
+                if savedSlot.NumberMax then
+                    slot.NumberMax = math.max(slot.NumberMax, savedSlot.NumberMax)
+                end
+                PR_SchemaInfer.FinalizeSlot(slot)
+            end
+            for pred, edge in pairs(saved.Predecessors or {}) do
+                rec.Predecessors[pred] = rec.Predecessors[pred] or edge
+            end
+            for succ, edge in pairs(saved.Successors or {}) do
+                rec.Successors[succ] = rec.Successors[succ] or edge
+            end
+        end
+    end
+end
+
+function PR_Persist.Save()
+    if not PR_CFG.PersistEnabled then return end
+    pcall(function() _G[PR_CFG.PersistKey] = PR_Persist.Serialize() end)
+end
+
+function PR_Persist.Load()
+    if not PR_CFG.PersistEnabled then return end
+    pcall(function()
+        local saved = _G[PR_CFG.PersistKey]
+        if saved then PR_Persist.Restore(saved) end
+    end)
+end
+
+-- ============================================================
+-- BRIDGE — integration with ETM / CDG / LWM
+-- ============================================================
+local PR_Bridge = {}
+
+function PR_Bridge.FeedETM()
+    local topEcho = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.FreqClass == "PERIODIC" and rec.EchoRelevance > 0.4 then
+            table.insert(topEcho, { name=name, score=rec.EchoRelevance })
+        end
+    end
+    table.sort(topEcho, function(a, b) return a.score > b.score end)
+    local echoCtx = ""
+    for i = 1, math.min(3, #topEcho) do
+        echoCtx = echoCtx .. "|PR_ECHO:" .. topEcho[i].name
+    end
+    local topPay = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.PayloadScore > 0.3 then
+            table.insert(topPay, { name=name, score=rec.PayloadScore })
+        end
+    end
+    table.sort(topPay, function(a, b) return a.score > b.score end)
+    local payCtx = ""
+    for i = 1, math.min(2, #topPay) do
+        payCtx = payCtx .. "|PR_PAY:" .. topPay[i].name
+    end
+    _G.PR_ETM_CONTEXT = echoCtx .. payCtx
+    -- Protocol health tracking through ETM
+    local totalSeen, periodicCount = 0, 0
+    for _, rec in pairs(PR_Registry) do
+        totalSeen = totalSeen + 1
+        if rec.FreqClass == "PERIODIC" then periodicCount = periodicCount + 1 end
+    end
+    local sig = string.format("n%d_p%d", totalSeen, periodicCount)
+    ETM.Update("PR_ProtocolHealth", sig, totalSeen > 5 and periodicCount > 0)
+end
+
+function PR_Bridge.FeedCDG()
+    for fromName, targets in pairs(PR_DepEdges) do
+        for toName, edge in pairs(targets) do
+            if edge.count >= PR_CFG.MinCoFireCount then
+                local cdgEdge = CDG.GetOrInitEdge(fromName, toName)
+                cdgEdge.confidence  = math.min(edge.count / 20.0, 1.0)
+                local tightness     = math.exp(-(edge.totalDelay/math.max(edge.count,1)) / 0.1)
+                cdgEdge.effectSize  = tightness * cdgEdge.confidence
+                cdgEdge.coFired     = edge.count
+                cdgEdge.lastUpdated = os.clock()
+            end
+        end
+    end
+end
+
+function PR_Bridge.FeedLWM()
+    local classCount = { PERIODIC=0, BURST=0, EVENT=0, RARE=0, UNKNOWN=0 }
+    local c2sCount, s2cCount, payloadReady, total = 0, 0, 0, 0
+    for _, rec in pairs(PR_Registry) do
+        total = total + 1
+        if classCount[rec.FreqClass] then classCount[rec.FreqClass] = classCount[rec.FreqClass] + 1 end
+        if rec.C2SCount > 0 then c2sCount = c2sCount + 1 end
+        if rec.S2CCount > 0 then s2cCount = s2cCount + 1 end
+        if rec.PayloadScore > 0.4 then payloadReady = payloadReady + 1 end
+    end
+    _G.PR_LWM_INJECT = {
+        pr_periodic   = classCount.PERIODIC,
+        pr_burst      = classCount.BURST,
+        pr_c2s        = c2sCount,
+        pr_s2c        = s2cCount,
+        pr_payloadRdy = payloadReady,
+        pr_totalSeen  = total,
+    }
+end
+
+function PR_Bridge.GetPayloadCandidates()
+    local candidates = {}
+    for name, rec in pairs(PR_Registry) do
+        if rec.PayloadScore > 0.25 and rec.C2SCount > 0 then
+            table.insert(candidates, {
+                Name=name, Remote=rec.Remote, Path=rec.Path,
+                PayloadScore=rec.PayloadScore,
+                SchemaStr=PR_SchemaInfer.GetSchemaStr(rec),
+                ArgSchema=rec.ArgSchema,
+            })
+        end
+    end
+    table.sort(candidates, function(a, b) return a.PayloadScore > b.PayloadScore end)
+    return candidates
+end
+
+function PR_Bridge.GetBestEchoCalibrator()
+    local best, bestScore = nil, -1
+    for _, rec in pairs(PR_Registry) do
+        if rec.EchoRelevance > bestScore then best=rec; bestScore=rec.EchoRelevance end
+    end
+    return best
+end
+
+function PR_Bridge.Sync()
+    PR_ManifestBuilder.Rebuild()
+    PR_Bridge.FeedETM()
+    PR_Bridge.FeedCDG()
+    PR_Bridge.FeedLWM()
+    PR_Persist.Save()
+end
+
+-- ============================================================
+-- ANALYTICS
+-- ============================================================
+local PR_Analytics = {}
+
+function PR_Analytics.GetSummary()
+    local m = PR_Manifest
+    if not m or not m.Remotes then m = PR_ManifestBuilder.Rebuild() end
+    return {
+        TotalRemotes = m.TotalRemotes or 0,
+        PERIODIC     = m.ByFreqClass and #(m.ByFreqClass.PERIODIC or {}) or 0,
+        BURST        = m.ByFreqClass and #(m.ByFreqClass.BURST    or {}) or 0,
+        EVENT        = m.ByFreqClass and #(m.ByFreqClass.EVENT    or {}) or 0,
+        RARE         = m.ByFreqClass and #(m.ByFreqClass.RARE     or {}) or 0,
+        C2S          = m.ByDirection and #(m.ByDirection.C2S      or {}) or 0,
+        S2C          = m.ByDirection and #(m.ByDirection.S2C      or {}) or 0,
+        BOTH         = m.ByDirection and #(m.ByDirection.BOTH     or {}) or 0,
+        TopByFires   = m.TopByFires or {},
+        TopByPayload = m.TopByPayload or {},
+        EntryPoints  = m.EntryPoints or {},
+        DepChains    = m.DepChains or {},
+        BuiltAt      = m.BuiltAt,
+    }
+end
+
+function PR_Analytics.GetReport()
+    local s = PR_Analytics.GetSummary()
+    local lines = {
+        string.format("[PR] Protocol Manifest — PlaceId: %s", tostring(game.PlaceId)),
+        string.format("  Remotes: %d  |  PERIODIC:%d  BURST:%d  EVENT:%d  RARE:%d",
+            s.TotalRemotes, s.PERIODIC, s.BURST, s.EVENT, s.RARE),
+        string.format("  Directions: S2C:%d  C2S:%d  BOTH:%d", s.S2C, s.C2S, s.BOTH),
+    }
+    if #s.TopByFires > 0 then
+        table.insert(lines, "  Top by fires:")
+        for i = 1, math.min(5, #s.TopByFires) do
+            local e = s.TopByFires[i]
+            table.insert(lines, string.format("    [%d] %s (%d)", i, e.name, e.fires))
+        end
+    end
+    if #s.TopByPayload > 0 then
+        table.insert(lines, "  Top payload carriers:")
+        for i = 1, math.min(3, #s.TopByPayload) do
+            local e = s.TopByPayload[i]
+            table.insert(lines, string.format("    [%d] %s (%.2f)", i, e.name, e.score))
+        end
+    end
+    if #s.DepChains > 0 then
+        table.insert(lines, "  Dep chains:")
+        for i = 1, math.min(3, #s.DepChains) do
+            table.insert(lines, "    " .. table.concat(s.DepChains[i], " -> "))
+        end
+    end
+    return table.concat(lines, "\n")
+end
+
+function PR_Analytics.Print() print(PR_Analytics.GetReport()) end
+
+-- ============================================================
+-- STATUS PANEL (inline, reuses existing mk/addCorner helpers)
+-- ============================================================
+local function PR_BuildPanel()
+    if not PR_CFG.ShowPanel then return end
+    pcall(function()
+        local pg = player:WaitForChild("PlayerGui", 10)
+        if not pg then return end
+        local ex = pg:FindFirstChild("PR_Panel"); if ex then ex:Destroy() end
+        local sg = mk("ScreenGui", { Name="PR_Panel", ResetOnSpawn=false,
+            ZIndexBehavior=Enum.ZIndexBehavior.Sibling, DisplayOrder=998, Parent=pg })
+        local frame = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(10,12,20),
+            BackgroundTransparency=0.1, BorderSizePixel=0,
+            Size=UDim2.new(0,272,0,185),
+            Position=UDim2.new(1,-288,0,14), Parent=sg,
+        })
+        addCorner(frame, UDim.new(0,10))
+        local stroke = mk("UIStroke", { Thickness=1, Color=Color3.fromRGB(70,130,255),
+            Transparency=0.5, Parent=frame })
+        mk("TextLabel", { BackgroundTransparency=1, Size=UDim2.new(1,0,0,22),
+            Position=UDim2.new(0,0,0,4), Font=Enum.Font.GothamBold, TextSize=11,
+            TextColor3=Color3.fromRGB(90,160,255),
+            Text="  \226\151\136  PR — Protocol Reconstruction", Parent=frame })
+        local body = mk("TextLabel", { Name="Body", BackgroundTransparency=1,
+            Size=UDim2.new(1,-10,1,-30), Position=UDim2.new(0,5,0,28),
+            Font=Enum.Font.Code, TextSize=10, TextColor3=Color3.fromRGB(195,205,225),
+            TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top,
+            TextWrapped=true, Text="Initializing...", Parent=frame })
+        -- Drag
+        local dragging, dragStart, startPos = false, nil, nil
+        frame.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then
+                dragging=true; dragStart=i.Position; startPos=frame.Position
+            end
+        end)
+        frame.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging=false end
+        end)
+        game:GetService("UserInputService").InputChanged:Connect(function(i)
+            if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+                local d = i.Position - dragStart
+                frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset+d.X,
+                    startPos.Y.Scale, startPos.Y.Offset+d.Y)
+            end
+        end)
+        -- Refresh loop
+        task.spawn(function()
+            while sg and sg.Parent do
+                local s = PR_Analytics.GetSummary()
+                local elapsed = s.BuiltAt and string.format("%.0fs ago", os.clock()-s.BuiltAt) or "pending"
+                local topFire = s.TopByFires[1] and
+                    string.format("%s (%d)", s.TopByFires[1].name, s.TopByFires[1].fires) or "\226\128\148"
+                local topPay  = s.TopByPayload[1] and
+                    string.format("%s (%.2f)", s.TopByPayload[1].name, s.TopByPayload[1].score) or "\226\128\148"
+                local chainStr = s.DepChains[1] and table.concat(s.DepChains[1],"->"):sub(1,30) or "\226\128\148"
+                if body and body.Parent then
+                    body.Text = table.concat({
+                        string.format("Remotes: %d  (sync: %s)", s.TotalRemotes, elapsed),
+                        string.format("PERIODIC:%-3d BURST:%-3d EVENT:%d", s.PERIODIC,s.BURST,s.EVENT),
+                        string.format("S2C:%-4d C2S:%-4d BOTH:%d", s.S2C, s.C2S, s.BOTH),
+                        "",
+                        "Top fired: " .. topFire,
+                        "Top pay:   " .. topPay,
+                        "Dep chain: " .. chainStr,
+                        string.format("Probe: %s", PR_CFG.ProbeEnabled and "ON" or "off"),
+                    }, "\n")
+                end
+                task.wait(PR_CFG.PanelRefreshSec)
+            end
+        end)
+    end)
+end
+
+-- ============================================================
+-- PR — STARTUP SEQUENCE
+-- ============================================================
+local function PR_Start()
+    if PR_Started then return end
+    PR_Started = true
+    task.spawn(function()
+        local discovered = PR_Interceptor.ScanRoots()
+        print(string.format("[PR] Discovered %d remotes.", discovered))
+        PR_Persist.Load()
+        local outOk = PR_Interceptor.HookOutgoing()
+        print(outOk and "[PR] C2S hook active." or "[PR] C2S hook unavailable — S2C only.")
+        PR_Interceptor.WatchForNew()
+        task.wait(2)
+        PR_ManifestBuilder.Rebuild()
+        print("[PR] Initial manifest built.")
+        PR_Analytics.Print()
+        -- Bridge sync loop
+        task.spawn(function()
+            while PR_Started do
+                task.wait(PR_CFG.BridgePollSec)
+                PR_Bridge.Sync()
+            end
+        end)
+        -- Active prober loop
+        task.spawn(function()
+            task.wait(10)
+            while PR_Started do
+                if PR_CFG.ProbeEnabled then PR_ActiveProber.SweepTopCandidates(3) end
+                task.wait(30)
+            end
+        end)
+        -- Frequency reclassification loop
+        task.spawn(function()
+            while PR_Started do
+                task.wait(15)
+                for _, rec in pairs(PR_Registry) do PR_FreqProfiler.Classify(rec) end
+            end
+        end)
+        PR_BuildPanel()
+    end)
+end
+
+PR_Start()
+
+-- ============================================================
 --  ███████╗ █████╗ ██████╗ ██████╗ 
 --  ██╔════╝██╔══██╗██╔══██╗██╔══██╗
 --  ███████╗███████║██████╔╝██████╔╝
@@ -4429,7 +5411,7 @@ LoadForge()
 --
 --  Modules: TargetResolver · Crafter · Simulator · Flyer
 --           PhoenixLoop · Orchestrator
---  Hooks into: ETM · CDG · LWM · StateSignature · IntelMem
+--  Hooks into: ETM · CDG · LWM · StateSignature · IntelMem · PR
 -- ============================================================
 
 -- ── SARP is initialized inside an IIFE so all internal locals
