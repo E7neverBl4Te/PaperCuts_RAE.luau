@@ -8384,11 +8384,13 @@ do
         for _, entry in ipairs(sorted) do
             local name = entry.name
             local rec  = entry.rec
-            -- Apply filters
-            if PR_FilterRole  ~= "ALL" and rec.SemanticRole ~= PR_FilterRole  then goto continue end
-            if PR_FilterClass ~= "ALL" and rec.FreqClass    ~= PR_FilterClass  then goto continue end
-            if PR_FilterDir   ~= "ALL" and rec.Direction    ~= PR_FilterDir    then goto continue end
-            if searchLower ~= "" and not name:lower():find(searchLower, 1, true) then goto continue end
+            -- Apply filters (Lua 5.1 compatible — no goto)
+            local skip = false
+            if PR_FilterRole  ~= "ALL" and rec.SemanticRole ~= PR_FilterRole  then skip = true end
+            if PR_FilterClass ~= "ALL" and rec.FreqClass    ~= PR_FilterClass  then skip = true end
+            if PR_FilterDir   ~= "ALL" and rec.Direction    ~= PR_FilterDir    then skip = true end
+            if searchLower ~= "" and not name:lower():find(searchLower, 1, true) then skip = true end
+            if not skip then
             shown = shown + 1
             if shown > 120 then break end  -- cap render
 
@@ -8425,8 +8427,7 @@ do
                 TextColor3=Color3.fromRGB(90,80,110),
                 Position=UDim2.new(0,6,0,33),Size=UDim2.new(1,-12,0,12),
                 TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
-
-            ::continue::
+            end -- if not skip
         end
         if shown == 0 then
             mk("TextLabel",{Text="No remotes match current filter.",BackgroundTransparency=1,
