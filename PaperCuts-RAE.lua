@@ -19,6 +19,8 @@
     ║     RAE · Recursive · Bridge · Analytics · Chain · Utilities · About║
     ╚══════════════════════════════════════════════════════════════════════╝
 --]]
+;(function()
+
 
 -- ============================================================
 -- SERVICES
@@ -8882,4 +8884,5 @@ end
 if player.Character then task.spawn(bootRAE)
 else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
 
+end)()
 -- END OF SCRIPT
