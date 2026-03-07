@@ -20,6 +20,10 @@ local chunks = {
     "avd_strategist.lua", -- AVD: intelligence & generation
     "avd_operator.lua",   -- AVD: execution & lifecycle
     "avd_ui.lua",         -- AVD: dashboard UI
+    "tsr_registry.lua",   -- TSR: 100-intent library + binding table
+    "tsr_binder.lua",     -- TSR: verification + binding engine
+    "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
+    "tsr_ui.lua",         -- TSR: dashboard
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
