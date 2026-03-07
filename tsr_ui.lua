@@ -346,9 +346,9 @@ do
 
             for name, intent in pairs(intents) do
                 local binding = bindings[name]
-                if showBoundOnly and not binding then goto cont end
-                table.insert(rows, { name=name, intent=intent, binding=binding })
-                ::cont::
+                if not showBoundOnly or binding then
+                    table.insert(rows, { name=name, intent=intent, binding=binding })
+                end
             end
             table.sort(rows, function(a,b)
                 -- Bound first, then alphabetical
@@ -488,53 +488,51 @@ do
             for _, name in ipairs(callable) do
                 local reg    = _C.TSR.Registry
                 local intent = reg and reg.GetIntent(name)
-                if not intent then goto skip end
+                if intent then
+                    local row = mk("Frame", {
+                        BackgroundColor3 = COL.CARD,
+                        BackgroundTransparency = 0.3,
+                        Size   = UDim2.new(1,0,0,42),
+                        Parent = quickScroll,
+                    })
+                    addCorner(row, UDim.new(0,5))
+                    addStroke(row, 1, 0.2)
+                    mk("UIPadding", { PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=row })
 
-                local row = mk("Frame", {
-                    BackgroundColor3 = COL.CARD,
-                    BackgroundTransparency = 0.3,
-                    Size   = UDim2.new(1,0,0,42),
-                    Parent = quickScroll,
-                })
-                addCorner(row, UDim.new(0,5))
-                addStroke(row, 1, 0.2)
-                mk("UIPadding", { PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=row })
+                    local icon = CAT_ICONS[intent.Category] or "•"
+                    mkLabel(row, icon.." "..name, 11, COL.BOUND, true
+                    ).Size = UDim2.new(0.7,0,0,14)
 
-                local icon = CAT_ICONS[intent.Category] or "•"
-                mkLabel(row, icon.." "..name, 11, COL.BOUND, true
-                ).Size = UDim2.new(0.7,0,0,14)
+                    local paramStr = table.concat((function()
+                        local ps={}
+                        for _,p in ipairs(intent.Parameters or {}) do
+                            table.insert(ps, p.name)
+                        end
+                        return ps
+                    end)(), ", ")
+                    mkLabel(row, paramStr:sub(1,40), 9, COL.MUTED
+                    ).Position = UDim2.new(0,8,0,20)
 
-                -- Default args display
-                local paramStr = table.concat((function()
-                    local ps={}
-                    for _,p in ipairs(intent.Parameters or {}) do
-                        table.insert(ps, p.name)
-                    end
-                    return ps
-                end)(), ", ")
-                mkLabel(row, paramStr:sub(1,40), 9, COL.MUTED
-                ).Position = UDim2.new(0,8,0,20)
+                    local callBtn = mk("TextButton", {
+                        AutoButtonColor  = false,
+                        BackgroundColor3 = Color3.fromRGB(210,240,215),
+                        Size             = UDim2.new(0,60,0,22),
+                        Position         = UDim2.new(1,-68,0,10),
+                        Font             = Enum.Font.GothamSemibold,
+                        Text             = "Call",
+                        TextColor3       = COL.TEXT,
+                        TextSize         = 10,
+                        Parent           = row,
+                    })
+                    addCorner(callBtn, UDim.new(0,4))
 
-                local callBtn = mk("TextButton", {
-                    AutoButtonColor  = false,
-                    BackgroundColor3 = Color3.fromRGB(210,240,215),
-                    Size             = UDim2.new(0,60,0,22),
-                    Position         = UDim2.new(1,-68,0,10),
-                    Font             = Enum.Font.GothamSemibold,
-                    Text             = "Call",
-                    TextColor3       = COL.TEXT,
-                    TextSize         = 10,
-                    Parent           = row,
-                })
-                addCorner(callBtn, UDim.new(0,4))
-
-                local capturedName = name
-                callBtn.MouseButton1Click:Connect(function()
-                    clickSound(); pulseClick(callBtn)
-                    intentInput.Text = capturedName
-                    switchSubTab("Execute")
-                end)
-                ::skip::
+                    local capturedName = name
+                    callBtn.MouseButton1Click:Connect(function()
+                        clickSound(); pulseClick(callBtn)
+                        intentInput.Text = capturedName
+                        switchSubTab("Execute")
+                    end)
+                end
             end
         end
 
@@ -711,47 +709,43 @@ do
                 mkLabel(logScroll, "No transactions yet.", 11, COL.MUTED); return
             end
             for _, tx in ipairs(txLog) do
-                if showFailOnly and tx.success ~= false then goto skip end
+                if not showFailOnly or tx.success == false then
+                    local row = mk("Frame", {
+                        BackgroundColor3 = tx.success == true
+                            and Color3.fromRGB(235,248,238)
+                            or  tx.success == false
+                            and Color3.fromRGB(255,235,235)
+                            or  COL.CARD,
+                        BackgroundTransparency = 0.4,
+                        Size   = UDim2.new(1,0,0,52),
+                        Parent = logScroll,
+                    })
+                    addCorner(row, UDim.new(0,5))
+                    addStroke(row, 1, 0.2)
+                    mk("UIPadding", { PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=row })
 
-                local row = mk("Frame", {
-                    BackgroundColor3 = tx.success == true
-                        and Color3.fromRGB(235,248,238)
-                        or  tx.success == false
-                        and Color3.fromRGB(255,235,235)
-                        or  COL.CARD,
-                    BackgroundTransparency = 0.4,
-                    Size   = UDim2.new(1,0,0,52),
-                    Parent = logScroll,
-                })
-                addCorner(row, UDim.new(0,5))
-                addStroke(row, 1, 0.2)
-                mk("UIPadding", { PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=row })
+                    local statusIcon = tx.success == true and "✓" or tx.success == false and "✗" or "…"
+                    mkLabel(row,
+                        string.format("[%s] %s", statusIcon, tx.intentName or "?"),
+                        11, tx.success and COL.BOUND or COL.FAIL, true
+                    ).Size = UDim2.new(1,-12,0,14)
 
-                local statusIcon = tx.success == true and "✓" or tx.success == false and "✗" or "…"
-                mkLabel(row,
-                    string.format("[%s] %s", statusIcon, tx.intentName or "?"),
-                    11, tx.success and COL.BOUND or COL.FAIL, true
-                ).Size = UDim2.new(1,-12,0,14)
+                    local dur = tx.endTime and tx.startTime
+                        and string.format("%.2fs", tx.endTime - tx.startTime) or "…"
+                    local binding = tx.binding
+                    mkLabel(row,
+                        string.format("via %s  dur:%s  steps:%d",
+                            binding and binding.remoteName or "?",
+                            dur,
+                            tx.steps and #tx.steps or 0),
+                        9, COL.MUTED
+                    ).Position = UDim2.new(0,8,0,18)
 
-                -- Duration + binding
-                local dur = tx.endTime and tx.startTime
-                    and string.format("%.2fs", tx.endTime - tx.startTime) or "…"
-                local binding = tx.binding
-                mkLabel(row,
-                    string.format("via %s  dur:%s  steps:%d",
-                        binding and binding.remoteName or "?",
-                        dur,
-                        tx.steps and #tx.steps or 0),
-                    9, COL.MUTED
-                ).Position = UDim2.new(0,8,0,18)
-
-                -- Error message
-                if tx.error then
-                    mkLabel(row, "err: "..tostring(tx.error):sub(1,60), 9, COL.FAIL
-                    ).Position = UDim2.new(0,8,0,32)
+                    if tx.error then
+                        mkLabel(row, "err: "..tostring(tx.error):sub(1,60), 9, COL.FAIL
+                        ).Position = UDim2.new(0,8,0,32)
+                    end
                 end
-
-                ::skip::
             end
         end
 

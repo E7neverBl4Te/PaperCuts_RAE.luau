@@ -249,36 +249,34 @@ local function R_ExecuteCompound(tx, intent, args, binding)
                 lastErr = stepRecord.error
                 if intent.Constraint == "Transactional" then break end
             end
-            goto continue
-        end
+        else
+            -- Build step-specific args (token consistency: same args flow through all steps)
+            local stepArgs = args
 
-        -- Build step-specific args (token consistency: same args flow through all steps)
-        local stepArgs = args
+            stepRecord.attempted = true
+            local retries = 0
+            local stepOk  = false
 
-        stepRecord.attempted = true
-        local retries = 0
-        local stepOk  = false
+            while retries <= RUNTIME_CFG.MaxStepRetries do
+                stepOk = R_DeliverViaSARP(remoteName, remoteObj, remoteType, stepArgs)
+                if stepOk then break end
+                retries = retries + 1
+                if retries <= RUNTIME_CFG.MaxStepRetries then
+                    task.wait(0.3 * retries)
+                end
+            end
 
-        while retries <= RUNTIME_CFG.MaxStepRetries do
-            stepOk = R_DeliverViaSARP(remoteName, remoteObj, remoteType, stepArgs)
-            if stepOk then break end
-            retries = retries + 1
-            if retries <= RUNTIME_CFG.MaxStepRetries then
-                task.wait(0.3 * retries)
+            stepRecord.success = stepOk
+            if not stepOk then
+                stepRecord.error = "Step failed after " .. retries .. " retries"
+                if not step.Optional then
+                    allOk   = false
+                    lastErr = stepRecord.error
+                    if intent.Constraint == "Transactional" then break end
+                end
             end
         end
 
-        stepRecord.success = stepOk
-        if not stepOk then
-            stepRecord.error = "Step failed after " .. retries .. " retries"
-            if not step.Optional then
-                allOk   = false
-                lastErr = stepRecord.error
-                if intent.Constraint == "Transactional" then break end
-            end
-        end
-
-        ::continue::
         if stepIdx < #steps then
             task.wait(RUNTIME_CFG.StepDelay)
         end
