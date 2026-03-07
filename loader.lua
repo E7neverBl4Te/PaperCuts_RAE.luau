@@ -15,6 +15,11 @@ local chunks = {
     "sarp.lua",      -- SARP v4 engine
     "pr.lua",        -- PR v5 module (protocol reconstruction)
     "pr_ui.lua",     -- PR UI tab
+    "avd_sentry.lua",     -- AVD: independent observer
+    "avd_translator.lua", -- AVD: data normalization
+    "avd_strategist.lua", -- AVD: intelligence & generation
+    "avd_operator.lua",   -- AVD: execution & lifecycle
+    "avd_ui.lua",         -- AVD: dashboard UI
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 

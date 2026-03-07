@@ -52,6 +52,7 @@ local pageAbout      = _U.pageAbout
 local pageForge      = _U.pageForge
 local pageSARP       = _U.pageSARP
 local pagePR         = _U.pagePR
+local pageAVD        = _U.pageAVD
 local SARP           = _G.PC.SARP
 
 
@@ -72,6 +73,7 @@ local TAB_DEFS = {
     { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
     { Name="PR",         Page=pagePR,        Icon="📡" },
+    { Name="AVD",        Page=pageAVD,       Icon="🔬" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }

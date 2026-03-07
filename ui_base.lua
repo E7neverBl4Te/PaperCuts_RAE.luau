@@ -222,6 +222,7 @@ local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
+local pageAVD       = makePage("AVD")
 
 -- ============================================================
 -- ── ui_base exports ─────────────────────────────────────────────────────────
@@ -243,5 +244,5 @@ _G.PCU = {
     pageWorld=pageWorld, pageDiscovery=pageDiscovery, pageRAE=pageRAE,
     pageRecursive=pageRecursive, pageBridge=pageBridge, pageAnalytics=pageAnalytics,
     pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
-    pageForge=pageForge, pageSARP=pageSARP, pagePR=pagePR,
+    pageForge=pageForge, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD,
 }
