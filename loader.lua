@@ -26,6 +26,8 @@ local chunks = {
     "sr_ui.lua",           -- SR: dashboard UI
     "sbi.lua",             -- SBI: Server Behavior Inference engine
     "sbi_ui.lua",          -- SBI: dashboard UI
+    "csk.lua",             -- CSK: Cross-Session Knowledge engine
+    "csk_ui.lua",          -- CSK: dashboard UI
     "sr_ui.lua",           -- SR: dashboard UI
     "tsr_registry.lua",   -- TSR: 100-intent library + binding table
     "tsr_binder.lua",     -- TSR: verification + binding engine

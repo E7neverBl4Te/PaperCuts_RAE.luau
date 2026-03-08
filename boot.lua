@@ -53,6 +53,7 @@ local pageForge      = _U.pageForge
 local pageRSM        = _U.pageRSM
 local pageSR         = _U.pageSR
 local pageSBI        = _U.pageSBI
+local pageCSK        = _U.pageCSK
 local pageSR         = _U.pageSR
 local pageSARP       = _U.pageSARP
 local pagePR         = _U.pagePR
@@ -83,6 +84,7 @@ local TAB_DEFS = {
     { Name="RSM",        Page=pageRSM,       Icon="🗺" },
     { Name="SR",         Page=pageSR,        Icon="🧠" },
     { Name="SBI",        Page=pageSBI,       Icon="🕵" },
+    { Name="CSK",        Page=pageCSK,       Icon="🧬" },
     { Name="SR",         Page=pageSR,        Icon="🧩" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
