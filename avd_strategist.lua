@@ -700,6 +700,28 @@ function AVD_Strategist.LoadFindings()
     end)
 end
 
+-- ── APE extension hooks ───────────────────────────────────────────────────────
+-- Append additional probe plans to an existing target (used by APE).
+function AVD_Strategist.AppendPlans(name, extraPlans)
+    if not S_ProbePlans[name] then S_ProbePlans[name] = {} end
+    for _, plan in ipairs(extraPlans) do
+        table.insert(S_ProbePlans[name], plan)
+    end
+    -- If target was DONE, re-open it so Operator picks it up again
+    if S_Targets[name] and (S_Targets[name].status == "DONE" or
+                             S_Targets[name].status == "SKIP") then
+        S_Targets[name].status = "QUEUED"
+    end
+end
+
+-- Reset a target's probe counter and status so APE can re-run it.
+function AVD_Strategist.ResetTarget(name)
+    if S_Targets[name] then
+        S_Targets[name].status = "QUEUED"
+        S_ProbeCount[name]     = 0
+    end
+end
+
 function AVD_Strategist.GetCFG()
     return STRATEGIST_CFG
 end
