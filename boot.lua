@@ -50,6 +50,7 @@ local pageChain      = _U.pageChain
 local pageUtils      = _U.pageUtils
 local pageAbout      = _U.pageAbout
 local pageForge      = _U.pageForge
+local pageRSM        = _U.pageRSM
 local pageSARP       = _U.pageSARP
 local pagePR         = _U.pagePR
 local pageAVD        = _U.pageAVD
@@ -76,6 +77,7 @@ local TAB_DEFS = {
     { Name="PR",         Page=pagePR,        Icon="📡" },
     { Name="AVD",        Page=pageAVD,       Icon="🔬" },
     { Name="TSR",        Page=pageTSR,       Icon="👑" },
+    { Name="RSM",        Page=pageRSM,       Icon="🗺" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }

@@ -106,9 +106,7 @@ local function makeButton(parent, text, size, iconText)
     hookHover(btn,btn.BackgroundColor3,Color3.fromRGB(252,249,244),0.25,0.1)
     return {Button=btn,Label=label,Icon=icon}
 end
--- makeChip: a small pill-shaped read-only label.
--- Used for tags, status badges, and category labels.
--- Returns the chip Frame.
+-- makeChip: pill-shaped read-only badge label.
 local function makeChip(parent, text)
     local chip = mk("Frame", {
         BackgroundColor3 = Color3.fromRGB(240, 235, 228),
@@ -242,6 +240,7 @@ local pageChain     = makePage("Chain")
 local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
+local pageRSM       = makePage("RSM")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
 local pageAVD       = makePage("AVD")
@@ -252,7 +251,8 @@ local pageTSR       = makePage("TSR")
 _G.PCU = {
     sendNotification=sendNotification,
     makeButton=makeButton, makeSection=makeSection, makePage=makePage,
-    makeChip=makeChip, makeToggle=makeToggle, makeSlider=makeSlider,
+    makeChip=makeChip,
+    makeToggle=makeToggle, makeSlider=makeSlider,
     displayDecompiledScript=displayDecompiledScript,
     bytecodeViewer=bytecodeViewer, bcText=bcText,
     getCharacter=getCharacter, getHumanoid=getHumanoid,
@@ -267,5 +267,5 @@ _G.PCU = {
     pageWorld=pageWorld, pageDiscovery=pageDiscovery, pageRAE=pageRAE,
     pageRecursive=pageRecursive, pageBridge=pageBridge, pageAnalytics=pageAnalytics,
     pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
-    pageForge=pageForge, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
+    pageForge=pageForge, pageRSM=pageRSM, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
 }
