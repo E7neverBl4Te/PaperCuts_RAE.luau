@@ -241,6 +241,8 @@ local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
 local pageRSM       = makePage("RSM")
+local pageSR        = makePage("SR")
+local pageSR        = makePage("SR")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
 local pageAVD       = makePage("AVD")
@@ -267,5 +269,5 @@ _G.PCU = {
     pageWorld=pageWorld, pageDiscovery=pageDiscovery, pageRAE=pageRAE,
     pageRecursive=pageRecursive, pageBridge=pageBridge, pageAnalytics=pageAnalytics,
     pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
-    pageForge=pageForge, pageRSM=pageRSM, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
+    pageForge=pageForge, pageRSM=pageRSM, pageSR=pageSR, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
 }

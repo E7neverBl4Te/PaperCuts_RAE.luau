@@ -22,6 +22,9 @@ local chunks = {
     "avd_ui.lua",         -- AVD: dashboard UI
     "rsm.lua",             -- RSM: Remote Signature Mapping engine
     "rsm_ui.lua",          -- RSM: dashboard UI
+    "sr.lua",              -- SR: State Reconstruction engine
+    "sr_ui.lua",           -- SR: dashboard UI
+    "sr_ui.lua",           -- SR: dashboard UI
     "tsr_registry.lua",   -- TSR: 100-intent library + binding table
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
