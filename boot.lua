@@ -85,7 +85,7 @@ local TAB_DEFS = {
     { Name="SR",         Page=pageSR,        Icon="🧠" },
     { Name="SBI",        Page=pageSBI,       Icon="🕵" },
     { Name="CSK",        Page=pageCSK,       Icon="🧬" },
-    { Name="SR",         Page=pageSR,        Icon="🧩" },
+
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
@@ -109,7 +109,7 @@ end
 for _, tabDef in ipairs(TAB_DEFS) do
     local btn=mk("TextButton",{
         AutoButtonColor=false, BackgroundColor3=Color3.fromRGB(245,239,231),
-        BorderSizePixel=0, Size=UDim2.new(1,0,0,34), Font=Enum.Font.GothamSemibold,
+        BorderSizePixel=0, Size=UDim2.new(1,0,0,30), Font=Enum.Font.GothamSemibold,
         Text=tabDef.Icon.."  "..tabDef.Name, TextColor3=Color3.fromRGB(52,47,42),
         TextSize=12, TextXAlignment=Enum.TextXAlignment.Left, Parent=navHolder,
     })
