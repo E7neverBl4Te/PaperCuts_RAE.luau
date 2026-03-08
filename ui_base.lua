@@ -106,6 +106,28 @@ local function makeButton(parent, text, size, iconText)
     hookHover(btn,btn.BackgroundColor3,Color3.fromRGB(252,249,244),0.25,0.1)
     return {Button=btn,Label=label,Icon=icon}
 end
+-- makeChip: a small pill-shaped read-only label.
+-- Used for tags, status badges, and category labels.
+-- Returns the chip Frame.
+local function makeChip(parent, text)
+    local chip = mk("Frame", {
+        BackgroundColor3 = Color3.fromRGB(240, 235, 228),
+        BorderSizePixel  = 0,
+        Size             = UDim2.new(0, 110, 0, 28),
+        Parent           = parent,
+    })
+    addCorner(chip, UDim.new(0, 999)); addStroke(chip, 1, 0.35)
+    mk("TextLabel", {
+        BackgroundTransparency = 1,
+        Font       = Enum.Font.GothamMedium,
+        Text       = text,
+        TextColor3 = Color3.fromRGB(78, 70, 62),
+        TextSize   = 12,
+        Size       = UDim2.new(1, 0, 1, 0),
+        Parent     = chip,
+    })
+    return chip
+end
 local function makeSection(parent, titleText)
     local card=mk("Frame",{BackgroundColor3=Color3.fromRGB(247,243,237),BorderSizePixel=0,Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=parent})
     addCorner(card,UDim.new(0,14)); addStroke(card,1,0.35)
@@ -230,7 +252,7 @@ local pageTSR       = makePage("TSR")
 _G.PCU = {
     sendNotification=sendNotification,
     makeButton=makeButton, makeSection=makeSection, makePage=makePage,
-    makeToggle=makeToggle, makeSlider=makeSlider,
+    makeChip=makeChip, makeToggle=makeToggle, makeSlider=makeSlider,
     displayDecompiledScript=displayDecompiledScript,
     bytecodeViewer=bytecodeViewer, bcText=bcText,
     getCharacter=getCharacter, getHumanoid=getHumanoid,

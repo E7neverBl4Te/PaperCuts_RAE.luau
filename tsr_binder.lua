@@ -638,13 +638,44 @@ function TSR_Binder.Start()
     if B_Running then return end
     B_Running = true
 
-    -- Wait for AVD baseline before scanning
     task.spawn(function()
+        -- ── Guard 1: wait for the full AVD module stack to be registered ─────
+        -- avd_strategist.lua sets _G.PC.AVD.Strategist at the bottom of its
+        -- file, after LoadFindings(). Since chunk load order is sequential but
+        -- task.spawns from earlier chunks may still be in flight, we poll until
+        -- the Strategist, Translator, and Operator are all present.
+        local avdWaitStart = os.clock()
+        local AVD_TIMEOUT  = 15.0
+        while true do
+            local avd = _C.AVD
+            if avd and avd.Sentry and avd.Translator and avd.Strategist and avd.Operator then
+                break
+            end
+            if os.clock() - avdWaitStart > AVD_TIMEOUT then
+                warn("[TSR Binder] AVD stack not ready after " .. AVD_TIMEOUT .. "s — proceeding without AVD data.")
+                break
+            end
+            task.wait(0.25)
+        end
+
+        -- ── Guard 2: wait for Sentry baseline window to close ─────────────────
         local sentry = _C.AVD and _C.AVD.Sentry
         if sentry then
             while not sentry.IsBaselineDone() do task.wait(0.5) end
         end
-        task.wait(2.0)
+
+        -- ── Guard 3: wait for Strategist to have at least attempted a scan ────
+        -- GetFindings() returns an empty table until the Strategist has processed
+        -- at least one Translator report. Give it a brief grace window.
+        local strategist = _C.AVD and _C.AVD.Strategist
+        if strategist then
+            local graceStart = os.clock()
+            while #strategist.GetFindings(0) == 0 and (os.clock() - graceStart) < 5.0 do
+                task.wait(0.5)
+            end
+        end
+
+        task.wait(1.0)
 
         -- Enqueue all unbound intents
         local unbound = Registry.GetUnbound()
