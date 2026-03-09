@@ -309,11 +309,33 @@ function AVD_Operator.SARPDeliver(handoff)
     local simResult = SARP.Simulator and SARP.Simulator.Simulate(wrapped, handoff.remoteName)
 
     -- Fly via SARP  (callback signature: success bool, result, err string)
-    SARP.Execute(wrapped, simResult, handoff.remoteName, function(success, result, err)
+    local _remoteName = handoff.remoteName
+    SARP.Execute(wrapped, simResult, _remoteName, function(success, result, err)
+        local resultStr = tostring(err or "")
+        local isLingered = success and (
+            resultStr == "LINGERED"      or resultStr == "OC_LINGERED" or
+            resultStr == "AB_LINGERED"   or resultStr == "BRIDGE_LINGERED" or
+            resultStr:find("LINGERED")   ~= nil
+        )
+
         print(string.format("[AVD Operator] SARP outcome for %s: %s%s",
-            handoff.remoteName,
+            _remoteName,
             success and "✓" or "✗",
-            err and (" — " .. tostring(err)) or ""))
+            resultStr ~= "" and (" — " .. resultStr) or ""))
+
+        -- LINGERED = Warm Lead: server held the thread / didn't reject
+        -- Escalate to ASE for topological circuit verification
+        if isLingered then
+            local ASE = _G.PC.ASE
+            if ASE and ASE.OnLingerConfirmed then
+                print(string.format(
+                    "[AVD Operator] LINGERED on %s → escalating to ASE circuit verify.",
+                    _remoteName))
+                task.spawn(function()
+                    pcall(ASE.OnLingerConfirmed, _remoteName, result)
+                end)
+            end
+        end
     end)
 
     return true

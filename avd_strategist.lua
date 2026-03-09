@@ -39,6 +39,12 @@ local S_Targets  = {}
 -- Vulnerability findings: [remoteName] = FindingRecord
 local S_Findings = {}
 
+-- Dormant Monitor: tracks remotes that have received a successful SARP handoff
+-- [remoteName] = { lwmSnapshot, channel, confirmedAt, reOpenThreshold }
+local S_DormantMonitor = {}
+local DORMANT_LWM_DRIFT_THRESHOLD  = 0.18  -- LWM delta magnitude to re-open
+local DORMANT_CHECK_INTERVAL       = 30.0  -- seconds between dormant checks
+
 -- Probe plan queue per remote: [remoteName] = { ProbePlan, ... }
 local S_ProbePlans = {}
 
@@ -506,6 +512,15 @@ function AVD_Strategist.OnReport(report)
         return
     end
 
+    -- Feed FILTERED/REJECTED signals into dormant monitor rejection counter
+    if (report.signal == "FILTERED" or report.signal == "REJECTED") then
+        local dormRec = S_DormantMonitor[name]
+        if dormRec then
+            dormRec.rejectCount = dormRec.rejectCount + 1
+        end
+        return
+    end
+
     -- Determine which technique produced this report
     local technique = report.probeKind or "Unknown"
 
@@ -533,8 +548,22 @@ function AVD_Strategist.OnReport(report)
 
     -- Hand off to SARP if threshold met
     if finding.sarpReady then
-        AVD_Strategist.HandoffToSARP(finding, report)
-        target.status = "DONE"
+        -- Only hand off once unless dormant monitor re-opens the remote
+        if not S_DormantMonitor[name] then
+            AVD_Strategist.HandoffToSARP(finding, report)
+            -- Enter Dormant Monitor: take LWM snapshot, park the target
+            local LWM = _G.PC and _G.PC.LWM
+            S_DormantMonitor[name] = {
+                lwmSnapshot    = LWM and LWM.GetDelta() or nil,
+                lwmSigSnapshot = LWM and LWM.GetRecentSig() or nil,
+                channel        = report.channel or "Attribute",
+                confirmedAt    = os.clock(),
+                lastCheckAt    = os.clock(),
+                rejectCount    = 0,  -- FILTERED/REJECTED signals since confirmation
+            }
+            target.status = "DORMANT"
+            print(string.format("[AVD Strategist] %s → DORMANT MONITOR (LWM-gated re-probe).", name))
+        end
     end
 
     -- Persist
@@ -732,3 +761,52 @@ _G.PC.AVD.Strategist = AVD_Strategist
 
 AVD_Strategist.LoadFindings()
 print("[AVD Strategist] Ready.")
+
+-- ── Dormant Monitor background watcher ────────────────────────────────────
+task.spawn(function()
+    while true do
+        task.wait(DORMANT_CHECK_INTERVAL)
+        local LWM = _G.PC and _G.PC.LWM
+        local now = os.clock()
+        for name, rec in pairs(S_DormantMonitor) do
+            local reopen = false
+            local reason = ""
+
+            -- Condition 1: LWM world-version drift
+            if LWM and rec.lwmSnapshot then
+                local currentDelta = LWM.GetDelta()
+                if currentDelta then
+                    -- Compare magnitude of delta vectors
+                    local drift = 0
+                    for k, v in pairs(currentDelta) do
+                        local prev = rec.lwmSnapshot[k] or 0
+                        drift = drift + math.abs((v or 0) - prev)
+                    end
+                    if drift > DORMANT_LWM_DRIFT_THRESHOLD then
+                        reopen = true
+                        reason = string.format("LWM drift %.3f > threshold", drift)
+                    end
+                end
+            end
+
+            -- Condition 2: Channel accumulating FILTERED/REJECTED signals
+            if rec.rejectCount >= 3 then
+                reopen = true
+                reason = string.format("channel rejection count %d", rec.rejectCount)
+            end
+
+            if reopen then
+                local target = S_Targets[name]
+                if target then
+                    target.status = "ACTIVE"
+                    -- Reset probe count so it gets a fresh set of probes
+                    S_ProbeCount[name] = 0
+                    S_DormantMonitor[name] = nil
+                    print(string.format(
+                        "[AVD Strategist] DORMANT MONITOR: re-opening %s (%s)",
+                        name, reason))
+                end
+            end
+        end
+    end
+end)

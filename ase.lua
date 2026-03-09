@@ -57,6 +57,7 @@ local ASE_CFG = {
     -- Risk cost per operation type
     RiskCost = {
         BEDROCK   = 0.25,
+        VERIFY    = 0.08,
         FINALIZE  = 0.10,
         RECOMPILE = 0.15,
         DISCOVER  = 0.05,
@@ -75,7 +76,8 @@ local ASE_CFG = {
 
 -- ── Goal constants ─────────────────────────────────────────────
 ASE.GOAL   = { BEDROCK="BEDROCK", FINALIZE="FINALIZE",
-               RECOMPILE="RECOMPILE", DISCOVER="DISCOVER" }
+               RECOMPILE="RECOMPILE", DISCOVER="DISCOVER",
+               VERIFY="VERIFY" }
 ASE.STATUS = { PENDING="PENDING", RUNNING="RUNNING",
                COMPLETE="COMPLETE", FAILED="FAILED", ABORTED="ABORTED" }
 ASE.MODE   = { COMPILED="COMPILED", RAW="RAW", MASTERY="MASTERY" }
@@ -108,6 +110,9 @@ ASE.Panel = {
 
 -- Directive registry (Finalized raw→compiled lifts)
 local ASE_Directives = {}
+
+-- Per-remote linger dedup: prevents multiple VERIFY goals for same remote
+local ASE_LingerPending = {}  -- [remoteName] = true while VERIFY in flight
 
 -- Per-remote discover cooldown: [remoteName] = os.clock() of last push
 -- Prevents the AVD hook from re-queuing the same remote every report tick
@@ -190,6 +195,8 @@ function ASE_GoalEngine.Run(goal)
         ok, err = pcall(ASE_RecompileEngine.Run, goal)
     elseif goal.goalType == ASE.GOAL.DISCOVER then
         ok, err = pcall(ASE_ForgeEngine.Discover, goal)
+    elseif goal.goalType == ASE.GOAL.VERIFY then
+        ok, err = pcall(ASE_VerifyCircuit.Run, goal)
     end
 
     goal.endT = os.clock()
@@ -794,6 +801,172 @@ function ASE_ForgeEngine.ToByteString(t, depth)
            "\n" .. string.rep("  ", depth) .. "}"
 end
 
+
+-- ═════════════════════════════════════════════════════════════
+-- MODULE 4B — VERIFY TOPOLOGICAL CIRCUIT
+-- Triggered by LINGERED: sends a high-entropy nonce shaped to
+-- the remote's RSM arg signature, listens on all S2C remotes
+-- for the nonce to return. Only on confirmed return does ASE
+-- promote the remote to a full BEDROCK pipeline.
+--
+--   LINGERED  →  "server held the thread, didn't reject"
+--   BEDROCK   →  "server echoed our nonce on a different channel"
+-- ═════════════════════════════════════════════════════════════
+ASE_VerifyCircuit = {}
+
+function ASE_VerifyCircuit.Run(goal)
+    local remoteName = goal.params.remoteName
+    local PR         = _G.PC.PR_Registry
+    local RSM        = _G.PC.RSM
+    local SARP       = _G.PC.SARP
+    local SBI        = _G.PC.SBI
+
+    if not remoteName then error("VERIFY requires remoteName") end
+    if not PR or not PR[remoteName] then
+        error("Remote not in PR registry: " .. tostring(remoteName))
+    end
+
+    print(string.format("[ASE VERIFY] Beginning topological circuit check on %s", remoteName))
+
+    -- Build a high-entropy nonce shaped to fit the remote's RSM arg signature
+    -- The nonce must survive server-side validation — embed it in a plausible
+    -- position based on what RSM knows about this remote's arg layout
+    local nonce    = ASE_GenNonce()  -- 24-char high-entropy string
+    local rsmRec   = RSM and RSM.Get(remoteName)
+    local envelope = {}
+
+    if rsmRec and rsmRec.ArgSig and #rsmRec.ArgSig > 0 then
+        -- Find the first table-typed arg slot and embed nonce inside it
+        local embedded = false
+        for i, argSig in ipairs(rsmRec.ArgSig) do
+            if argSig.DominantType == "table" then
+                envelope[i] = { __nonce = nonce, __verify = true }
+                embedded = true
+            elseif argSig.DominantType == "number" and #(argSig.SuccessValues or {}) > 0 then
+                envelope[i] = argSig.SuccessValues[1]
+            elseif argSig.DominantType == "string" then
+                -- If first string slot and no nonce placed yet, put nonce here
+                if not embedded and i == 1 then
+                    envelope[i] = nonce
+                    embedded = true
+                elseif #(argSig.SuccessStrings or {}) > 0 then
+                    envelope[i] = argSig.SuccessStrings[1]
+                end
+            end
+        end
+        -- Fallback: if no slot found, wrap entire envelope as table with nonce
+        if not embedded then
+            envelope = { __nonce = nonce, __verify = true }
+        end
+    else
+        -- No RSM data — send bare nonce envelope
+        envelope = { __nonce = nonce, __verify = true }
+    end
+
+    goal.result = { nonce=nonce, remoteName=remoteName }
+    ASE_AppendTx({
+        directive  = string.format("VERIFY CIRCUIT → %s", remoteName),
+        rawPayload = envelope,
+        nonce      = nonce,
+        result     = "LISTENING for return...",
+    })
+
+    -- Open nonce listener BEFORE firing
+    local captured       = false
+    local feedbackRemote = nil
+
+    local listener = ASE_OpenNonceListener(nonce, function(rname, args)
+        captured       = true
+        feedbackRemote = rname
+    end)
+
+    -- Fire via SARP
+    local wrapped, sim, buildErr = SARP and SARP.Build("Attribute", envelope, nil, nil, remoteName)
+    if not wrapped then
+        if listener then listener.cleanup() end
+        ASE_LingerPending[remoteName] = nil
+        error("VERIFY SARP.Build failed: " .. tostring(buildErr))
+    end
+
+    SARP.Execute(wrapped, sim, remoteName, function(success, result, err)
+        goal.result.sarpSuccess = success
+    end)
+
+    -- Wait for nonce echo or timeout
+    local t0 = os.clock()
+    while not captured and (os.clock() - t0) < ASE_CFG.NonceListenTimeout do
+        task.wait(0.15)
+        if goal.status == ASE.STATUS.ABORTED then
+            if listener then listener.cleanup() end
+            ASE_LingerPending[remoteName] = nil
+            return
+        end
+    end
+
+    if listener then listener.cleanup() end
+    ASE_LingerPending[remoteName] = nil
+
+    if captured then
+        -- ── CIRCUIT CONFIRMED: A → Server → B ─────────────────────
+        print(string.format(
+            "[ASE VERIFY] ✓ CIRCUIT CONFIRMED: %s → %s  (nonce echoed)",
+            remoteName, feedbackRemote))
+
+        -- Lock as confirmed Bedrock pair directly (skip redundant GOAL_BEDROCK)
+        ASE_BedrockPairs[remoteName] = {
+            sinkRemote     = remoteName,
+            feedbackRemote = feedbackRemote,
+            nonce          = nonce,
+            confirmedAt    = os.clock(),
+            cargo          = {},
+            confidence     = 1.0,
+            origin         = "LINGER_VERIFY",  -- provenance: came through LINGERED path
+        }
+
+        -- Materialize the Panel
+        ASE.Panel.Visible        = true
+        ASE.Panel.ActiveSink     = remoteName
+        ASE.Panel.ActiveFeedback = feedbackRemote
+        ASE.Panel.BedrockConf    = 1.0
+        ASE.Panel.HeartbeatAlive = true
+
+        -- Annotate in CSK
+        local CSK = _G.PC.CSK
+        if CSK then
+            CSK.Annotate(remoteName, string.format(
+                "BEDROCK via LINGER_VERIFY → %s (nonce=%s)",
+                feedbackRemote, nonce:sub(1,8)))
+        end
+
+        goal.result.confirmed      = true
+        goal.result.feedbackRemote = feedbackRemote
+
+        ASE_AppendTx({
+            directive  = "CIRCUIT CONFIRMED",
+            rawPayload = {sink=remoteName, feedback=feedbackRemote},
+            nonce      = nonce,
+            result     = "✓ BEDROCK — Panel active",
+        })
+
+        -- Start heartbeat on the confirmed pipeline
+        ASE_BedrockHandshake.StartHeartbeat(remoteName)
+    else
+        -- Nonce not echoed — LINGERED but not a proxy
+        print(string.format(
+            "[ASE VERIFY] ✗ %s lingered but did not echo nonce — not a steering proxy.",
+            remoteName))
+
+        goal.result.confirmed = false
+
+        ASE_AppendTx({
+            directive  = string.format("VERIFY FAILED → %s", remoteName),
+            rawPayload = {},
+            nonce      = nonce,
+            result     = "✗ LINGERED only — no topological circuit",
+        })
+    end
+end
+
 -- ═════════════════════════════════════════════════════════════
 -- MODULE 5 — RECOMPILE ENGINE
 -- Drift detection → autonomous decompile → re-fuzz → re-bind
@@ -949,6 +1122,30 @@ end
 -- ═════════════════════════════════════════════════════════════
 -- PUBLIC API
 -- ═════════════════════════════════════════════════════════════
+
+-- Linger escalation entry point: called by AVD Operator when SARP returns LINGERED
+-- Triggers VERIFY_TOPOLOGICAL_CIRCUIT to confirm whether the linger means
+-- the server is acting as a steering proxy (Bedrock) or just slow (Warm Lead only)
+function ASE.OnLingerConfirmed(remoteName, sarpResult)
+    if not remoteName then return end
+
+    -- Deduplicate: skip if already verifying this remote
+    if ASE_LingerPending[remoteName] then
+        return
+    end
+
+    -- Skip if already a confirmed Bedrock pair with live heartbeat
+    local existing = ASE_BedrockPairs[remoteName]
+    if existing and existing.confidence >= 0.8 and ASE.Panel.HeartbeatAlive then
+        return
+    end
+
+    print(string.format(
+        "[ASE] LINGER confirmed on %s — queuing VERIFY_TOPOLOGICAL_CIRCUIT.", remoteName))
+
+    ASE_LingerPending[remoteName] = true
+    ASE_GoalEngine.Push(ASE.GOAL.VERIFY, { remoteName=remoteName, sarpResult=sarpResult })
+end
 
 -- Goal API
 function ASE.PursueBedrock(sinkRemote, cargo)
@@ -1172,4 +1369,5 @@ _G.PC.ASE_BedrockHandshake  = ASE_BedrockHandshake
 _G.PC.ASE_DirectiveCompiler = ASE_DirectiveCompiler
 _G.PC.ASE_ForgeEngine       = ASE_ForgeEngine
 _G.PC.ASE_RecompileEngine   = ASE_RecompileEngine
+_G.PC.ASE_VerifyCircuit     = ASE_VerifyCircuit
 print("[ASE] Module registered.")

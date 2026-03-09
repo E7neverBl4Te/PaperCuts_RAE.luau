@@ -290,12 +290,15 @@ do
         mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,6), Parent=goalHolder})
 
         local STATUS_COL = {
-            PENDING="",  RUNNING=COL.BLUE, COMPLETE=COL.GREEN,
+            PENDING=COL.MUTED,  RUNNING=COL.BLUE, COMPLETE=COL.GREEN,
             FAILED=COL.RED, ABORTED=COL.AMBER,
         }
 
         -- Tracks which card is currently selected (for highlight reset)
         local selectedCard = nil
+
+        -- Forward-declare remoteBox2 so buildGoalCard closures can close over it
+        local remoteBox2
 
         local function buildGoalCard(g, order)
             local isComplete = g.status == "COMPLETE"
@@ -438,7 +441,7 @@ do
 
         local _, sPush = makeSection(pg, "Push Goal")
         sPush.BackgroundColor3 = COL.CARD; addStroke(sPush, 1, 0.5)
-        local remoteBox2 = mk("TextBox", {BackgroundColor3=Color3.fromRGB(232,228,220),
+        remoteBox2 = mk("TextBox", {BackgroundColor3=Color3.fromRGB(232,228,220),
             BorderSizePixel=0, ClearTextOnFocus=false, Font=Enum.Font.Code,
             PlaceholderText="Remote name for BEDROCK / DISCOVER...",
             PlaceholderColor3=COL.MUTED, Text="", TextColor3=COL.TEXT,
@@ -498,7 +501,12 @@ do
         btnRefG.Button.MouseButton1Click:Connect(function()
             clickSound(); pulseClick(btnRefG.Button); doRefreshGoals()
         end)
-        subTabBtns["Goals"].MouseButton1Click:Connect(doRefreshGoals)
+        -- Re-wire Goals button: switch page AND refresh cards
+        subTabBtns["Goals"].MouseButton1Click:Connect(function()
+            clickSound()
+            switchSubTab("Goals")
+            if doRefreshGoals then doRefreshGoals() end
+        end)
     end
 
     -- ── TAB: Bedrock ────────────────────────────────────────────────────────────
