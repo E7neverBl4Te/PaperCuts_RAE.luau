@@ -723,24 +723,20 @@ local function APE_RunCampaign(campaign)
 
         -- Check AC skip gate
         local latestSBI = _G.PC.SBI and _G.PC.SBI.Get(campaign.remoteName)
-        if latestSBI and latestSBI.ACPattern == "CORRECTS_FAST"
-           and plan.kind ~= "CausalIsolationProbe" then
-            -- Only run isolation probes against CORRECTS_FAST remotes
-            -- (skip aggressive techniques)
-            goto nextPlan
+        local acSkip = latestSBI and latestSBI.ACPattern == "CORRECTS_FAST"
+                       and plan.kind ~= "CausalIsolationProbe"
+
+        if not acSkip then
+            -- Execute
+            local ok, err = pcall(APE_ExecutePlan, campaign, plan)
+            if not ok then
+                warn(string.format("[APE] Campaign %d plan %d error: %s",
+                    campaign.id, i, tostring(err)))
+            end
+
+            -- Inter-plan delay
+            task.wait(APE_CFG.InterPlanDelay)
         end
-
-        -- Execute
-        local ok, err = pcall(APE_ExecutePlan, campaign, plan)
-        if not ok then
-            warn(string.format("[APE] Campaign %d plan %d error: %s",
-                campaign.id, i, tostring(err)))
-        end
-
-        -- Inter-plan delay
-        task.wait(APE_CFG.InterPlanDelay)
-
-        ::nextPlan::
     end
 
     -- Finalise

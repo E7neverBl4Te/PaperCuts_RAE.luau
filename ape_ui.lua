@@ -468,7 +468,7 @@ do
         local tbtnRow = mk("Frame", {BackgroundTransparency=1,
             Size=UDim2.new(1,0,0,10), AutomaticSize=Enum.AutomaticSize.Y, Parent=sTBtns})
         mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,
-            FillDirection=Enum.FillDirection.Horizontal, FlexibleFillDirection=Enum.FlexibleDirection.Both,
+            FillDirection=Enum.FillDirection.Horizontal, Wraps=true,
             Wraps=true, Padding=UDim.new(0,6), Parent=tbtnRow})
         mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,
             Wraps=true, Padding=UDim.new(0,6), Parent=tbtnRow})
