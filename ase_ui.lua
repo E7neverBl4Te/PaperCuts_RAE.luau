@@ -105,12 +105,12 @@ do
     for _, name in ipairs(SUB_TABS) do
         local isPanelTab = (name == PANEL_SUB)
         local btn = mk("TextButton", {AutoButtonColor=false,
-            BackgroundColor3=COL.DARK, BorderSizePixel=0,
+            BackgroundColor3=Color3.fromRGB(225,220,212), BorderSizePixel=0,
             Size=UDim2.new(0,96,0,28), Font=Enum.Font.GothamMedium,
             Text= isPanelTab and "⬛ Panel" or name,
-            TextColor3=isPanelTab and COL.MUTED or COL.MUTED,
+            TextColor3=Color3.fromRGB(90,80,70),
             TextSize=11, Parent=tabBar})
-        addCorner(btn, UDim.new(0,6)); addStroke(btn, 1, 0.5)
+        addCorner(btn, UDim.new(0,6)); addStroke(btn, 1, 0.4)
 
         -- Panel tab is a raw Frame (not scroll) — we build it custom
         if isPanelTab then
@@ -130,8 +130,8 @@ do
         for n, b in pairs(subTabBtns) do
             local active = (n==name)
             tween(b, TweenInfo.new(0.1), {
-                BackgroundColor3 = active and Color3.fromRGB(32,32,40) or COL.DARK,
-                TextColor3       = active and COL.TEXT or COL.MUTED,
+                BackgroundColor3 = active and Color3.fromRGB(200,194,184) or Color3.fromRGB(225,220,212),
+                TextColor3       = active and Color3.fromRGB(40,34,28) or Color3.fromRGB(90,80,70),
             })
         end
         activeSubTab = name
@@ -1009,23 +1009,24 @@ do
         blur.Size = 0; blur.Parent = game:GetService("Lighting")
         mk("UIListLayout", {VerticalAlignment=Enum.VerticalAlignment.Center,
             HorizontalAlignment=Enum.HorizontalAlignment.Center,
+            SortOrder=Enum.SortOrder.LayoutOrder,
             Padding=UDim.new(0,14), Parent=masteryGate})
 
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
             Text="⚡  Autonomous Mastery",
             TextColor3=COL.PURP, TextSize=22,
             Size=UDim2.new(0.8,0,0,32), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=10000, Parent=masteryGate})
+            LayoutOrder=1, ZIndex=10000, Parent=masteryGate})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
             Text="You are about to unlock Autonomous Mastery.\nTo proceed, type the following exactly:",
             TextColor3=COL.MUTED, TextSize=12, TextWrapped=true,
             Size=UDim2.new(0.75,0,0,40), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=10000, Parent=masteryGate})
+            LayoutOrder=2, ZIndex=10000, Parent=masteryGate})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
             Text='"I am responsible for my actions"',
             TextColor3=Color3.fromRGB(210,200,255), TextSize=14,
             Size=UDim2.new(0.75,0,0,22), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=10000, Parent=masteryGate})
+            LayoutOrder=3, ZIndex=10000, Parent=masteryGate})
 
         local passphraseBox = mk("TextBox", {
             BackgroundColor3=Color3.fromRGB(20,18,28), BorderSizePixel=0,
@@ -1034,7 +1035,7 @@ do
             PlaceholderColor3=Color3.fromRGB(80,70,100),
             Text="", TextColor3=Color3.fromRGB(200,190,255),
             TextSize=12, Size=UDim2.new(0.65,0,0,36),
-            ZIndex=10000, Parent=masteryGate})
+            LayoutOrder=4, ZIndex=10000, Parent=masteryGate})
         addCorner(passphraseBox, UDim.new(0,8))
         addStroke(passphraseBox, 1.5, 0.3)
         mk("UIPadding", {PaddingLeft=UDim.new(0,12), Parent=passphraseBox})
@@ -1043,19 +1044,19 @@ do
             BackgroundColor3=COL.PURP, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="Unlock Autonomous Mastery",
             TextColor3=Color3.fromRGB(255,255,255), TextSize=12,
-            Size=UDim2.new(0.5,0,0,38), ZIndex=10000, Parent=masteryGate})
+            Size=UDim2.new(0.5,0,0,38), LayoutOrder=5, ZIndex=10000, Parent=masteryGate})
         addCorner(masterySubmitBtn, UDim.new(0,10))
 
         local masteryCancelBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundTransparency=1, BorderSizePixel=0,
             Font=Enum.Font.GothamMedium, Text="Cancel",
             TextColor3=COL.MUTED, TextSize=11,
-            Size=UDim2.new(0.3,0,0,28), ZIndex=10000, Parent=masteryGate})
+            Size=UDim2.new(0.3,0,0,28), LayoutOrder=6, ZIndex=10000, Parent=masteryGate})
 
         local masteryError = mk("TextLabel", {BackgroundTransparency=1,
             Font=Enum.Font.Code, Text="", TextColor3=COL.RED, TextSize=11,
             Size=UDim2.new(0.7,0,0,20), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=10000, Parent=masteryGate})
+            LayoutOrder=7, ZIndex=10000, Parent=masteryGate})
 
         local function showMasteryGate(show)
             masteryGate.Visible = show
