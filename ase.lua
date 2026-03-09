@@ -279,8 +279,29 @@ function ASE_BedrockHandshake.Run(goal)
     local SARP       = _G.PC.SARP
     local SBI        = _G.PC.SBI
 
-    if not sinkRemote or not PR or not PR[sinkRemote] then
-        error("Sink remote not found: " .. tostring(sinkRemote))
+    if not sinkRemote then
+        error("Sink remote not specified for BEDROCK goal")
+    end
+
+    -- PR_Registry may not yet contain remotes discovered only via APE/SBI probing.
+    -- Fall back to RSM or APE campaign data before hard-failing.
+    if not PR or not PR[sinkRemote] then
+        local RSM = _G.PC.RSM
+        local APE = _G.PC.APE
+        local knownViaRSM = RSM and RSM.Get(sinkRemote) ~= nil
+        local knownViaAPE = false
+        if APE then
+            for _, c in ipairs(APE.GetCampaigns() or {}) do
+                if c.remoteName == sinkRemote then knownViaAPE = true; break end
+            end
+        end
+        if not knownViaRSM and not knownViaAPE then
+            error("Sink remote not found in PR/RSM/APE: " .. tostring(sinkRemote))
+        end
+        -- Known via RSM or APE — proceed with caution, no PR data available
+        warn(string.format(
+            "[ASE Bedrock] %s not in PR_Registry — proceeding from %s data only.",
+            sinkRemote, knownViaRSM and "RSM" or "APE"))
     end
 
     local sbiRec = SBI and SBI.Get(sinkRemote)
@@ -688,28 +709,52 @@ end
 -- Discovery: launch an APE campaign and feed results back to ASE
 function ASE_ForgeEngine.Discover(goal)
     local remoteName = goal.params.remoteName
-    local APE        = _G.PC.APE
 
-    if not APE then error("APE not available") end
+    -- ── Wait for APE to finish its own boot sequence ──────────────────────────
+    -- APE bootstraps itself asynchronously after its dependencies (SBI, RSM, SR,
+    -- AVD) are ready. DISCOVER goals pushed early by OnAVDFinding arrive before
+    -- APE_Running flips true, causing every StartCampaign to fail with
+    -- "APE not running". We wait up to 60 s before giving up.
+    local APE = nil
+    local waitT0 = os.clock()
+    while os.clock() - waitT0 < 60 do
+        APE = _G.PC.APE
+        if APE and APE.GetStats and APE.GetStats().Running then break end
+        task.wait(1.0)
+    end
+
+    if not APE then error("APE module never registered in _G.PC.APE") end
+    if not APE.GetStats().Running then
+        error("APE not running after 60 s wait — dependencies may have failed to load")
+    end
+
     if not remoteName then
-        -- Scan all top priorities
+        -- No specific remote: trigger a full priority scan
         local n = APE.Scan()
         goal.result = { campaignCount=n }
         return
     end
 
-    -- If APE has no probe plan yet, run a Scan first to build one
+    -- ── Attempt to start the campaign ─────────────────────────────────────────
     local id, err = APE.StartCampaign(remoteName)
+
     if not id then
-        if tostring(err):find("no goals") or tostring(err):find("no plan") then
-            -- APE hasn't scanned this remote yet — trigger a scan and retry once
+        local errStr = tostring(err)
+
+        if errStr:find("no goals") or errStr:find("no plan") then
+            -- APE is running but hasn't built a probe plan for this remote yet.
+            -- Force a Scan to populate the scorer, then retry once.
+            print(string.format("[ASE DISCOVER] No probe plan for %s — forcing Scan + retry.", remoteName))
             APE.Scan()
-            task.wait(2)
+            task.wait(3)
             id, err = APE.StartCampaign(remoteName)
+            errStr = tostring(err)
         end
+
         if not id then
-            if tostring(err):find("already active") then
-                -- Campaign already running — find it and wait on it instead of erroring
+            if errStr:find("already active") then
+                -- A campaign for this remote is already in flight.
+                -- Locate it and wait on it rather than erroring.
                 local existing = nil
                 for _, c in ipairs(APE.GetCampaigns()) do
                     if c.remoteName == remoteName and
@@ -718,11 +763,20 @@ function ASE_ForgeEngine.Discover(goal)
                     end
                 end
                 if existing then
+                    print(string.format(
+                        "[ASE DISCOVER] Campaign for %s already active (id=%s) — attaching.", remoteName, tostring(existing.id)))
                     id = existing.id
                 else
-                    -- Can't find it — just return cleanly, not an error
-                    goal.result = { status="SKIPPED", reason="already active" }
+                    goal.result = { status="SKIPPED", reason="already active, not found" }
                     return
+                end
+            elseif errStr:find("max concurrent") then
+                -- APE is at campaign capacity — back off and retry once
+                print("[ASE DISCOVER] APE at max concurrent campaigns — waiting 10 s.")
+                task.wait(10)
+                id, err = APE.StartCampaign(remoteName)
+                if not id then
+                    error("APE campaign failed after backoff: " .. tostring(err))
                 end
             else
                 error("APE campaign failed: " .. tostring(err))
