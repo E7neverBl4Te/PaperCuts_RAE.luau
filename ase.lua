@@ -107,7 +107,12 @@ ASE.Panel = {
 }
 
 -- Directive registry (Finalized raw→compiled lifts)
-local ASE_Directives = {}  -- [name] = {name, category, envelope, sinkRemote, confirmedAt}
+local ASE_Directives = {}
+
+-- Per-remote discover cooldown: [remoteName] = os.clock() of last push
+-- Prevents the AVD hook from re-queuing the same remote every report tick
+local ASE_DiscoverCooldown = {}
+local ASE_DISCOVER_COOLDOWN_S = 45  -- seconds between DISCOVER goals per remote  -- [name] = {name, category, envelope, sinkRemote, confirmedAt}
 
 -- ── Utility ───────────────────────────────────────────────────
 local function ASE_NextID()
@@ -686,8 +691,37 @@ function ASE_ForgeEngine.Discover(goal)
         return
     end
 
+    -- If APE has no probe plan yet, run a Scan first to build one
     local id, err = APE.StartCampaign(remoteName)
-    if not id then error("APE campaign failed: " .. tostring(err)) end
+    if not id then
+        if tostring(err):find("no goals") or tostring(err):find("no plan") then
+            -- APE hasn't scanned this remote yet — trigger a scan and retry once
+            APE.Scan()
+            task.wait(2)
+            id, err = APE.StartCampaign(remoteName)
+        end
+        if not id then
+            if tostring(err):find("already active") then
+                -- Campaign already running — find it and wait on it instead of erroring
+                local existing = nil
+                for _, c in ipairs(APE.GetCampaigns()) do
+                    if c.remoteName == remoteName and
+                       (c.status == "RUNNING" or c.status == "ACTIVE") then
+                        existing = c; break
+                    end
+                end
+                if existing then
+                    id = existing.id
+                else
+                    -- Can't find it — just return cleanly, not an error
+                    goal.result = { status="SKIPPED", reason="already active" }
+                    return
+                end
+            else
+                error("APE campaign failed: " .. tostring(err))
+            end
+        end
+    end
 
     -- Wait for campaign to complete
     local t0 = os.clock()
@@ -1012,12 +1046,28 @@ end
 function ASE.OnAVDFinding(finding)
     if not finding or not finding.remoteName then return end
     local score = finding.exploitScore or 0
-    if score >= ASE_CFG.BedrockThreshold then
-        print(string.format("[ASE] AVD finding on %s (score=%.2f) — Bedrock candidate queued.",
-            finding.remoteName, score))
-        -- Auto-queue DISCOVER first, then Bedrock on completion
-        ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=finding.remoteName })
+    if score < ASE_CFG.BedrockThreshold then return end
+
+    local name = finding.remoteName
+    local now  = os.clock()
+
+    -- Debounce: skip if we already queued a DISCOVER for this remote recently
+    local lastPush = ASE_DiscoverCooldown[name] or 0
+    if (now - lastPush) < ASE_DISCOVER_COOLDOWN_S then return end
+
+    -- Skip if a DISCOVER goal for this remote is already pending/running
+    for _, g in pairs(ASE_Goals) do
+        if g.goalType == ASE.GOAL.DISCOVER
+           and g.params.remoteName == name
+           and (g.status == ASE.STATUS.PENDING or g.status == ASE.STATUS.RUNNING) then
+            return
+        end
     end
+
+    ASE_DiscoverCooldown[name] = now
+    print(string.format("[ASE] AVD finding on %s (score=%.2f) — Bedrock candidate queued.",
+        name, score))
+    ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=name })
 end
 
 -- Persistence
@@ -1093,9 +1143,13 @@ task.spawn(function()
     local strat = _G.PC.AVD and _G.PC.AVD.Strategist
     if strat then
         local origOnReport = strat.OnReport
+        local _seenFindings = {}  -- track which remotes we've already acted on
         strat.OnReport = function(report)
             if origOnReport then origOnReport(report) end
-            -- Check if any finding crossed Bedrock threshold
+            -- Only act on findings that have score >= threshold
+            -- Debounce is inside OnAVDFinding, but avoid iterating every tick
+            -- by only calling it if the report itself signals a high-value finding
+            if not report or not report.signal or report.signal < 0.55 then return end
             local findings = strat.GetFindings and strat.GetFindings(0.70) or {}
             for _, f in ipairs(findings) do
                 pcall(ASE.OnAVDFinding, f)

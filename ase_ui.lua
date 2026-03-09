@@ -294,15 +294,32 @@ do
             FAILED=COL.RED, ABORTED=COL.AMBER,
         }
 
+        -- Tracks which card is currently selected (for highlight reset)
+        local selectedCard = nil
+
         local function buildGoalCard(g, order)
-            local card = mk("Frame", {BackgroundColor3=Color3.fromRGB(22,22,28),
-                BorderSizePixel=0, Size=UDim2.new(1,0,0,52),
+            local isComplete = g.status == "COMPLETE"
+            local isDiscover = g.goalType == "DISCOVER"
+            local remoteName = g.params and (g.params.remoteName or g.params.sinkRemote) or ""
+            local selectable = isComplete and isDiscover and remoteName ~= ""
+
+            -- Card height: taller for selectable (extra action row)
+            local cardH = selectable and 72 or 52
+
+            local card = mk("Frame", {
+                BackgroundColor3 = selectable
+                    and Color3.fromRGB(236,248,240)   -- soft green tint for complete discovers
+                    or  Color3.fromRGB(235,232,227),  -- warm neutral for everything else
+                BorderSizePixel=0, Size=UDim2.new(1,0,0,cardH),
                 LayoutOrder=order, Parent=goalHolder})
-            addCorner(card, UDim.new(0,8)); addStroke(card, 1, 0.4)
+            addCorner(card, UDim.new(0,8))
+            addStroke(card, selectable and 1.5 or 1, selectable and 0.3 or 0.4)
             mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
                 PaddingTop=UDim.new(0,7), PaddingBottom=UDim.new(0,7), Parent=card})
-            mk("UIListLayout", {Padding=UDim.new(0,3), Parent=card})
+            mk("UIListLayout", {Padding=UDim.new(0,3), SortOrder=Enum.SortOrder.LayoutOrder,
+                Parent=card})
 
+            -- Row 1: id + type + status dot + status text + duration
             local r1 = mk("Frame", {BackgroundTransparency=1,
                 Size=UDim2.new(1,0,0,20), LayoutOrder=1, Parent=card})
             mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
@@ -322,15 +339,98 @@ do
                     Size=UDim2.new(0,50,1,0), TextXAlignment=Enum.TextXAlignment.Right, Parent=r1})
             end
 
+            -- Row 2: detail / remote name
             local detail = g.error or
                 (g.result and (g.result.confirmed ~= nil)
                     and (g.result.confirmed and "✓ " .. tostring(g.result.feedbackRemote) or "✗ no return")
                     or (g.result and g.result.status or ""))
-                or (g.params and g.params.sinkRemote or g.params and g.params.remoteName or "")
+                or remoteName
             mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
                 Text=tostring(detail):sub(1,70), TextColor3=COL.MUTED, TextSize=9,
                 TextXAlignment=Enum.TextXAlignment.Left,
                 Size=UDim2.new(1,0,0,12), LayoutOrder=2, Parent=card})
+
+            -- Row 3 (selectable complete DISCOVER only): remote chip + action buttons
+            if selectable then
+                local r3 = mk("Frame", {BackgroundTransparency=1,
+                    Size=UDim2.new(1,0,0,22), LayoutOrder=3, Parent=card})
+                mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+                    VerticalAlignment=Enum.VerticalAlignment.Center, Padding=UDim.new(0,6),
+                    Parent=r3})
+
+                -- Remote name chip
+                local chip = mk("TextLabel", {
+                    BackgroundColor3=Color3.fromRGB(210,240,220), BorderSizePixel=0,
+                    Font=Enum.Font.Code, Text=" 📡 " .. remoteName .. " ",
+                    TextColor3=Color3.fromRGB(30,100,50), TextSize=9,
+                    Size=UDim2.new(0, math.min(#remoteName*6+32, 200), 0, 18),
+                    Parent=r3})
+                addCorner(chip, UDim.new(0,4))
+
+                -- Select button: fills remoteBox2
+                local selBtn = mk("TextButton", {AutoButtonColor=false,
+                    BackgroundColor3=COL.TEAL, BorderSizePixel=0,
+                    Font=Enum.Font.GothamMedium, Text="Select",
+                    TextColor3=Color3.fromRGB(255,255,255), TextSize=9,
+                    Size=UDim2.new(0,52,0,18), Parent=r3})
+                addCorner(selBtn, UDim.new(0,4))
+
+                -- Quick Bedrock button: select + push Bedrock in one click
+                local brBtn = mk("TextButton", {AutoButtonColor=false,
+                    BackgroundColor3=Color3.fromRGB(34,154,144), BorderSizePixel=0,
+                    Font=Enum.Font.GothamBold, Text="→ Bedrock",
+                    TextColor3=Color3.fromRGB(255,255,255), TextSize=9,
+                    Size=UDim2.new(0,72,0,18), Parent=r3})
+                addCorner(brBtn, UDim.new(0,4))
+
+                -- Select handler: highlight card + fill input
+                selBtn.MouseButton1Click:Connect(function()
+                    clickSound()
+                    -- Reset previous selection
+                    if selectedCard and selectedCard ~= card then
+                        pcall(function()
+                            addStroke(selectedCard, 1.5, 0.3)
+                            selectedCard.BackgroundColor3 = Color3.fromRGB(236,248,240)
+                        end)
+                    end
+                    selectedCard = card
+                    -- Highlight this card with a teal border
+                    addStroke(card, 2, 0.0)
+                    card.BackgroundColor3 = Color3.fromRGB(220,245,232)
+                    -- Fill the input
+                    remoteBox2.Text = remoteName
+                    sendNotification(remoteName .. " selected.", "Success")
+                end)
+
+                -- One-click Bedrock handler
+                brBtn.MouseButton1Click:Connect(function()
+                    clickSound(); pulseClick(brBtn)
+                    remoteBox2.Text = remoteName
+                    local ASE2 = _G.PC.ASE
+                    if ASE2 then
+                        ASE2.PursueBedrock(remoteName)
+                        sendNotification("Bedrock goal pushed for " .. remoteName, "Success")
+                        task.wait(0.3)
+                        if doRefreshGoals then doRefreshGoals() end
+                    end
+                end)
+
+                -- Also make the whole card clickable as a Select shortcut
+                card.InputBegan:Connect(function(inp)
+                    if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+                        if selectedCard and selectedCard ~= card then
+                            pcall(function()
+                                addStroke(selectedCard, 1.5, 0.3)
+                                selectedCard.BackgroundColor3 = Color3.fromRGB(236,248,240)
+                            end)
+                        end
+                        selectedCard = card
+                        addStroke(card, 2, 0.0)
+                        card.BackgroundColor3 = Color3.fromRGB(220,245,232)
+                        remoteBox2.Text = remoteName
+                    end
+                end)
+            end
         end
 
         -- Forward declare so push-button closures can close over it
