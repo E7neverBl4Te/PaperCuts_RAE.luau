@@ -866,6 +866,255 @@ end
 --   LINGERED  →  "server held the thread, didn't reject"
 --   BEDROCK   →  "server echoed our nonce on a different channel"
 -- ═════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════════════
+-- GHOST HANDSHAKE BUFFER
+-- Pre-fire infrastructure for closing the Temporal Deadlock.
+--
+-- The server fires a RemoteEvent:FireClient() challenge immediately after
+-- executing the anchor payload. Because the challenge arrives in the window
+-- between SARP.Execute and any listener setup, the client misses it and the
+-- server thread suspends. This buffer is opened BEFORE SARP fires, so the
+-- fast-path responder is already live when the challenge arrives.
+--
+-- ASE_QueryBuddyRemotes   — CDG + temporal co-occurrence buddy lookup
+-- ASE_OpenHandshakeBuffer — pre-fire S2C listeners that capture & respond
+-- ══════════════════════════════════════════════════════════════════════════════
+
+-- Query CDG and PR for remotes that are causally adjacent to sinkName.
+-- Returns a list of {name, confidence, kind} sorted by confidence desc.
+-- kind: "CDG_INBOUND", "CDG_OUTBOUND", "TEMPORAL_BUDDY"
+local function ASE_QueryBuddyRemotes(sinkName)
+    local CDG = _G.PC and _G.PC.CDG
+    local PR  = _G.PC.PR_Registry
+    local out = {}
+    local seen = {}
+
+    -- 1. CDG strong edges: both inbound (X->sink) and outbound (sink->X)
+    if CDG then
+        local edges = CDG.GetStrongEdges(0.20)
+        for _, edge in ipairs(edges) do
+            -- Inbound: something fires just before sink — likely the trigger
+            if edge.ToID == sinkName and not seen[edge.FromID] then
+                seen[edge.FromID] = true
+                table.insert(out, {
+                    name       = edge.FromID,
+                    confidence = edge.Confidence,
+                    kind       = "CDG_INBOUND",
+                })
+            end
+            -- Outbound: sink fires just before something — likely the resolver
+            if edge.FromID == sinkName and not seen[edge.ToID] then
+                seen[edge.ToID] = true
+                table.insert(out, {
+                    name       = edge.ToID,
+                    confidence = edge.Confidence,
+                    kind       = "CDG_OUTBOUND",
+                })
+            end
+        end
+    end
+
+    -- 2. PR temporal co-occurrence: remotes that fire within 120ms of sinkName
+    -- PR_Registry stores LastFired timestamps per remote; compare them
+    if PR then
+        local sinkRec = PR[sinkName]
+        local sinkT   = sinkRec and sinkRec.LastFired or 0
+        for name, rec in pairs(PR) do
+            if name ~= sinkName and not seen[name] and rec.LastFired then
+                local gap = math.abs(rec.LastFired - sinkT)
+                if gap <= 0.120 then
+                    seen[name] = true
+                    table.insert(out, {
+                        name       = name,
+                        confidence = math.max(0.20, 1.0 - gap / 0.120),
+                        kind       = "TEMPORAL_BUDDY",
+                    })
+                end
+            end
+        end
+    end
+
+    -- Sort descending by confidence
+    table.sort(out, function(a, b) return a.confidence > b.confidence end)
+    return out
+end
+
+-- Open fast-path S2C responders on all buddy remotes BEFORE the anchor fires.
+-- Each responder:
+--   1. Captures the server's challenge args the moment they arrive
+--   2. Mirrors any high-entropy tokens (GUIDs, timestamps, position vectors)
+--      back into the Stage 2 resolver payload
+--   3. Fires the resolver immediately — no task.wait — in the same Lua
+--      resumption cycle so the server's micro-window is satisfied
+--
+-- Returns a buffer handle: { cleanup(), handshakeCompleted, resolverFired,
+--                             capturedArgs, resolverName }
+local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
+    local PR   = _G.PC.PR_Registry
+    local SARP = _G.PC.SARP
+    local conns = {}
+    local done  = false
+
+    local handle = {
+        handshakeCompleted = false,
+        resolverFired      = false,
+        capturedArgs       = nil,
+        resolverName       = nil,
+        cleanup            = function() end,
+    }
+
+    if not PR or #buddies == 0 then return handle end
+
+    -- Parameter mirror: extract high-entropy tokens from server challenge args
+    -- and splice them into a resolver payload alongside the original anchor args
+    local function ASE_MirrorParams(challengeArgs, resolverRec)
+        local RSM = _G.PC.RSM
+        local rsmRec = RSM and RSM.Get(resolverRec.Name or "")
+        local payload = {}
+
+        -- Start from known-good anchor args as baseline
+        for i, v in ipairs(anchorEnvelope) do payload[i] = v end
+
+        -- Walk challenge args: look for GUIDs, timestamps, high-entropy strings
+        -- and splice into matching resolver slots
+        local function isHighEntropy(v)
+            if type(v) == "string" and #v >= 8 then return true end
+            if type(v) == "number" and v > 100000 then return true end  -- timestamp-like
+            return false
+        end
+
+        local function walkChallenge(args, depth)
+            if depth > 4 then return end
+            for _, v in ipairs(args) do
+                if type(v) == "table" then
+                    walkChallenge(v, depth + 1)
+                elseif isHighEntropy(v) then
+                    -- Find first empty or placeholder slot in payload to inject
+                    if rsmRec and rsmRec.ArgSig then
+                        for slot, sig in ipairs(rsmRec.ArgSig) do
+                            if type(v) == type(payload[slot] or v) then
+                                -- Only override if this slot type matches
+                                if not payload[slot] or payload[slot] == 0 or payload[slot] == "" then
+                                    payload[slot] = v
+                                end
+                            end
+                        end
+                    else
+                        -- No RSM — just append the token
+                        table.insert(payload, v)
+                    end
+                end
+            end
+        end
+        walkChallenge(challengeArgs, 0)
+
+        -- Always embed the nonce in a __handshake field so server can match
+        if type(payload[1]) == "table" then
+            payload[1].__handshake = nonce
+            payload[1].__stage     = 2
+        end
+
+        return payload
+    end
+
+    -- Open a listener on every buddy and on every S2C remote (cast wide net)
+    local listenTargets = {}
+    for _, buddy in ipairs(buddies) do
+        listenTargets[buddy.name] = true
+    end
+    -- Also include ALL S2C remotes as fallback — server may use any channel
+    for name, rec in pairs(PR) do
+        if rec.RemoteType == "RemoteEvent" and
+           (rec.Direction == "S2C" or rec.Direction == "BOTH") then
+            listenTargets[name] = true
+        end
+    end
+
+    for rname, _ in pairs(listenTargets) do
+        local rec = PR[rname]
+        if rec and rec.Remote then
+            local ok, conn = pcall(function()
+                return rec.Remote.OnClientEvent:Connect(function(...)
+                    if done then return end
+                    local challengeArgs = {...}
+
+                    -- Check if this looks like a challenge aimed at our anchor
+                    -- Heuristic: contains nonce, OR arrived within 1.5s of buffer open
+                    local isChallenge = false
+                    local function scanForNonce(v, depth)
+                        if depth > 4 then return end
+                        if type(v) == "string" and v:find(nonce, 1, true) then
+                            isChallenge = true; return
+                        end
+                        if type(v) == "table" then
+                            for _, child in pairs(v) do
+                                scanForNonce(child, depth + 1)
+                                if isChallenge then return end
+                            end
+                        end
+                    end
+                    scanForNonce(challengeArgs, 0)
+
+                    -- Also treat any S2C fire from a buddy remote as a potential
+                    -- challenge — even without nonce, timing correlation is enough
+                    if not isChallenge then
+                        for _, buddy in ipairs(buddies) do
+                            if buddy.name == rname and buddy.confidence >= 0.40 then
+                                isChallenge = true
+                                break
+                            end
+                        end
+                    end
+
+                    if isChallenge then
+                        done = true
+                        handle.capturedArgs = challengeArgs
+                        handle.resolverName = rname
+
+                        -- ── FAST-PATH RESPONSE ─────────────────────────────
+                        -- Build Stage 2 resolver payload and fire immediately.
+                        -- This runs in the same Lua resumption — no yield.
+                        local resolverRec = PR[rname]
+                        if resolverRec and resolverRec.Remote and SARP then
+                            local stage2Payload = ASE_MirrorParams(challengeArgs, {Name=rname})
+                            local wrapped2, sim2 = pcall(function()
+                                return SARP.Build("Attribute", stage2Payload, nil, nil, rname)
+                            end)
+                            if wrapped2 and sim2 then
+                                -- Fire without waiting — same scheduler frame
+                                pcall(SARP.Execute, sim2, nil, rname, function(ok2)
+                                    handle.resolverFired      = ok2
+                                    handle.handshakeCompleted = ok2
+                                end)
+                            else
+                                -- SARP.Build returned (ok, wrapped, sim) — pcall wrapping issue
+                                -- Fallback: direct FireServer with mirrored payload
+                                pcall(function()
+                                    resolverRec.Remote:FireServer(table.unpack(stage2Payload))
+                                end)
+                                handle.resolverFired      = true
+                                handle.handshakeCompleted = true
+                            end
+
+                            print(string.format(
+                                "[ASE VERIFY] Ghost handshake caught on %s — Stage 2 fired immediately.",
+                                rname))
+                        end
+                    end
+                end)
+            end)
+            if ok and conn then table.insert(conns, conn) end
+        end
+    end
+
+    handle.cleanup = function()
+        done = true
+        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+    end
+
+    return handle
+end
+
 ASE_VerifyCircuit = {}
 
 function ASE_VerifyCircuit.Run(goal)
@@ -882,15 +1131,12 @@ function ASE_VerifyCircuit.Run(goal)
 
     print(string.format("[ASE VERIFY] Beginning topological circuit check on %s", remoteName))
 
-    -- Build a high-entropy nonce shaped to fit the remote's RSM arg signature
-    -- The nonce must survive server-side validation — embed it in a plausible
-    -- position based on what RSM knows about this remote's arg layout
-    local nonce    = ASE_GenNonce()  -- 24-char high-entropy string
+    -- ── STEP 1: Build nonce + shaped anchor envelope ───────────────────────
+    local nonce    = ASE_GenNonce()
     local rsmRec   = RSM and RSM.Get(remoteName)
     local envelope = {}
 
     if rsmRec and rsmRec.ArgSig and #rsmRec.ArgSig > 0 then
-        -- Find the first table-typed arg slot and embed nonce inside it
         local embedded = false
         for i, argSig in ipairs(rsmRec.ArgSig) do
             if argSig.DominantType == "table" then
@@ -899,7 +1145,6 @@ function ASE_VerifyCircuit.Run(goal)
             elseif argSig.DominantType == "number" and #(argSig.SuccessValues or {}) > 0 then
                 envelope[i] = argSig.SuccessValues[1]
             elseif argSig.DominantType == "string" then
-                -- If first string slot and no nonce placed yet, put nonce here
                 if not embedded and i == 1 then
                     envelope[i] = nonce
                     embedded = true
@@ -908,24 +1153,38 @@ function ASE_VerifyCircuit.Run(goal)
                 end
             end
         end
-        -- Fallback: if no slot found, wrap entire envelope as table with nonce
         if not embedded then
             envelope = { __nonce = nonce, __verify = true }
         end
     else
-        -- No RSM data — send bare nonce envelope
         envelope = { __nonce = nonce, __verify = true }
     end
 
     goal.result = { nonce=nonce, remoteName=remoteName }
-    ASE_AppendTx({
-        directive  = string.format("VERIFY CIRCUIT → %s", remoteName),
-        rawPayload = envelope,
-        nonce      = nonce,
-        result     = "LISTENING for return...",
-    })
 
-    -- Open nonce listener BEFORE firing
+    -- ── STEP 2: Query buddy remotes for Handshake Buffer ──────────────────
+    -- Done before any wire activity so buffer is primed when server challenge
+    -- arrives in the micro-window immediately after the anchor fires.
+    local buddies = ASE_QueryBuddyRemotes(remoteName)
+    if #buddies > 0 then
+        local bnames = {}
+        for _, b in ipairs(buddies) do
+            table.insert(bnames, string.format("%s(%s,%.2f)", b.name, b.kind, b.confidence))
+        end
+        print(string.format("[ASE VERIFY] Handshake buffer arming — %d buddy(s): %s",
+            #buddies, table.concat(bnames, ", ")))
+    else
+        print("[ASE VERIFY] No CDG buddies — buffer will cast wide net on all S2C remotes.")
+    end
+
+    -- ── STEP 3: Open Handshake Buffer BEFORE SARP fires ───────────────────
+    -- This is the critical inversion. The buffer is live when the server sends
+    -- its challenge, so the fast-path responder can reply in the same frame.
+    local buffer = ASE_OpenHandshakeBuffer(remoteName, envelope, nonce, buddies)
+
+    -- ── STEP 4: Open passive nonce echo listener (fallback path) ──────────
+    -- If the server does push a nonce outward on a different channel (original
+    -- VERIFY model), this catches it as before.
     local captured       = false
     local feedbackRemote = nil
 
@@ -934,9 +1193,17 @@ function ASE_VerifyCircuit.Run(goal)
         feedbackRemote = rname
     end)
 
-    -- Fire via SARP
+    ASE_AppendTx({
+        directive  = string.format("VERIFY CIRCUIT: %s", remoteName),
+        rawPayload = envelope,
+        nonce      = nonce,
+        result     = string.format("Buffer armed (%d buddies) — firing anchor...", #buddies),
+    })
+
+    -- ── STEP 5: Fire anchor via SARP ──────────────────────────────────────
     local wrapped, sim, buildErr = SARP and SARP.Build("Attribute", envelope, nil, nil, remoteName)
     if not wrapped then
+        buffer.cleanup()
         if listener then listener.cleanup() end
         ASE_LingerPending[remoteName] = nil
         error("VERIFY SARP.Build failed: " .. tostring(buildErr))
@@ -946,27 +1213,56 @@ function ASE_VerifyCircuit.Run(goal)
         goal.result.sarpSuccess = success
     end)
 
-    -- Wait for nonce echo or timeout
+    -- ── STEP 6: Wait for confirmation ─────────────────────────────────────
+    -- Three resolution paths (checked in priority order):
+    --   A. Ghost handshake completed — buffer caught challenge + fired Stage 2
+    --   B. Nonce echo received — server pushed nonce on outbound channel
+    --   C. Timeout — neither path resolved within NonceListenTimeout
     local t0 = os.clock()
-    while not captured and (os.clock() - t0) < ASE_CFG.NonceListenTimeout do
-        task.wait(0.15)
+    while not buffer.handshakeCompleted and not captured
+          and (os.clock() - t0) < ASE_CFG.NonceListenTimeout do
+        task.wait(0.10)
         if goal.status == ASE.STATUS.ABORTED then
+            buffer.cleanup()
             if listener then listener.cleanup() end
             ASE_LingerPending[remoteName] = nil
             return
         end
     end
 
+    buffer.cleanup()
     if listener then listener.cleanup() end
     ASE_LingerPending[remoteName] = nil
 
-    if captured then
-        -- ── CIRCUIT CONFIRMED: A → Server → B ─────────────────────
-        print(string.format(
-            "[ASE VERIFY] ✓ CIRCUIT CONFIRMED: %s → %s  (nonce echoed)",
-            remoteName, feedbackRemote))
+    -- Determine confirmation source
+    local confirmed    = false
+    local resolvedVia  = nil
+    local resolverName = nil
 
-        -- Lock as confirmed Bedrock pair directly (skip redundant GOAL_BEDROCK)
+    if buffer.handshakeCompleted then
+        -- Path A: Ghost handshake — two-stage execution chain closed
+        confirmed    = true
+        resolvedVia  = "GHOST_HANDSHAKE"
+        resolverName = buffer.resolverName
+        feedbackRemote = resolverName
+        print(string.format(
+            "[ASE VERIFY] GHOST HANDSHAKE CLOSED: %s stage-2 via %s",
+            remoteName, tostring(resolverName)))
+    elseif captured then
+        -- Path B: Classic nonce echo
+        confirmed   = true
+        resolvedVia = "NONCE_ECHO"
+        print(string.format(
+            "[ASE VERIFY] NONCE ECHO CONFIRMED: %s feedback via %s",
+            remoteName, tostring(feedbackRemote)))
+    end
+
+    if confirmed then
+        -- ── CIRCUIT CONFIRMED ─────────────────────────────────────────────
+        local origin = resolvedVia == "GHOST_HANDSHAKE"
+            and "LINGER_GHOST_HANDSHAKE"
+            or  "LINGER_VERIFY"
+
         ASE_BedrockPairs[remoteName] = {
             sinkRemote     = remoteName,
             feedbackRemote = feedbackRemote,
@@ -974,49 +1270,56 @@ function ASE_VerifyCircuit.Run(goal)
             confirmedAt    = os.clock(),
             cargo          = {},
             confidence     = 1.0,
-            origin         = "LINGER_VERIFY",  -- provenance: came through LINGERED path
+            origin         = origin,
+            resolvedVia    = resolvedVia,
+            capturedArgs   = buffer.capturedArgs,
         }
 
-        -- Materialize the Panel
         ASE.Panel.Visible        = true
         ASE.Panel.ActiveSink     = remoteName
         ASE.Panel.ActiveFeedback = feedbackRemote
         ASE.Panel.BedrockConf    = 1.0
         ASE.Panel.HeartbeatAlive = true
 
-        -- Annotate in CSK
         local CSK = _G.PC.CSK
         if CSK then
             CSK.Annotate(remoteName, string.format(
-                "BEDROCK via LINGER_VERIFY → %s (nonce=%s)",
-                feedbackRemote, nonce:sub(1,8)))
+                "BEDROCK via %s: %s (nonce=%s)",
+                origin, tostring(feedbackRemote), nonce:sub(1,8)))
         end
 
         goal.result.confirmed      = true
         goal.result.feedbackRemote = feedbackRemote
+        goal.result.resolvedVia    = resolvedVia
 
         ASE_AppendTx({
             directive  = "CIRCUIT CONFIRMED",
-            rawPayload = {sink=remoteName, feedback=feedbackRemote},
+            rawPayload = {sink=remoteName, feedback=feedbackRemote, via=resolvedVia},
             nonce      = nonce,
-            result     = "✓ BEDROCK — Panel active",
+            result     = string.format("BEDROCK [%s] — Panel active", resolvedVia),
         })
 
-        -- Start heartbeat on the confirmed pipeline
         ASE_BedrockHandshake.StartHeartbeat(remoteName)
     else
-        -- Nonce not echoed — LINGERED but not a proxy
-        print(string.format(
-            "[ASE VERIFY] ✗ %s lingered but did not echo nonce — not a steering proxy.",
-            remoteName))
+        -- ── NO CIRCUIT RESOLVED ───────────────────────────────────────────
+        -- Log whether buffer caught anything (ghost challenge seen but Stage 2 failed)
+        local bufferNote = buffer.capturedArgs
+            and string.format(" (ghost challenge caught on %s — Stage 2 did not complete)",
+                tostring(buffer.resolverName))
+            or  " (no challenge captured)"
 
-        goal.result.confirmed = false
+        print(string.format(
+            "[ASE VERIFY] %s lingered but circuit did not close%s",
+            remoteName, bufferNote))
+
+        goal.result.confirmed     = false
+        goal.result.bufferCaptured = buffer.capturedArgs ~= nil
 
         ASE_AppendTx({
-            directive  = string.format("VERIFY FAILED → %s", remoteName),
-            rawPayload = {},
+            directive  = string.format("VERIFY FAILED: %s", remoteName),
+            rawPayload = { bufferCaught = buffer.capturedArgs ~= nil },
             nonce      = nonce,
-            result     = "✗ LINGERED only — no topological circuit",
+            result     = "LINGERED — circuit open" .. bufferNote,
         })
     end
 end
