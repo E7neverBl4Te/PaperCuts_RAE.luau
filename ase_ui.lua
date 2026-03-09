@@ -30,19 +30,22 @@ local pageASE          = _U.pageASE
 
 do
     local COL = {
-        BG     = Color3.fromRGB(18, 18, 22),
-        CARD   = Color3.fromRGB(26, 26, 32),
-        BORDER = Color3.fromRGB(44, 44, 54),
-        TEXT   = Color3.fromRGB(220, 215, 205),
-        MUTED  = Color3.fromRGB(110, 105, 95),
-        GREEN  = Color3.fromRGB(60, 200, 90),
-        AMBER  = Color3.fromRGB(220, 160, 40),
-        RED    = Color3.fromRGB(220, 60, 60),
-        BLUE   = Color3.fromRGB(70, 140, 240),
-        PURP   = Color3.fromRGB(150, 90, 230),
-        TEAL   = Color3.fromRGB(50, 185, 165),
-        ORANGE = Color3.fromRGB(230, 110, 50),
-        DARK   = Color3.fromRGB(12, 12, 16),
+        -- Outer UI: warm parchment to match system palette
+        BG     = Color3.fromRGB(246, 243, 238),
+        CARD   = Color3.fromRGB(239, 235, 229),
+        BORDER = Color3.fromRGB(200, 193, 184),
+        TEXT   = Color3.fromRGB(46, 40, 34),
+        MUTED  = Color3.fromRGB(122, 112, 100),
+        -- Accent colors (kept vibrant for status/mode indicators)
+        GREEN  = Color3.fromRGB(40, 168, 68),
+        AMBER  = Color3.fromRGB(204, 142, 28),
+        RED    = Color3.fromRGB(204, 54, 54),
+        BLUE   = Color3.fromRGB(54, 114, 204),
+        PURP   = Color3.fromRGB(132, 72, 196),
+        TEAL   = Color3.fromRGB(34, 154, 144),
+        ORANGE = Color3.fromRGB(208, 94, 38),
+        -- Dark: used only inside Panel tab workspaces (Shell/Forge/TxBuffer)
+        DARK   = Color3.fromRGB(28, 26, 32),
     }
 
     -- Dark terminal aesthetic for ASE
@@ -72,7 +75,7 @@ do
     local subTabPages = {}
     local activeSubTab = nil
 
-    local tabBar = mk("Frame", {BackgroundColor3=COL.DARK,
+    local tabBar = mk("Frame", {BackgroundColor3=Color3.fromRGB(237,232,224),
         BorderSizePixel=0, Size=UDim2.new(1,0,0,38), Parent=pageASE})
     addStroke(tabBar, 1, 0.6)
     mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
@@ -81,7 +84,7 @@ do
     mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4),
         PaddingBottom=UDim.new(0,4), Parent=tabBar})
 
-    local subContent = mk("Frame", {BackgroundColor3=COL.BG, BorderSizePixel=0,
+    local subContent = mk("Frame", {BackgroundColor3=Color3.fromRGB(246,243,238), BorderSizePixel=0,
         Position=UDim2.new(0,0,0,38), Size=UDim2.new(1,0,1,-38),
         ClipsDescendants=true, Parent=pageASE})
 
