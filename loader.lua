@@ -26,9 +26,12 @@ local chunks = {
     "sr_ui.lua",           -- SR: dashboard UI
     "sbi.lua",             -- SBI: Server Behavior Inference engine
     "sbi_ui.lua",          -- SBI: dashboard UI
+    "ape.lua",             -- APE: Active Probing Engine
+    "ape_ui.lua",          -- APE: dashboard UI
     "csk.lua",             -- CSK: Cross-Session Knowledge engine
     "csk_ui.lua",          -- CSK: dashboard UI
-    "sr_ui.lua",           -- SR: dashboard UI
+    "ase.lua",             -- ASE: Autonomous Strategy Engine
+    "ase_ui.lua",          -- ASE: Script Execution Panel
     "tsr_registry.lua",   -- TSR: 100-intent library + binding table
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
