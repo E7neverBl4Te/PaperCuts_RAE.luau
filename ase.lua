@@ -963,7 +963,7 @@ local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
         cleanup            = function() end,
     }
 
-    if not PR or #buddies == 0 then return handle end
+    if not PR then return handle end
 
     -- Parameter mirror: extract high-entropy tokens from server challenge args
     -- and splice them into a resolver payload alongside the original anchor args
@@ -1104,6 +1104,73 @@ local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
                 end)
             end)
             if ok and conn then table.insert(conns, conn) end
+        end
+    end
+
+    -- ── RemoteFunction invoke path ────────────────────────────────────────────
+    -- For RF targets, the server's challenge is the RETURN VALUE of InvokeServer,
+    -- not a separate FireClient. We spawn a coroutine that invokes the RF with
+    -- the mirrored anchor envelope and treats whatever comes back as the
+    -- challenge args. If the return contains high-entropy tokens, MirrorParams
+    -- splices them into the Stage 2 payload and closes the circuit.
+    --
+    -- The invoke runs in a task.spawn so it doesn't block the buffer setup.
+    -- A short timeout (RFInvokeTimeout) prevents indefinite coroutine hang.
+    local RFInvokeTimeout = 3.0
+    for rname, _ in pairs(listenTargets) do
+        local rec = PR[rname]
+        if rec and rec.Remote and rec.RemoteType == "RemoteFunction" then
+            task.spawn(function()
+                if done then return end
+                -- Build the invoke payload: use anchor envelope as baseline
+                -- (the RF likely expects the same arg shape as the sink)
+                local invokePayload = {}
+                for i, v in ipairs(anchorEnvelope) do invokePayload[i] = v end
+
+                -- Fire InvokeServer — return value IS the server's challenge
+                local invokeOk, returnVal = pcall(function()
+                    return rec.Remote:InvokeServer(table.unpack(invokePayload))
+                end)
+
+                if done then return end  -- another path already resolved
+
+                if invokeOk and returnVal ~= nil then
+                    -- Normalize return into an args table
+                    local challengeArgs = type(returnVal) == "table"
+                        and returnVal or { returnVal }
+
+                    done = true
+                    handle.capturedArgs = challengeArgs
+                    handle.resolverName = rname
+
+                    -- Build Stage 2 payload with mirrored tokens
+                    local stage2Payload = ASE_MirrorParams(challengeArgs, {Name = rname})
+
+                    -- Fire Stage 2 resolver — same task, no additional yield
+                    local resolverRec = PR[rname]
+                    if resolverRec and resolverRec.Remote then
+                        if resolverRec.RemoteType == "RemoteFunction" then
+                            -- RF resolver: InvokeServer with stage 2 payload
+                            local s2ok = pcall(function()
+                                resolverRec.Remote:InvokeServer(table.unpack(stage2Payload))
+                            end)
+                            handle.resolverFired      = s2ok
+                            handle.handshakeCompleted = s2ok
+                        else
+                            -- RE resolver: FireServer with stage 2 payload
+                            pcall(function()
+                                resolverRec.Remote:FireServer(table.unpack(stage2Payload))
+                            end)
+                            handle.resolverFired      = true
+                            handle.handshakeCompleted = true
+                        end
+                    end
+
+                    print(string.format(
+                        "[ASE VERIFY] RF invoke path: challenge captured on %s — Stage 2 fired.",
+                        rname))
+                end
+            end)
         end
     end
 
