@@ -234,6 +234,13 @@ end
 -- to each unusual delta candidate and watching for linger resolution.
 -- ══════════════════════════════════════════════════════════════════════════════
 
+-- Forward declarations — all four escalation modules declared here
+-- so every reference anywhere in the file resolves to the same upvalue
+local ASE_PropertySteerer   = {}
+local ASE_StateNudge        = {}
+local ASE_AntecedentExtractor = {}
+local ASE_TwoStageSequencer = {}
+
 local ASE_LingerWatch   = {}
 local ASE_LW_Sessions   = {}   -- [remoteName] = session record
 
@@ -410,7 +417,7 @@ end
 -- For each unusual delta candidate, attempts to write the value back to its
 -- pre-linger state (or invert it for booleans) and watches for linger resolution.
 
-local ASE_PropertySteerer = {}
+-- ASE_PropertySteerer already declared above — assign methods below
 
 -- Resolve a surface key back to the actual Roblox instance + property name
 local function LW_ResolveKey(key)
@@ -565,7 +572,7 @@ ASE_LingerWatch.Steerer = ASE_PropertySteerer
 --   6. ANCHOR_CYCLE — Anchor then immediately unanchor RootPart
 -- ══════════════════════════════════════════════════════════════════════════════
 
-local ASE_StateNudge = {}
+-- ASE_StateNudge already declared above — assign methods below
 
 local SN_POLL_INTERVAL = 0.10   -- poll rate during resolve watch (seconds)
 local SN_NUDGE_WINDOW  = 1.5    -- seconds to watch after each nudge
@@ -820,8 +827,7 @@ end
 --               with origin = "TWO_STAGE_SEQUENCE"
 -- ══════════════════════════════════════════════════════════════════════════════
 
-local ASE_AntecedentExtractor = {}
-local ASE_TwoStageSequencer   = {}
+-- ASE_AntecedentExtractor and ASE_TwoStageSequencer already declared above
 
 -- ── CDG Antecedent Extractor ─────────────────────────────────────────────────
 
