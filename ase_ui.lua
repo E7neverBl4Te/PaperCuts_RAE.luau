@@ -54,7 +54,7 @@ do
         return mk(class, props)
     end
     local function confBar(parent, frac, lo, col)
-        local bg = mk("Frame", {BackgroundColor3=Color3.fromRGB(35,35,42),
+        local bg = mk("Frame", {BackgroundColor3=Color3.fromRGB(200,194,184),
             BorderSizePixel=0, Size=UDim2.new(1,0,0,4), LayoutOrder=lo or 99, Parent=parent})
         addCorner(bg, UDim.new(0,2))
         local fill = mk("Frame", {BackgroundColor3=col or COL.GREEN, BorderSizePixel=0,
@@ -185,11 +185,11 @@ do
         local modeButtons = {}
         for _, mb in ipairs(MODE_BTNS) do
             local btn = mk("TextButton", {AutoButtonColor=false,
-                BackgroundColor3=COL.DARK, BorderSizePixel=0,
+                BackgroundColor3=Color3.fromRGB(225,220,212), BorderSizePixel=0,
                 Font=Enum.Font.GothamMedium, Text=mb.label,
-                TextColor3=COL.MUTED, TextSize=11,
+                TextColor3=Color3.fromRGB(90,80,70), TextSize=11,
                 Size=UDim2.new(0,110,0,30), Parent=modeRow})
-            addCorner(btn, UDim.new(0,8)); addStroke(btn, 1, 0.5)
+            addCorner(btn, UDim.new(0,8)); addStroke(btn, 1, 0.4)
             local bmode = mb.mode; local bcol = mb.col
             modeButtons[bmode] = { btn=btn, col=bcol }
             btn.MouseButton1Click:Connect(function()
@@ -239,7 +239,7 @@ do
             for bmode, mb in pairs(modeButtons) do
                 local active = (bmode == mode)
                 tween(mb.btn, TweenInfo.new(0.1), {
-                    BackgroundColor3 = active and mb.col or COL.DARK,
+                    BackgroundColor3 = active and mb.col or Color3.fromRGB(225,220,212),
                     TextColor3       = active and Color3.fromRGB(255,255,255) or COL.MUTED,
                 })
             end
@@ -327,7 +327,7 @@ do
 
         local _, sPush = makeSection(pg, "Push Goal")
         sPush.BackgroundColor3 = COL.CARD; addStroke(sPush, 1, 0.5)
-        local remoteBox2 = mk("TextBox", {BackgroundColor3=COL.DARK,
+        local remoteBox2 = mk("TextBox", {BackgroundColor3=Color3.fromRGB(232,228,220),
             BorderSizePixel=0, ClearTextOnFocus=false, Font=Enum.Font.Code,
             PlaceholderText="Remote name for BEDROCK / DISCOVER...",
             PlaceholderColor3=COL.MUTED, Text="", TextColor3=COL.TEXT,
