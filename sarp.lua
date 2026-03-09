@@ -167,8 +167,9 @@ end
 -- High load → correction takes longer → wider usable echo window.
 -- Returns a multiplier applied to EchoWindowEst before each flight.
 local function SARP_GetLiveLoadFactor()
-    local recentFires = LWM.GetTemporalAverage("remoteFires", 3) or 0
     local delta       = LWM.GetDelta()
+    -- Use firesDelta (fires-per-tick) not cumulative remoteFires total
+    local recentFires = math.abs(delta and delta.firesDelta or 0)
     local recentPhys  = math.abs(delta and delta.physDelta or 0)
     local playerCount = #Players:GetPlayers()
     local fireFactor  = math.clamp(recentFires / math.max(SARP_CFG.ACFiresThreshold, 1), 0, 1)
@@ -189,8 +190,9 @@ end
 -- learns state-conditional (not just signature-conditional) distributions.
 -- Buckets: remoteFires (lo/md/hi), physDelta (lo/md/hi), player count (sm/md/lg)
 local function SARP_BuildETMContext(baseSig)
-    local fires   = LWM.GetTemporalAverage("remoteFires", 2) or 0
     local delta   = LWM.GetDelta()
+    -- firesDelta = new fires since last snapshot (rate), not cumulative total
+    local fires   = math.abs(delta and delta.firesDelta or 0)
     local physD   = math.abs(delta and delta.physDelta or 0)
     local players = #Players:GetPlayers()
     local fBucket = fires  < 5   and "F:lo" or fires  < 15 and "F:md" or "F:hi"
@@ -464,8 +466,9 @@ function SARP.Simulator.Simulate(wrapped, targetName)
     local risk     = variance > 0.12 and "High" or variance > 0.06 and "Medium" or "Low"
 
     -- AntiCheat spike detection from LWM
-    local avgFires = LWM.GetTemporalAverage("remoteFires", 3)
-    local acRisk   = (avgFires and avgFires > SARP_CFG.ACFiresThreshold)
+    local _delta3  = LWM.GetDelta()
+    local avgFires = math.abs(_delta3 and _delta3.firesDelta or 0)
+    local acRisk   = (avgFires > SARP_CFG.ACFiresThreshold)
         and "ELEVATED" or "NOMINAL"
 
     -- Phoenix reshape estimate: how many iterations before convergence?
@@ -1308,8 +1311,9 @@ function SARP.Phoenix.Run(wrappedPayload, targetName, simResult, onComplete)
 
         -- AntiCheat gate: elevated remoteFires delta = abort
         if SARP_CFG.AntiCheatGate then
-            local recentFires = LWM.GetTemporalAverage("remoteFires", 2)
-            if recentFires and recentFires > SARP_CFG.ACFiresThreshold then
+            local _acDelta    = LWM.GetDelta()
+            local recentFires = math.abs(_acDelta and _acDelta.firesDelta or 0)
+            if recentFires > SARP_CFG.ACFiresThreshold then
                 sessionRec.FinalResult = "AC_ABORT"
                 onComplete(false, sessionRec, "AC spike detected — Phoenix aborted")
                 return
@@ -2101,8 +2105,9 @@ do
 
     local function doRefreshHeat()
         -- ── AC Heat ────────────────────────────────────────────
-        -- Derived from LWM remoteFires temporal average vs threshold
-        local avgFires = LWM.GetTemporalAverage("remoteFires", 3) or 0
+        -- Use firesDelta (fires since last LWM tick) not cumulative total
+        local _heatDelta = LWM.GetDelta()
+        local avgFires   = math.abs(_heatDelta and _heatDelta.firesDelta or 0)
         local heat = math.min(100, math.floor(avgFires / SARP_CFG.ACFiresThreshold * 100))
         local heatStr = tostring(heat) .. "%"
         local heatCol = heat > 70 and Color3.fromRGB(220,60,60)

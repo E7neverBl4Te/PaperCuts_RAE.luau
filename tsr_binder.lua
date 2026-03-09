@@ -725,7 +725,9 @@ function TSR_Binder.RefreshQueue()
             added = added + 1
         end
     end
-    print(string.format("[TSR Binder] Refresh: %d intents added to queue.", added))
+    if added > 0 then
+        print(string.format("[TSR Binder] Refresh: %d intents added to queue.", added))
+    end
     return added
 end
 
