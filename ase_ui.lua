@@ -168,6 +168,9 @@ do
             Size=UDim2.new(1,0,0,16), Parent=sRisk})
         local _, riskFill = confBar(sRisk, 0, 99, COL.GREEN)
 
+        -- Forward declare so mode-button closures can close over it
+        local doRefreshOverview
+
         -- Mode selector
         local _, sModeRow = makeSection(pg, "Execution Mode")
         sModeRow.BackgroundColor3 = COL.CARD; addStroke(sModeRow, 1, 0.5)
@@ -201,17 +204,22 @@ do
                     _G._ASE_ShowMasteryGate = true
                     return
                 end
+                -- Already in this mode — just refresh visuals, no error
+                if ASE.GetMode() == bmode then
+                    if doRefreshOverview then doRefreshOverview() end
+                    return
+                end
                 local ok, err = ASE.SetMode(bmode)
                 if ok then
                     sendNotification("Mode: " .. bmode, "Success")
-                    doRefreshOverview()
+                    if doRefreshOverview then doRefreshOverview() end
                 else
                     sendNotification(tostring(err), "Warning")
                 end
             end)
         end
 
-        local function doRefreshOverview()
+        doRefreshOverview = function()
             local ASE = _G.PC.ASE
             if not ASE then statsLabel.Text = "ASE not loaded."; return end
             local stats = ASE.GetStats()
@@ -325,6 +333,9 @@ do
                 Size=UDim2.new(1,0,0,12), LayoutOrder=2, Parent=card})
         end
 
+        -- Forward declare so push-button closures can close over it
+        local doRefreshGoals
+
         local _, sPush = makeSection(pg, "Push Goal")
         sPush.BackgroundColor3 = COL.CARD; addStroke(sPush, 1, 0.5)
         local remoteBox2 = mk("TextBox", {BackgroundColor3=Color3.fromRGB(232,228,220),
@@ -361,7 +372,7 @@ do
             end)
         end
 
-        local function doRefreshGoals()
+        doRefreshGoals = function()
             for _, c in ipairs(goalHolder:GetChildren()) do
                 if c:IsA("Frame") then c:Destroy() end
             end
