@@ -417,6 +417,11 @@ end
 function PR_Analytics.Print() print(PR_Analytics.GetReport()) end
 
 -- ── Bridge ───────────────────────────────────────────────────────────────────
+-- Forward declarations — PR_Bridge.Sync references these before they are defined
+local PR_Classifier
+local PR_AnomalyDetector
+local PR_ProtocolFingerprint
+
 local PR_Bridge = {}
 function PR_Bridge.FeedETM()
     local ETM = _G.PC and _G.PC.ETM
@@ -532,7 +537,7 @@ local PR_ROLE_KW = {
     CHAT     ={"chat","message","msg","say","whisper","channel","voice"},
     SPAWN    ={"spawn","respawn","load","join","enter","leave","exit","char","character"},
 }
-local PR_Classifier = {}
+PR_Classifier = {}
 function PR_Classifier.ClassifyByName(name)
     local lower = name:lower()
     for role, kws in pairs(PR_ROLE_KW) do
@@ -575,7 +580,7 @@ function PR_Classifier.ClassifyAll()
 end
 
 -- ── Anomaly detector ──────────────────────────────────────────────────────────
-local PR_AnomalyDetector = {}
+PR_AnomalyDetector = {}
 function PR_AnomalyDetector.UpdateBaseline(name, rec)
     if rec.AvgHz <= 0 then return end
     if not PR_Anomaly.Baseline[name] then PR_Anomaly.Baseline[name]={mean=rec.AvgHz,m2=0,n=0} end
@@ -695,7 +700,7 @@ function PR_EchoCalibrator.GetStatus()
 end
 
 -- ── Protocol fingerprint ──────────────────────────────────────────────────────
-local PR_ProtocolFingerprint = {}
+PR_ProtocolFingerprint = {}
 function PR_ProtocolFingerprint.Compute()
     local entries = {}
     for name, rec in pairs(PR_Registry) do
