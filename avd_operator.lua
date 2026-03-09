@@ -40,6 +40,104 @@ local O_TotalFailed   = 0
 local O_PassiveConns  = {}      -- passive listener connections
 local O_PassiveActive = false
 
+-- ── Causal Piggyback state ────────────────────────────────────────────────────
+-- Tracks recently observed C2S fires to detect CDG trigger sequences.
+-- When [TriggerRemote → TargetRemote] is a strong CDG edge AND TargetRemote
+-- fires naturally, we inject the probe in the same scheduler frame.
+local O_RecentFires    = {}     -- ring buffer: [{name, t}] last 12 C2S fires
+local O_RecentFiresPtr = 0
+local O_RecentFiresCap = 12
+local O_PiggybackArmed = {}     -- [remoteName] = {targetName, armedAt} — armed injections
+local O_PiggybackCooldown = {}  -- [remoteName] = os.clock() — prevent re-arm spam
+local PIGGYBACK_ARM_WINDOW  = 4.0   -- seconds after trigger fires to watch for follow
+local PIGGYBACK_COOLDOWN_S  = 60.0  -- seconds before same remote can be piggybacked again
+local PIGGYBACK_CDG_MINCONF = 0.35  -- minimum CDG edge confidence to arm
+
+-- ── Causal Piggyback Engine ──────────────────────────────────────────────────
+-- Observes natural C2S fire sequences and injects probes as "shadow calls"
+-- immediately after detected causal follow events. To the server AC, the
+-- traffic looks like: [TriggerA] → [NaturalB + ShadowProbe]. The co-occurrence
+-- pattern remains causally coherent.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Record a C2S fire into the ring buffer
+local function O_PiggyRecordFire(remoteName)
+    O_RecentFiresPtr = (O_RecentFiresPtr % O_RecentFiresCap) + 1
+    O_RecentFires[O_RecentFiresPtr] = { name=remoteName, t=os.clock() }
+end
+
+-- Given a newly fired C2S remote, check CDG for armed piggyback injections
+-- and fire them in the same scheduler frame.
+local function O_PiggyCheckAndFire(remoteName)
+    local now     = os.clock()
+    local CDG     = _G.PC and _G.PC.CDG
+    local SARP    = _G.PC and _G.PC.SARP
+    local strat   = _G.PC and _G.PC.AVD and _G.PC.AVD.Strategist
+    if not CDG or not SARP then return end
+
+    -- 1. Check if this fire resolves an armed piggyback
+    local armed = O_PiggybackArmed[remoteName]
+    if armed and (now - armed.armedAt) <= PIGGYBACK_ARM_WINDOW then
+        -- Cooldown check
+        local lastPig = O_PiggybackCooldown[remoteName] or 0
+        if (now - lastPig) >= PIGGYBACK_COOLDOWN_S then
+            O_PiggybackCooldown[remoteName] = now
+            O_PiggybackArmed[remoteName]    = nil
+
+            -- Retrieve the probe plan from the strategist queue
+            local finding = strat and strat.GetFindings and
+                strat.GetFindings(PIGGYBACK_CDG_MINCONF)
+            local handoff = nil
+            if finding then
+                for _, f in ipairs(finding) do
+                    if f.remoteName == armed.probeName and f.sarpReady then
+                        handoff = f; break
+                    end
+                end
+            end
+
+            if handoff then
+                -- Fire in same frame — no additional task.wait
+                print(string.format(
+                    "[AVD Operator] PIGGYBACK: injecting %s after natural %s fire",
+                    armed.probeName, remoteName))
+                task.spawn(function()
+                    pcall(AVD_Operator.SARPDeliver, handoff)
+                end)
+                O_TotalFired = O_TotalFired + 1
+            end
+        end
+        return
+    end
+
+    -- 2. Check if this fire is a CDG trigger — arm piggyback for follow remotes
+    local edges = CDG.GetStrongEdges(PIGGYBACK_CDG_MINCONF)
+    for _, edge in ipairs(edges) do
+        -- edge.FromID fired → edge.ToID is the natural follow
+        -- We want to probe a HIGH-VALUE remote at the moment edge.ToID fires
+        if edge.FromID == remoteName then
+            local followName = edge.ToID
+            -- Only arm if the follow remote hasn't been piggybacked recently
+            local lastArm = O_PiggybackCooldown[followName] or 0
+            if (now - lastArm) >= PIGGYBACK_COOLDOWN_S then
+                -- Find a high-value probe candidate from strategist findings
+                local findings = strat and strat.GetFindings and
+                    strat.GetFindings(PIGGYBACK_CDG_MINCONF) or {}
+                for _, f in ipairs(findings) do
+                    if f.sarpReady and f.remoteName ~= remoteName
+                       and f.remoteName ~= followName then
+                        O_PiggybackArmed[followName] = {
+                            probeName = f.remoteName,
+                            armedAt   = now,
+                        }
+                        break
+                    end
+                end
+            end
+        end
+    end
+end
+
 -- ── Passive mode: listen to existing remote traffic ──────────────────────────
 -- Passive mode hooks OnClientEvent for S2C remotes and watches
 -- RemoteFunction returns without firing anything new.
@@ -310,6 +408,10 @@ function AVD_Operator.SARPDeliver(handoff)
 
     -- Fly via SARP  (callback signature: success bool, result, err string)
     local _remoteName = handoff.remoteName
+    -- Record for piggyback engine before SARP fires
+    O_PiggyRecordFire(_remoteName)
+    O_PiggyCheckAndFire(_remoteName)
+
     SARP.Execute(wrapped, simResult, _remoteName, function(success, result, err)
         local resultStr = tostring(err or "")
         local isLingered = success and (

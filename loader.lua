@@ -31,7 +31,8 @@ local chunks = {
     "csk.lua",             -- CSK: Cross-Session Knowledge engine
     "csk_ui.lua",          -- CSK: dashboard UI
     "ase.lua",             -- ASE: Autonomous Strategy Engine
-    "ase_ui.lua",          -- ASE: Script Execution Panel
+    "ase_ui.lua",
+    "shadow_binder.lua",          -- ASE: Script Execution Panel
     "tsr_registry.lua",   -- TSR: 100-intent library + binding table
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API

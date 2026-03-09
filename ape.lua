@@ -42,8 +42,11 @@ local APE_CFG = {
     SatThreshold            = 0.015,
     -- Minimum SBI confidence to consider a remote "done enough" (skip it)
     DoneThreshold           = 0.82,
-    -- Auto-scan period (seconds)
+    -- Auto-scan period (seconds) — kept for reference / manual calls
     AutoScanPeriod          = 60.0,
+    -- NHPP scan cadence bounds (seconds)
+    NHPPMinWait             = 12.0,   -- floor: never scan faster than this
+    NHPPMaxWait             = 300.0,  -- ceiling: never go longer than this idle
     -- Plans per campaign maximum
     MaxPlansPerCampaign     = 32,
     -- Per-plan fire timeout (seconds, used by campaign runner)
@@ -110,14 +113,87 @@ local function APE_NextID()
     return APE_CampaignIDSeq
 end
 
-local function APE_DefaultArgs(schema)
+-- ── Natural Distribution Sampler ─────────────────────────────────────────────
+-- Replaces uniform/boundary arg generation with ETM/RSM frequency-weighted
+-- sampling. Makes probe arg entropy look like a slightly glitchy player rather
+-- than an automated fuzzer.
+--
+-- For numbers  : Gaussian centered on observed mean, σ from SuccessValues spread.
+--                Clamps to [min-10%, max+10%] of observed range.
+-- For strings  : Frequency-weighted selection from SuccessStrings history.
+--                Earlier (more frequent) entries get higher weight via Zipf-like
+--                decay — matches real traffic distributions.
+-- For booleans : Biased 80/20 toward the more commonly observed value.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- Box-Muller Gaussian sample
+local function APE_SampleGaussian(mean, sigma)
+    local u1 = math.max(1e-10, math.random())
+    local u2 = math.random()
+    local z  = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+    return mean + sigma * z
+end
+
+-- Zipf-weighted string selection: index 1 gets weight N, index 2 gets N/2, etc.
+local function APE_SampleZipfString(strs)
+    if #strs == 0 then return "" end
+    if #strs == 1 then return strs[1] end
+    local weights = {}
+    local total   = 0
+    for i = 1, #strs do
+        local w = #strs / i   -- Zipf: weight ∝ 1/rank, scaled by N
+        weights[i] = w
+        total = total + w
+    end
+    local r = math.random() * total
+    local cum = 0
+    for i, w in ipairs(weights) do
+        cum = cum + w
+        if r <= cum then return strs[i] end
+    end
+    return strs[#strs]
+end
+
+function APE_DefaultArgs(schema)
     local args = {}
     for _, slot in ipairs(schema or {}) do
         local t = slot.DominantType or "number"
-        if t == "number"  then table.insert(args, slot.NumberMean or 0)
-        elseif t == "string"  then table.insert(args, slot.StringSamples and slot.StringSamples[1] or "")
-        elseif t == "boolean" then table.insert(args, true)
-        else table.insert(args, nil) end
+        if t == "number" then
+            local vals = slot.SuccessValues or {}
+            if #vals >= 2 then
+                -- Gaussian from observed distribution
+                local sum, sum2 = 0, 0
+                for _, v in ipairs(vals) do sum = sum + v; sum2 = sum2 + v*v end
+                local mean  = sum / #vals
+                local var   = math.max(0, sum2/#vals - mean*mean)
+                local sigma = math.sqrt(var) * 0.6  -- slightly tighter than raw std
+                local lo    = math.min(table.unpack(vals))
+                local hi    = math.max(table.unpack(vals))
+                local margin= (hi - lo) * 0.1
+                local sample= APE_SampleGaussian(mean, math.max(sigma, 0.1))
+                table.insert(args, math.clamp(sample, lo - margin, hi + margin))
+            elseif #vals == 1 then
+                -- Single observed value — add small Gaussian noise
+                table.insert(args, APE_SampleGaussian(vals[1], math.abs(vals[1]) * 0.05 + 0.1))
+            else
+                table.insert(args, slot.NumberMean or 0)
+            end
+
+        elseif t == "string" then
+            local strs = slot.SuccessStrings or slot.StringSamples or {}
+            if #strs > 0 then
+                table.insert(args, APE_SampleZipfString(strs))
+            else
+                table.insert(args, "")
+            end
+
+        elseif t == "boolean" then
+            -- 80/20 bias toward true (most game remotes expect true for ability flags)
+            table.insert(args, math.random() < 0.80)
+
+        else
+            table.insert(args, nil)
+        end
     end
     return args
 end
@@ -964,10 +1040,41 @@ task.spawn(function()
     local n = APE.Scan()
     print(string.format("[APE] Initial scan: launched %d campaign(s).", n))
 
-    -- Auto-scan loop
+    -- ── NHPP scan cadence ──────────────────────────────────────────────────
+    -- Non-Homogeneous Poisson Process: scan rate tracks real player activity
+    -- via LWM firesDelta + physDelta. When the player is idle the probe rate
+    -- drops to near-zero. When they are active, probes hide in the noise.
+    --
+    -- lam(t) = lam_base + lam_activity * activity_signal          (scans per second)
+    -- wait  = -ln(U) / lam(t)    clamped to [APE_CFG.NHPPMinWait, NHPPMaxWait]
     task.spawn(function()
+        -- NHPP parameters (tunable via APE_CFG)
+        local lam_base     = 1.0 / 180.0   -- one scan per 3 min at idle
+        local lam_activity = 1.0 / 30.0    -- up to one scan per 30 s at peak activity
+        local minWait    = APE_CFG.NHPPMinWait or 12.0
+        local maxWait    = APE_CFG.NHPPMaxWait or 300.0
+
         while true do
-            task.wait(APE_CFG.AutoScanPeriod)
+            -- Sample activity signal from LWM
+            local LWM    = _G.PC and _G.PC.LWM
+            local delta  = LWM and LWM.GetDelta()
+            local fires  = math.abs(delta and delta.firesDelta or 0)
+            local phys   = math.abs(delta and delta.physDelta  or 0)
+            -- Normalize: fires saturates at 30, phys at 10
+            local actSig = math.clamp(fires/30.0, 0, 1) * 0.7
+                         + math.clamp(phys /10.0, 0, 1) * 0.3
+
+            local lambda = lam_base + lam_activity * actSig
+            -- Poisson inter-arrival: exponential with rate λ
+            local u      = math.max(1e-10, math.random())
+            local wait   = math.clamp(-math.log(u) / lambda, minWait, maxWait)
+
+            -- Add small Gamma jitter (shape=2, scale=1s) to prevent fixed-period fingerprint
+            local g1 = -math.log(math.max(1e-10, math.random()))
+            local g2 = -math.log(math.max(1e-10, math.random()))
+            wait = wait + (g1 + g2) * 0.5   -- Gamma(2,1) mean=1s jitter
+
+            task.wait(wait)
             if APE_Running then
                 pcall(APE.Scan)
                 pcall(APE.Save)
