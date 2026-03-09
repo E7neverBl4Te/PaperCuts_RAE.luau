@@ -168,8 +168,8 @@ local function R_DeliverViaSARP(remoteName, remoteObj, remoteType, args)
     -- Simulate + execute
     local simResult = SARP.Simulator and SARP.Simulator.Simulate(wrapped, remoteName)
     local success   = false
-    SARP.Execute(wrapped, simResult, remoteName, function(outcome)
-        success = outcome and outcome.Success or false
+    SARP.Execute(wrapped, simResult, remoteName, function(ok, result, err)
+        success = ok == true
     end)
 
     return success, nil
