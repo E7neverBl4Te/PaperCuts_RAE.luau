@@ -1017,18 +1017,44 @@ local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
         return payload
     end
 
-    -- Open a listener on every buddy and on every S2C remote (cast wide net)
-    local listenTargets = {}
+    -- Build multimodal listenTargets:
+    --   RE targets  — all S2C/BOTH RemoteEvents (OnClientEvent listeners)
+    --   RF targets  — all RemoteFunctions + buddies (InvokeServer return path)
+    -- These are kept separate so each path gets the right handler.
+    local listenTargets_RE = {}   -- RemoteEvent targets
+    local listenTargets_RF = {}   -- RemoteFunction targets
+
+    -- Seed with CDG buddies first
     for _, buddy in ipairs(buddies) do
-        listenTargets[buddy.name] = true
+        local rec = PR[buddy.name]
+        if rec then
+            if rec.RemoteType == "RemoteFunction" then
+                listenTargets_RF[buddy.name] = true
+            else
+                listenTargets_RE[buddy.name] = true
+            end
+        end
     end
-    -- Also include ALL S2C remotes as fallback — server may use any channel
+
+    -- Wide net: all S2C/BOTH RemoteEvents
     for name, rec in pairs(PR) do
         if rec.RemoteType == "RemoteEvent" and
            (rec.Direction == "S2C" or rec.Direction == "BOTH") then
-            listenTargets[name] = true
+            listenTargets_RE[name] = true
         end
     end
+
+    -- Wide net: ALL RemoteFunctions — their return value is the challenge
+    -- The sink itself is included here; InvokeServer on the sink returns
+    -- the server's response inline — no separate FireClient.
+    for name, rec in pairs(PR) do
+        if rec.RemoteType == "RemoteFunction" then
+            listenTargets_RF[name] = true
+        end
+    end
+
+    -- Unified view for the OnClientEvent loop below
+    local listenTargets = listenTargets_RE
 
     for rname, _ in pairs(listenTargets) do
         local rec = PR[rname]
@@ -1108,16 +1134,13 @@ local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
     end
 
     -- ── RemoteFunction invoke path ────────────────────────────────────────────
-    -- For RF targets, the server's challenge is the RETURN VALUE of InvokeServer,
-    -- not a separate FireClient. We spawn a coroutine that invokes the RF with
-    -- the mirrored anchor envelope and treats whatever comes back as the
-    -- challenge args. If the return contains high-entropy tokens, MirrorParams
-    -- splices them into the Stage 2 payload and closes the circuit.
-    --
-    -- The invoke runs in a task.spawn so it doesn't block the buffer setup.
-    -- A short timeout (RFInvokeTimeout) prevents indefinite coroutine hang.
+    -- Iterates over listenTargets_RF — every RF in the registry, including the
+    -- sink itself. For a RF, InvokeServer IS the handshake: the return value is
+    -- the server's challenge. No separate FireClient is ever sent.
+    -- Each invoke runs in its own task.spawn so they race in parallel.
+    -- First one to capture a non-nil return wins; others drop out via done guard.
     local RFInvokeTimeout = 3.0
-    for rname, _ in pairs(listenTargets) do
+    for rname, _ in pairs(listenTargets_RF) do
         local rec = PR[rname]
         if rec and rec.Remote and rec.RemoteType == "RemoteFunction" then
             task.spawn(function()
