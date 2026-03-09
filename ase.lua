@@ -788,14 +788,386 @@ function ASE_StateNudge.Try(remoteName, onResolved)
 
         -- All nudges exhausted
         print(string.format(
-            "[SN] All nudges exhausted on %s — linger is server-internal.",
+            "[SN] All nudges exhausted on %s — escalating to Two-Stage Sequence.",
             remoteName))
         ASE_AppendTx({
             directive  = string.format("STATE-NUDGE EXHAUSTED: %s", remoteName),
             rawPayload = {},
-            result     = "Dependency is server-internal — cooldown or global state.",
+            result     = "Pivoting to CDG antecedent extraction.",
         })
-        ASE_LingerWatch.Stop(remoteName)
+        -- Final escalation: CDG antecedent query + two-stage firing sequence
+        ASE_TwoStageSequencer.Run(remoteName)
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- MODULE 2.7 — CDG ANTECEDENT EXTRACTOR + TWO-STAGE SEQUENCER
+-- ══════════════════════════════════════════════════════════════════════════════
+-- CDG Antecedent Extractor:
+--   Queries CDG for all edges where ToID == targetRemote (inbound edges).
+--   Ranks candidates by a composite score:
+--     score = (Confidence * EffectSize) * 0.60
+--           + JaccardArgSim              * 0.25
+--           + FireCountNorm              * 0.15
+--   Jaccard arg similarity: fraction of RSM ArgSig slots where DominantType
+--   and SuccessString/Value sets overlap between candidate and target.
+--
+-- Two-Stage Sequencer:
+--   Stage 1 — fires the top antecedent via SARP ("The Key")
+--   Stun watch — LingerWatch polls for WalkSpeed=0 / JumpPower=0
+--   Stage 2 — fires the target remote via SARP ("The Lock")
+--   Resolution — if CFrame delta occurs after Stage 2, Bedrock confirmed
+--               with origin = "TWO_STAGE_SEQUENCE"
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local ASE_AntecedentExtractor = {}
+local ASE_TwoStageSequencer   = {}
+
+-- ── CDG Antecedent Extractor ─────────────────────────────────────────────────
+
+-- Compute Jaccard arg similarity between two remotes via RSM ArgSig
+local function ASE_JaccardArgSim(nameA, nameB)
+    local RSM  = _G.PC and _G.PC.RSM
+    if not RSM then return 0.0 end
+    local recA = RSM.Get(nameA)
+    local recB = RSM.Get(nameB)
+    if not recA or not recB then return 0.0 end
+    local sigA = recA.ArgSig or {}
+    local sigB = recB.ArgSig or {}
+    if #sigA == 0 or #sigB == 0 then return 0.0 end
+
+    local slots  = math.max(#sigA, #sigB)
+    local matchScore = 0.0
+
+    for i = 1, slots do
+        local sA = sigA[i]
+        local sB = sigB[i]
+        if sA and sB then
+            -- Type match
+            if sA.DominantType == sB.DominantType then
+                matchScore = matchScore + 0.5
+                -- String set overlap
+                if sA.DominantType == "string" then
+                    local setA, setB = {}, {}
+                    for _, s in ipairs(sA.SuccessStrings or {}) do setA[s] = true end
+                    local inter, union = 0, 0
+                    for _, s in ipairs(sB.SuccessStrings or {}) do
+                        union = union + 1
+                        if setA[s] then inter = inter + 1 end
+                    end
+                    for _ in pairs(setA) do union = union + 1 end
+                    if union > 0 then
+                        matchScore = matchScore + 0.5 * (inter / union)
+                    end
+                -- Number range overlap
+                elseif sA.DominantType == "number" then
+                    local loA = sA.NumberMin or sA.NumberMean or 0
+                    local hiA = sA.NumberMax or sA.NumberMean or 0
+                    local loB = sB.NumberMin or sB.NumberMean or 0
+                    local hiB = sB.NumberMax or sB.NumberMean or 0
+                    local inter = math.max(0, math.min(hiA, hiB) - math.max(loA, loB))
+                    local union = math.max(hiA, hiB) - math.min(loA, loB)
+                    if union > 0 then
+                        matchScore = matchScore + 0.5 * (inter / union)
+                    end
+                else
+                    matchScore = matchScore + 0.5
+                end
+            end
+        end
+    end
+
+    return math.clamp(matchScore / slots, 0.0, 1.0)
+end
+
+-- Extract and rank antecedent candidates for a target remote
+function ASE_AntecedentExtractor.Query(targetRemote, minConf)
+    minConf = minConf or 0.15
+    local CDG = _G.PC and _G.PC.CDG
+    local PR  = _G.PC and _G.PC.PR_Registry
+    if not CDG then return {} end
+
+    -- Get all strong edges — filter for inbound (ToID == target)
+    local allEdges = CDG.GetStrongEdges(minConf)
+    local inbound  = {}
+    for _, edge in ipairs(allEdges) do
+        if edge.ToID == targetRemote then
+            table.insert(inbound, edge)
+        end
+    end
+
+    if #inbound == 0 then
+        -- CDG has no inbound edges yet — fall back to PR FireCount ranking
+        -- Any remote that fires frequently enough to appear in PR is a candidate
+        local candidates = {}
+        if PR then
+            for name, rec in pairs(PR) do
+                if name ~= targetRemote and rec.FireCount and rec.FireCount > 2 then
+                    table.insert(candidates, {
+                        name        = name,
+                        score       = 0.0,
+                        confidence  = 0.0,
+                        effectSize  = 0.0,
+                        jaccardSim  = ASE_JaccardArgSim(name, targetRemote),
+                        fireCount   = rec.FireCount,
+                        remoteType  = rec.RemoteType or "RemoteEvent",
+                        source      = "PR_FALLBACK",
+                    })
+                end
+            end
+            -- Sort by Jaccard alone when no CDG data
+            table.sort(candidates, function(a, b)
+                return (a.jaccardSim + a.fireCount * 0.001) >
+                       (b.jaccardSim + b.fireCount * 0.001)
+            end)
+        end
+        return candidates
+    end
+
+    -- Normalize FireCount across PR for scoring
+    local maxFires = 1
+    if PR then
+        for _, rec in pairs(PR) do
+            if rec.FireCount and rec.FireCount > maxFires then
+                maxFires = rec.FireCount
+            end
+        end
+    end
+
+    local candidates = {}
+    for _, edge in ipairs(inbound) do
+        local name      = edge.FromID
+        local prRec     = PR and PR[name]
+        local fireNorm  = prRec and (prRec.FireCount / maxFires) or 0.0
+        local jaccard   = ASE_JaccardArgSim(name, targetRemote)
+
+        -- Composite score
+        local score = (edge.Confidence * (edge.EffectSize or 1.0)) * 0.60
+                    + jaccard                                        * 0.25
+                    + fireNorm                                       * 0.15
+
+        table.insert(candidates, {
+            name        = name,
+            score       = score,
+            confidence  = edge.Confidence,
+            effectSize  = edge.EffectSize or 0.0,
+            coSuccess   = edge.CoSuccess  or 0,
+            coFired     = edge.CoFired    or 0,
+            jaccardSim  = jaccard,
+            fireCount   = prRec and prRec.FireCount or 0,
+            remoteType  = prRec and prRec.RemoteType or "RemoteEvent",
+            source      = "CDG",
+        })
+    end
+
+    table.sort(candidates, function(a, b) return a.score > b.score end)
+    return candidates
+end
+
+-- ── Two-Stage Sequencer ───────────────────────────────────────────────────────
+
+-- Watch LingerWatch snapshots for stun signature (WalkSpeed=0, JumpPower=0)
+local function TSS_WaitForStun(remoteName, timeout)
+    local t0 = os.clock()
+    while (os.clock() - t0) < timeout do
+        task.wait(0.05)
+        local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
+        for _, d in ipairs(deltas) do
+            if d.key == "CHAR:HUM.WalkSpeed" and (d.to or 999) == 0 then
+                return true, "WalkSpeed=0"
+            end
+            if d.key == "CHAR:HUM.JumpPower" and (d.to or 999) == 0 then
+                return true, "JumpPower=0"
+            end
+        end
+    end
+    return false, nil
+end
+
+-- Watch LingerWatch snapshots for teleport completion (CFrame delta)
+local function TSS_WaitForTeleport(remoteName, timeout)
+    local t0    = os.clock()
+    local LW    = ASE_LW_Sessions[remoteName]
+    local baseX = LW and LW.baseline["CHAR:HRP.X"] or nil
+    local baseZ = LW and LW.baseline["CHAR:HRP.Z"] or nil
+
+    while (os.clock() - t0) < timeout do
+        task.wait(0.10)
+        local snap = LW_Snapshot()
+        local dx = math.abs((snap["CHAR:HRP.X"] or 0) - (baseX or 0))
+        local dz = math.abs((snap["CHAR:HRP.Z"] or 0) - (baseZ or 0))
+        -- Teleport threshold: moved > 5 studs from baseline
+        if dx > 5 or dz > 5 then
+            return true, string.format("CFrame delta: dX=%.1f dZ=%.1f", dx, dz)
+        end
+        -- Also accept HeartbeatAlive or BedrockPair as confirmation
+        if ASE.Panel.HeartbeatAlive then return true, "HeartbeatAlive" end
+    end
+    return false, nil
+end
+
+-- Main two-stage sequence execution
+function ASE_TwoStageSequencer.Run(targetRemote, onResolved)
+    local SARP = _G.PC and _G.PC.SARP
+    local RSM  = _G.PC and _G.PC.RSM
+    local PR   = _G.PC and _G.PC.PR_Registry
+    if not SARP or not PR then
+        print("[TSS] SARP or PR unavailable — aborting.")
+        return
+    end
+
+    -- Query antecedent candidates
+    local candidates = ASE_AntecedentExtractor.Query(targetRemote, 0.15)
+
+    if #candidates == 0 then
+        print(string.format("[TSS] No antecedent candidates for %s — CDG insufficient.",
+            targetRemote))
+        ASE_AppendTx({
+            directive  = string.format("TWO-STAGE: %s", targetRemote),
+            rawPayload = {},
+            result     = "No CDG antecedents found — sequence aborted.",
+        })
+        return
+    end
+
+    -- Log top candidates
+    print(string.format("[TSS] Antecedent candidates for %s:", targetRemote))
+    for i, c in ipairs(candidates) do
+        if i > 5 then break end
+        print(string.format("  [%d] %s  score=%.3f  conf=%.2f  jaccard=%.2f  src=%s",
+            i, c.name, c.score, c.confidence, c.jaccardSim, c.source))
+    end
+
+    local top = candidates[1]
+    print(string.format("[TSS] Selected Stage 1: %s (score=%.3f)", top.name, top.score))
+
+    ASE_AppendTx({
+        directive  = string.format("TWO-STAGE SEQUENCE: %s -> %s", top.name, targetRemote),
+        rawPayload = { stage1 = top.name, stage2 = targetRemote },
+        result     = string.format("Stage 1 candidate: %s (conf=%.2f jaccard=%.2f)",
+            top.name, top.confidence, top.jaccardSim),
+    })
+
+    task.spawn(function()
+        -- Ensure LingerWatch is active for stun detection
+        ASE_LingerWatch.Start(targetRemote)
+
+        -- ── STAGE 1: Fire the antecedent ("The Key") ──────────────────────
+        local prRec1   = PR[top.name]
+        local rsmRec1  = RSM and RSM.Get(top.name)
+        local args1    = {}
+        if rsmRec1 and rsmRec1.ArgSig then
+            for i, sig in ipairs(rsmRec1.ArgSig) do
+                if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
+                    args1[i] = sig.SuccessValues[1]
+                elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
+                    args1[i] = sig.SuccessStrings[1]
+                elseif sig.DominantType == "boolean" then
+                    args1[i] = true
+                end
+            end
+        end
+
+        print(string.format("[TSS] Firing Stage 1: %s", top.name))
+        local w1, s1, e1 = SARP.Build("Attribute", args1, nil, nil, top.name)
+        if w1 then
+            SARP.Execute(w1, s1, top.name, function(ok, result, err)
+                print(string.format("[TSS] Stage 1 result: %s", ok and "OK" or tostring(err)))
+            end)
+        else
+            print(string.format("[TSS] Stage 1 SARP.Build failed: %s", tostring(e1)))
+        end
+
+        -- ── STUN WATCH: Wait for server to stun the character ─────────────
+        -- Stun (WalkSpeed=0, JumpPower=0) confirms Stage 1 was accepted and
+        -- the server is in the preparation phase. Max wait: 3s.
+        local stunned, stunKey = TSS_WaitForStun(targetRemote, 3.0)
+        if stunned then
+            print(string.format("[TSS] Stun detected (%s) — firing Stage 2 immediately.",
+                stunKey))
+        else
+            print("[TSS] No stun detected after Stage 1 — firing Stage 2 anyway.")
+        end
+
+        -- ── STAGE 2: Fire the target remote ("The Lock") ──────────────────
+        -- Fire immediately after stun — the server is in preparation phase
+        -- and waiting for a transaction ID or destination key. The Stage 2
+        -- payload carries the SARP-optimized args for the target remote.
+        local rsmRec2 = RSM and RSM.Get(targetRemote)
+        local args2   = {}
+        if rsmRec2 and rsmRec2.ArgSig then
+            for i, sig in ipairs(rsmRec2.ArgSig) do
+                if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
+                    args2[i] = sig.SuccessValues[1]
+                elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
+                    args2[i] = sig.SuccessStrings[1]
+                elseif sig.DominantType == "boolean" then
+                    args2[i] = true
+                end
+            end
+        end
+
+        print(string.format("[TSS] Firing Stage 2: %s", targetRemote))
+        local w2, s2, e2 = SARP.Build("Attribute", args2, nil, nil, targetRemote)
+        if w2 then
+            SARP.Execute(w2, s2, targetRemote, function(ok, result, err)
+                print(string.format("[TSS] Stage 2 result: %s err=%s",
+                    ok and "OK" or "FAIL", tostring(err)))
+            end)
+        else
+            print(string.format("[TSS] Stage 2 SARP.Build failed: %s", tostring(e2)))
+        end
+
+        -- ── RESOLUTION WATCH: Look for CFrame delta (teleport executed) ───
+        local teleported, teleKey = TSS_WaitForTeleport(targetRemote, 5.0)
+
+        if teleported then
+            print(string.format(
+                "[TSS] TWO-STAGE COMPLETE: %s resolved — %s",
+                targetRemote, teleKey))
+
+            -- Lock as Bedrock
+            ASE_BedrockPairs[targetRemote] = {
+                sinkRemote     = targetRemote,
+                feedbackRemote = top.name,
+                nonce          = nil,
+                confirmedAt    = os.clock(),
+                cargo          = {},
+                confidence     = 0.95,
+                origin         = "TWO_STAGE_SEQUENCE",
+                antecedent     = top.name,
+                resolvedBy     = teleKey,
+            }
+            ASE.Panel.Visible        = true
+            ASE.Panel.ActiveSink     = targetRemote
+            ASE.Panel.ActiveFeedback = top.name
+            ASE.Panel.BedrockConf    = 0.95
+            ASE.Panel.HeartbeatAlive = true
+
+            local CSK = _G.PC.CSK
+            if CSK then
+                CSK.Annotate(targetRemote, string.format(
+                    "BEDROCK via TWO_STAGE: key=%s lock=%s", top.name, targetRemote))
+            end
+
+            ASE_AppendTx({
+                directive  = "TWO-STAGE COMPLETE",
+                rawPayload = { antecedent=top.name, resolvedBy=teleKey },
+                result     = string.format("BEDROCK [TWO_STAGE] — %s", teleKey),
+            })
+
+            ASE_LingerWatch.Stop(targetRemote)
+            if onResolved then onResolved(top.name, teleKey) end
+        else
+            print(string.format("[TSS] Two-stage exhausted on %s — no teleport detected.",
+                targetRemote))
+            ASE_AppendTx({
+                directive  = string.format("TWO-STAGE FAILED: %s", targetRemote),
+                rawPayload = { antecedent = top.name },
+                result     = "Sequence fired — no CFrame resolution detected.",
+            })
+            ASE_LingerWatch.Stop(targetRemote)
+        end
     end)
 end
 
@@ -2446,5 +2818,7 @@ _G.PC.ASE_RecompileEngine   = ASE_RecompileEngine
 _G.PC.ASE_VerifyCircuit     = ASE_VerifyCircuit
 _G.PC.ASE_LingerWatch       = ASE_LingerWatch
 _G.PC.ASE_PropertySteerer   = ASE_PropertySteerer
-_G.PC.ASE_StateNudge        = ASE_StateNudge
+_G.PC.ASE_StateNudge           = ASE_StateNudge
+_G.PC.ASE_AntecedentExtractor  = ASE_AntecedentExtractor
+_G.PC.ASE_TwoStageSequencer    = ASE_TwoStageSequencer
 print("[ASE] Module registered.")
