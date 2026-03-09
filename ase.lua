@@ -217,6 +217,588 @@ function ASE_GoalEngine.Abort(goalId)
     end
 end
 
+-- ══════════════════════════════════════════════════════════════════════════════
+-- MODULE 2.5 — LINGER WATCH + PROPERTY STEERING
+-- Activated the moment OC_LINGERED is confirmed on a remote.
+-- Monitors the four client-writable surfaces LWM is blind to:
+--   1. LocalPlayer attributes
+--   2. Character part/humanoid properties
+--   3. PlayerGui descendant Value objects
+--   4. Character descendant Value objects
+--
+-- Detects "Unusual Deltas" — properties that changed after linger confirmation
+-- and stayed changed — which indicate the server communicated via replication
+-- rather than a RemoteEvent/RemoteFunction.
+--
+-- ASE_PropertySteerer then attempts to satisfy the dependency by writing back
+-- to each unusual delta candidate and watching for linger resolution.
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local ASE_LingerWatch   = {}
+local ASE_LW_Sessions   = {}   -- [remoteName] = session record
+
+local LW_SAMPLE_RATE    = 0.05   -- 50ms high-frequency sampling
+local LW_MAX_DURATION   = 12.0   -- max watch window per linger
+local LW_MAX_SNAPSHOTS  = 60     -- ring buffer depth
+local LW_ENTROPY_THRESH = 0.5    -- min "unusualness" score to flag a delta
+
+-- Snapshot the four monitored surfaces into a flat key=value table
+local function LW_Snapshot()
+    local snap   = {}
+    local Players = game:GetService("Players")
+    local lp     = Players and Players.LocalPlayer
+    if not lp then return snap end
+
+    -- Surface 1: LocalPlayer attributes
+    local attrs = lp:GetAttributes()
+    for k, v in pairs(attrs) do
+        if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
+            snap["LP_ATTR:" .. k] = v
+        end
+    end
+
+    -- Surface 2: Character properties (position, humanoid state, health)
+    local char = lp.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            snap["CHAR:HRP.X"]  = math.floor(hrp.Position.X * 10) / 10
+            snap["CHAR:HRP.Y"]  = math.floor(hrp.Position.Y * 10) / 10
+            snap["CHAR:HRP.Z"]  = math.floor(hrp.Position.Z * 10) / 10
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            snap["CHAR:HUM.Health"]    = math.floor(hum.Health)
+            snap["CHAR:HUM.MaxHealth"] = math.floor(hum.MaxHealth)
+            snap["CHAR:HUM.State"]     = tostring(hum:GetState())
+            snap["CHAR:HUM.WalkSpeed"] = hum.WalkSpeed
+            snap["CHAR:HUM.JumpPower"] = hum.JumpPower
+        end
+
+        -- Surface 4: Character descendant Value objects
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("BoolValue") or obj:IsA("StringValue")
+               or obj:IsA("IntValue") or obj:IsA("NumberValue") then
+                snap["CHAR_VAL:" .. obj.Name] = obj.Value
+            end
+        end
+    end
+
+    -- Surface 3: PlayerGui descendant Value objects
+    local gui = lp:FindFirstChildOfClass("PlayerGui")
+    if gui then
+        for _, obj in ipairs(gui:GetDescendants()) do
+            if obj:IsA("BoolValue") or obj:IsA("StringValue")
+               or obj:IsA("IntValue") or obj:IsA("NumberValue") then
+                snap["GUI_VAL:" .. obj.Name] = obj.Value
+            end
+        end
+    end
+
+    return snap
+end
+
+-- Compute delta between two snapshots — returns list of changed keys + magnitude
+local function LW_ComputeDelta(baseline, current)
+    local deltas = {}
+    for k, currVal in pairs(current) do
+        local baseVal = baseline[k]
+        if baseVal == nil then
+            -- New key appeared after linger — high signal
+            table.insert(deltas, {
+                key       = k,
+                from      = nil,
+                to        = currVal,
+                kind      = "APPEARED",
+                magnitude = 1.0,
+            })
+        elseif currVal ~= baseVal then
+            local mag = 0.5
+            if type(currVal) == "number" and type(baseVal) == "number" then
+                local range = math.abs(baseVal) + 1
+                mag = math.min(1.0, math.abs(currVal - baseVal) / range)
+            elseif type(currVal) == "boolean" then
+                mag = 1.0   -- boolean flip is always high signal
+            end
+            table.insert(deltas, {
+                key       = k,
+                from      = baseVal,
+                to        = currVal,
+                kind      = "CHANGED",
+                magnitude = mag,
+            })
+        end
+    end
+    -- Check for keys that disappeared
+    for k, baseVal in pairs(baseline) do
+        if current[k] == nil then
+            table.insert(deltas, {
+                key       = k,
+                from      = baseVal,
+                to        = nil,
+                kind      = "VANISHED",
+                magnitude = 0.8,
+            })
+        end
+    end
+    table.sort(deltas, function(a, b) return a.magnitude > b.magnitude end)
+    return deltas
+end
+
+-- Start a linger watch session for a remote
+function ASE_LingerWatch.Start(remoteName)
+    if ASE_LW_Sessions[remoteName] then return end  -- already watching
+
+    local session = {
+        remoteName    = remoteName,
+        startT        = os.clock(),
+        baseline      = LW_Snapshot(),
+        snapshots     = {},
+        unusualDeltas = {},
+        active        = true,
+        resolved      = false,
+    }
+    ASE_LW_Sessions[remoteName] = session
+
+    print(string.format("[LW] Linger watch started on %s — monitoring %d baseline keys",
+        remoteName, (function() local n=0; for _ in pairs(session.baseline) do n=n+1 end; return n end)()))
+
+    task.spawn(function()
+        local t0 = os.clock()
+        while session.active and (os.clock() - t0) < LW_MAX_DURATION do
+            task.wait(LW_SAMPLE_RATE)
+            if not session.active then break end
+
+            local snap = LW_Snapshot()
+            table.insert(session.snapshots, { t = os.clock(), data = snap })
+            if #session.snapshots > LW_MAX_SNAPSHOTS then
+                table.remove(session.snapshots, 1)
+            end
+
+            -- Recompute unusual deltas from baseline
+            local deltas = LW_ComputeDelta(session.baseline, snap)
+            local unusual = {}
+            for _, d in ipairs(deltas) do
+                if d.magnitude >= LW_ENTROPY_THRESH then
+                    table.insert(unusual, d)
+                end
+            end
+
+            if #unusual > 0 then
+                session.unusualDeltas = unusual
+            end
+        end
+        session.active = false
+    end)
+end
+
+-- Stop the watch session
+function ASE_LingerWatch.Stop(remoteName)
+    local session = ASE_LW_Sessions[remoteName]
+    if session then
+        session.active = false
+    end
+end
+
+-- Get ranked unusual delta candidates for a remote
+function ASE_LingerWatch.GetUnusualDeltas(remoteName)
+    local session = ASE_LW_Sessions[remoteName]
+    return session and session.unusualDeltas or {}
+end
+
+-- ── Property Steerer ──────────────────────────────────────────────────────────
+-- For each unusual delta candidate, attempts to write the value back to its
+-- pre-linger state (or invert it for booleans) and watches for linger resolution.
+
+local ASE_PropertySteerer = {}
+
+-- Resolve a surface key back to the actual Roblox instance + property name
+local function LW_ResolveKey(key)
+    local Players = game:GetService("Players")
+    local lp = Players and Players.LocalPlayer
+    if not lp then return nil, nil end
+
+    local surface, name = key:match("^([^:]+):(.+)$")
+    if not surface then return nil, nil end
+
+    if surface == "LP_ATTR" then
+        -- LocalPlayer attribute — write via SetAttribute
+        return lp, name   -- special handling: attribute path
+
+    elseif surface == "CHAR_VAL" then
+        local char = lp.Character
+        if char then
+            local obj = char:FindFirstChild(name, true)
+            if obj and obj:IsA("ValueBase") then return obj, "Value" end
+        end
+
+    elseif surface == "GUI_VAL" then
+        local gui = lp:FindFirstChildOfClass("PlayerGui")
+        if gui then
+            local obj = gui:FindFirstChild(name, true)
+            if obj and obj:IsA("ValueBase") then return obj, "Value" end
+        end
+
+    elseif surface == "CHAR" then
+        -- HumanoidRootPart or Humanoid property
+        local char = lp.Character
+        if char then
+            if name:find("^HRP%.") then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                local prop = name:gsub("^HRP%.", "")
+                return hrp, prop
+            elseif name:find("^HUM%.") then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                local prop = name:gsub("^HUM%.", "")
+                return hum, prop
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+-- Attempt to steer each unusual delta candidate and watch for resolution
+function ASE_PropertySteerer.Try(remoteName, onResolved)
+    local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
+    if #deltas == 0 then
+        print(string.format("[PS] No unusual deltas for %s — cannot steer.", remoteName))
+        return
+    end
+
+    print(string.format("[PS] Attempting property steering on %s — %d candidate(s)",
+        remoteName, #deltas))
+
+    task.spawn(function()
+        for _, delta in ipairs(deltas) do
+            -- Compute steering value: invert booleans, revert others to baseline
+            local steerVal
+            if type(delta.from) == "boolean" then
+                steerVal = not delta.to  -- invert the current state
+            elseif delta.to == nil and delta.from ~= nil then
+                steerVal = delta.from    -- revert vanished key
+            else
+                steerVal = delta.from    -- revert to pre-linger baseline
+            end
+            if steerVal == nil then continue end
+
+            -- Write the steered value
+            local surface = delta.key:match("^([^:]+):")
+            local obj, prop = LW_ResolveKey(delta.key)
+            local writeOk = false
+
+            if obj and prop then
+                if surface == "LP_ATTR" then
+                    writeOk = pcall(function()
+                        obj:SetAttribute(prop, steerVal)
+                    end)
+                else
+                    writeOk = pcall(function()
+                        obj[prop] = steerVal
+                    end)
+                end
+            end
+
+            if writeOk then
+                print(string.format("[PS] Steered %s: %s -> %s",
+                    delta.key, tostring(delta.to), tostring(steerVal)))
+
+                -- Watch for 2s to see if linger resolves
+                local resolveT = os.clock()
+                local resolved = false
+                while (os.clock() - resolveT) < 2.0 do
+                    task.wait(0.1)
+                    -- Check if ASE confirmed the linger resolved
+                    -- (BedrockPair locked or Panel became active)
+                    if ASE.Panel.HeartbeatAlive or
+                       (ASE_BedrockPairs[remoteName] and
+                        ASE_BedrockPairs[remoteName].confidence >= 1.0) then
+                        resolved = true
+                        break
+                    end
+                end
+
+                if resolved then
+                    print(string.format(
+                        "[PS] STEERING RESOLVED: %s unblocked by property %s",
+                        remoteName, delta.key))
+                    ASE_LingerWatch.Stop(remoteName)
+                    ASE_AppendTx({
+                        directive  = "PROPERTY STEERING RESOLVED",
+                        rawPayload = { key=delta.key, from=delta.to, to=steerVal },
+                        result     = string.format("DEPENDENCY SATISFIED: %s", delta.key),
+                    })
+                    if onResolved then onResolved(delta) end
+                    return
+                end
+            end
+        end
+
+        print(string.format("[PS] All %d steering attempts exhausted on %s — "
+            .. "pivoting to State-Nudge.", #deltas, remoteName))
+        -- Property steering exhausted — physical state is the next hypothesis
+        ASE_StateNudge.Try(remoteName)
+    end)
+end
+
+-- Export
+ASE_LingerWatch.Steerer = ASE_PropertySteerer
+
+-- ══════════════════════════════════════════════════════════════════════════════
+-- MODULE 2.6 — STATE-NUDGE ENGINE
+-- Activated when both Ghost Handshake and Property Steering fail.
+-- Hypothesis: the server is yielded on a physical precondition —
+-- player position, velocity, Humanoid state, or NetworkOwnership —
+-- rather than a network packet or replicated value.
+--
+-- Strategy: cycle through a ranked sequence of physical state mutations
+-- during the linger window. After each nudge, poll for 1.5s to see if
+-- the lingered thread resolves. On resolution, record the winning nudge
+-- as the "State Key" and lock Bedrock with origin = "STATE_NUDGE".
+--
+-- Nudge sequence (ordered by likelihood for a Teleport-class remote):
+--   1. STILLNESS    — zero velocity, WalkSpeed=0, brief anchor
+--   2. IDLE_STATE   — force Humanoid to Idle enum state
+--   3. POSITION_ADJ — CFrame toward last LWM-sampled position delta
+--   4. SPEED_RESTORE— restore WalkSpeed after stillness nudge
+--   5. JUMP_INHIBIT — JumpPower=0 to suppress in-air state
+--   6. ANCHOR_CYCLE — Anchor then immediately unanchor RootPart
+-- ══════════════════════════════════════════════════════════════════════════════
+
+local ASE_StateNudge = {}
+
+local SN_POLL_INTERVAL = 0.10   -- poll rate during resolve watch (seconds)
+local SN_NUDGE_WINDOW  = 1.5    -- seconds to watch after each nudge
+local SN_RESTORE_DELAY = 0.3    -- seconds before restoring mutated properties
+
+-- Safely read a Humanoid and HumanoidRootPart from LocalPlayer
+local function SN_GetPhysics()
+    local Players = game:GetService("Players")
+    local lp      = Players and Players.LocalPlayer
+    if not lp then return nil, nil end
+    local char = lp.Character
+    if not char then return nil, nil end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    return hum, hrp
+end
+
+-- Poll for linger resolution: returns true if Bedrock locked or Panel active
+local function SN_PollResolved(remoteName, window)
+    local t0 = os.clock()
+    while (os.clock() - t0) < window do
+        task.wait(SN_POLL_INTERVAL)
+        local pair = ASE_BedrockPairs[remoteName]
+        if ASE.Panel.HeartbeatAlive then return true end
+        if pair and pair.confidence >= 0.90 then return true end
+    end
+    return false
+end
+
+-- Individual nudge implementations ────────────────────────────────────────────
+
+-- STILLNESS: zero velocity, WalkSpeed=0, anchor briefly, then restore
+local function SN_Nudge_Stillness(remoteName)
+    local hum, hrp = SN_GetPhysics()
+    if not hum or not hrp then return false end
+
+    local origSpeed  = hum.WalkSpeed
+    local origJump   = hum.JumpPower
+    local origAnchor = hrp.Anchored
+
+    -- Apply stillness
+    pcall(function() hum.WalkSpeed  = 0 end)
+    pcall(function() hum.JumpPower  = 0 end)
+    pcall(function() hrp.AssemblyLinearVelocity  = Vector3.new(0, 0, 0) end)
+    pcall(function() hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0) end)
+    pcall(function() hrp.Anchored   = true end)
+
+    print(string.format("[SN] STILLNESS nudge applied on %s", remoteName))
+    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
+
+    -- Restore regardless of outcome
+    task.delay(SN_RESTORE_DELAY, function()
+        pcall(function() hum.WalkSpeed = origSpeed end)
+        pcall(function() hum.JumpPower = origJump  end)
+        pcall(function() hrp.Anchored  = origAnchor end)
+    end)
+
+    return resolved
+end
+
+-- IDLE_STATE: force Humanoid into Idle state
+local function SN_Nudge_IdleState(remoteName)
+    local hum, _ = SN_GetPhysics()
+    if not hum then return false end
+
+    pcall(function()
+        hum:ChangeState(Enum.HumanoidStateType.None)
+    end)
+    task.wait(0.05)
+    pcall(function()
+        hum:ChangeState(Enum.HumanoidStateType.Landed)
+    end)
+
+    print(string.format("[SN] IDLE_STATE nudge applied on %s", remoteName))
+    return SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
+end
+
+-- POSITION_ADJ: nudge CFrame toward most recent LWM position delta
+-- If no delta available, nudge slightly downward (land-on-ground heuristic)
+local function SN_Nudge_PositionAdj(remoteName)
+    local _, hrp = SN_GetPhysics()
+    if not hrp then return false end
+
+    local origCF = hrp.CFrame
+    local nudgeCF
+
+    -- Check LingerWatch for position deltas
+    local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
+    local dX, dY, dZ = 0, -2, 0  -- default: settle downward 2 studs
+    for _, d in ipairs(deltas) do
+        if d.key == "CHAR:HRP.X" and d.from then dX = d.from - (d.to or d.from) end
+        if d.key == "CHAR:HRP.Y" and d.from then dY = d.from - (d.to or d.from) end
+        if d.key == "CHAR:HRP.Z" and d.from then dZ = d.from - (d.to or d.from) end
+    end
+
+    nudgeCF = origCF * CFrame.new(dX, dY, dZ)
+    pcall(function() hrp.CFrame = nudgeCF end)
+
+    print(string.format("[SN] POSITION_ADJ nudge applied on %s (dX=%.1f dY=%.1f dZ=%.1f)",
+        remoteName, dX, dY, dZ))
+    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
+
+    -- Restore position if not resolved
+    if not resolved then
+        pcall(function() hrp.CFrame = origCF end)
+    end
+    return resolved
+end
+
+-- JUMP_INHIBIT: suppress JumpPower to prevent in-air state detection
+local function SN_Nudge_JumpInhibit(remoteName)
+    local hum, _ = SN_GetPhysics()
+    if not hum then return false end
+
+    local origJump = hum.JumpPower
+    pcall(function() hum.JumpPower = 0 end)
+
+    print(string.format("[SN] JUMP_INHIBIT nudge applied on %s", remoteName))
+    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
+
+    task.delay(SN_RESTORE_DELAY, function()
+        pcall(function() hum.JumpPower = origJump end)
+    end)
+    return resolved
+end
+
+-- ANCHOR_CYCLE: anchor then immediately release — triggers NetworkOwnership reassign
+local function SN_Nudge_AnchorCycle(remoteName)
+    local _, hrp = SN_GetPhysics()
+    if not hrp then return false end
+
+    local origAnchor = hrp.Anchored
+    pcall(function() hrp.Anchored = true  end)
+    task.wait(0.05)
+    pcall(function() hrp.Anchored = false end)
+
+    print(string.format("[SN] ANCHOR_CYCLE nudge applied on %s", remoteName))
+    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
+
+    if not resolved then
+        pcall(function() hrp.Anchored = origAnchor end)
+    end
+    return resolved
+end
+
+-- Nudge sequence table — ordered by likelihood for Teleport-class remotes
+local SN_SEQUENCE = {
+    { name = "STILLNESS",    fn = SN_Nudge_Stillness    },
+    { name = "IDLE_STATE",   fn = SN_Nudge_IdleState    },
+    { name = "POSITION_ADJ", fn = SN_Nudge_PositionAdj  },
+    { name = "JUMP_INHIBIT", fn = SN_Nudge_JumpInhibit  },
+    { name = "ANCHOR_CYCLE", fn = SN_Nudge_AnchorCycle  },
+}
+
+-- Main entry: run nudge sequence for a lingered remote
+function ASE_StateNudge.Try(remoteName, onResolved)
+    print(string.format("[SN] Starting State-Nudge sequence on %s (%d nudge(s))",
+        remoteName, #SN_SEQUENCE))
+
+    ASE_AppendTx({
+        directive  = string.format("STATE-NUDGE: %s", remoteName),
+        rawPayload = {},
+        result     = string.format("Cycling %d physical state nudges...", #SN_SEQUENCE),
+    })
+
+    task.spawn(function()
+        for _, nudge in ipairs(SN_SEQUENCE) do
+            -- Check if already resolved by another path
+            if ASE.Panel.HeartbeatAlive or
+               (ASE_BedrockPairs[remoteName] and
+                ASE_BedrockPairs[remoteName].confidence >= 0.90) then
+                print(string.format("[SN] Already resolved before %s nudge — stopping.",
+                    nudge.name))
+                return
+            end
+
+            local ok, resolved = pcall(nudge.fn, remoteName)
+            if ok and resolved then
+                print(string.format(
+                    "[SN] RESOLVED: %s unblocked by nudge %s",
+                    remoteName, nudge.name))
+
+                -- Lock as Bedrock with STATE_NUDGE origin
+                ASE_BedrockPairs[remoteName] = {
+                    sinkRemote     = remoteName,
+                    feedbackRemote = nil,
+                    nonce          = nil,
+                    confirmedAt    = os.clock(),
+                    cargo          = {},
+                    confidence     = 0.85,
+                    origin         = "STATE_NUDGE",
+                    nudgeKey       = nudge.name,
+                }
+                ASE.Panel.Visible        = true
+                ASE.Panel.ActiveSink     = remoteName
+                ASE.Panel.ActiveFeedback = nil
+                ASE.Panel.BedrockConf    = 0.85
+                ASE.Panel.HeartbeatAlive = true
+
+                local CSK = _G.PC.CSK
+                if CSK then
+                    CSK.Annotate(remoteName, string.format(
+                        "BEDROCK via STATE_NUDGE: key=%s", nudge.name))
+                end
+
+                ASE_AppendTx({
+                    directive  = "STATE-NUDGE RESOLVED",
+                    rawPayload = { nudge = nudge.name },
+                    result     = string.format("BEDROCK [STATE_NUDGE:%s]", nudge.name),
+                })
+
+                ASE_LingerWatch.Stop(remoteName)
+                if onResolved then onResolved(nudge.name) end
+                return
+            elseif not ok then
+                print(string.format("[SN] Nudge %s errored: %s",
+                    nudge.name, tostring(resolved)))
+            end
+        end
+
+        -- All nudges exhausted
+        print(string.format(
+            "[SN] All nudges exhausted on %s — linger is server-internal.",
+            remoteName))
+        ASE_AppendTx({
+            directive  = string.format("STATE-NUDGE EXHAUSTED: %s", remoteName),
+            rawPayload = {},
+            result     = "Dependency is server-internal — cooldown or global state.",
+        })
+        ASE_LingerWatch.Stop(remoteName)
+    end)
+end
+
 -- ═════════════════════════════════════════════════════════════
 -- MODULE 2 — BEDROCK HANDSHAKE
 -- A→Server→B topological verification
@@ -1411,6 +1993,47 @@ function ASE_VerifyCircuit.Run(goal)
             nonce      = nonce,
             result     = "LINGERED — circuit open" .. bufferNote,
         })
+
+        -- Ghost handshake and nonce echo both failed.
+        -- Escalate to Property Steering: check LingerWatch for unusual deltas
+        -- on the four client-writable surfaces and attempt to satisfy the
+        -- server's in-process dependency directly.
+        local unusualDeltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
+        if #unusualDeltas > 0 then
+            print(string.format(
+                "[ASE VERIFY] %d unusual delta(s) detected — escalating to Property Steering.",
+                #unusualDeltas))
+            ASE_PropertySteerer.Try(remoteName, function(resolvedDelta)
+                -- Property steering resolved — lock as Bedrock with STATE_GATE origin
+                ASE_BedrockPairs[remoteName] = {
+                    sinkRemote     = remoteName,
+                    feedbackRemote = nil,
+                    nonce          = nonce,
+                    confirmedAt    = os.clock(),
+                    cargo          = {},
+                    confidence     = 0.90,
+                    origin         = "STATE_GATE",
+                    resolvedDelta  = resolvedDelta,
+                }
+                ASE.Panel.Visible        = true
+                ASE.Panel.ActiveSink     = remoteName
+                ASE.Panel.ActiveFeedback = nil
+                ASE.Panel.BedrockConf    = 0.90
+                ASE.Panel.HeartbeatAlive = true
+                local CSK = _G.PC.CSK
+                if CSK then
+                    CSK.Annotate(remoteName, string.format(
+                        "BEDROCK via STATE_GATE: dependency=%s", resolvedDelta.key))
+                end
+            end)
+        else
+            -- No replication deltas found — pivot to State-Nudge.
+            -- The dependency is physical rather than data-driven.
+            print(string.format(
+                "[ASE VERIFY] No unusual deltas on %s — pivoting to State-Nudge.",
+                remoteName))
+            ASE_StateNudge.Try(remoteName)
+        end
     end
 end
 
@@ -1589,6 +2212,10 @@ function ASE.OnLingerConfirmed(remoteName, sarpResult)
 
     print(string.format(
         "[ASE] LINGER confirmed on %s — queuing VERIFY_TOPOLOGICAL_CIRCUIT.", remoteName))
+
+    -- Start linger watch immediately — before VERIFY runs — so we capture
+    -- any property deltas that occur in the linger window
+    ASE_LingerWatch.Start(remoteName)
 
     ASE_LingerPending[remoteName] = true
     ASE_GoalEngine.Push(ASE.GOAL.VERIFY, { remoteName=remoteName, sarpResult=sarpResult })
@@ -1817,4 +2444,7 @@ _G.PC.ASE_DirectiveCompiler = ASE_DirectiveCompiler
 _G.PC.ASE_ForgeEngine       = ASE_ForgeEngine
 _G.PC.ASE_RecompileEngine   = ASE_RecompileEngine
 _G.PC.ASE_VerifyCircuit     = ASE_VerifyCircuit
+_G.PC.ASE_LingerWatch       = ASE_LingerWatch
+_G.PC.ASE_PropertySteerer   = ASE_PropertySteerer
+_G.PC.ASE_StateNudge        = ASE_StateNudge
 print("[ASE] Module registered.")
