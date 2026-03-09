@@ -308,10 +308,12 @@ function AVD_Operator.SARPDeliver(handoff)
     -- Simulate before flying
     local simResult = SARP.Simulator and SARP.Simulator.Simulate(wrapped, handoff.remoteName)
 
-    -- Fly via SARP
-    SARP.Execute(wrapped, simResult, handoff.remoteName, function(outcome)
-        print(string.format("[AVD Operator] SARP outcome for %s: %s",
-            handoff.remoteName, tostring(outcome and outcome.Success)))
+    -- Fly via SARP  (callback signature: success bool, result, err string)
+    SARP.Execute(wrapped, simResult, handoff.remoteName, function(success, result, err)
+        print(string.format("[AVD Operator] SARP outcome for %s: %s%s",
+            handoff.remoteName,
+            success and "✓" or "✗",
+            err and (" — " .. tostring(err)) or ""))
     end)
 
     return true
