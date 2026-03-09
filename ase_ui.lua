@@ -347,7 +347,7 @@ do
             local b = mk("TextButton", {AutoButtonColor=false,
                 BackgroundColor3=pb.col, BorderSizePixel=0,
                 Font=Enum.Font.GothamMedium, Text=pb.label,
-                TextColor3=Color3.fromRGB(10,10,14), TextSize=11,
+                TextColor3=Color3.fromRGB(255,255,255), TextSize=11,
                 Size=UDim2.new(0,92,0,30), Parent=pushBtnRow})
             addCorner(b, UDim.new(0,8))
             local pfn = pb.fn
@@ -718,7 +718,7 @@ do
         local shellExecBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=COL.BLUE, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="▶  Execute Directive",
-            TextColor3=Color3.fromRGB(10,10,14), TextSize=11,
+            TextColor3=Color3.fromRGB(255,255,255), TextSize=11,
             Size=UDim2.new(1,0,0,28), LayoutOrder=5, Parent=shellArea})
         addCorner(shellExecBtn, UDim.new(0,6))
 
@@ -775,7 +775,7 @@ do
         local luaBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=COL.ORANGE, BorderSizePixel=0,
             Font=Enum.Font.GothamMedium, Text="Lua",
-            TextColor3=Color3.fromRGB(10,10,14), TextSize=10,
+            TextColor3=Color3.fromRGB(255,255,255), TextSize=10,
             Size=UDim2.new(0,40,0,18), Parent=forgeHdr})
         addCorner(luaBtn, UDim.new(0,4))
         local byteBtn = mk("TextButton", {AutoButtonColor=false,
@@ -855,7 +855,7 @@ do
         local function forgeActionBtn(parent, text, col, fn)
             local b = mk("TextButton", {AutoButtonColor=false, BackgroundColor3=col,
                 BorderSizePixel=0, Font=Enum.Font.GothamMedium, Text=text,
-                TextColor3=Color3.fromRGB(10,10,14), TextSize=10,
+                TextColor3=Color3.fromRGB(255,255,255), TextSize=10,
                 Size=UDim2.new(0,80,0,24), Parent=parent})
             addCorner(b, UDim.new(0,6))
             b.MouseButton1Click:Connect(function() clickSound(); pulseClick(b); fn() end)
@@ -992,10 +992,18 @@ do
         end)
 
         -- ── MASTERY GATE OVERLAY ──────────────────────────────────────────────
+        -- Mastery gate lives in screenGui so it covers the full screen
+        local _screenGui = _G.PCU and _G.PCU.screenGui
+                           or game:GetService("Players").LocalPlayer
+                              :WaitForChild("PlayerGui"):WaitForChild("PaperCuts_RAE", 10)
         local masteryGate = mk("Frame", {
             BackgroundColor3=Color3.fromRGB(8,8,12), BackgroundTransparency=0.05,
-            BorderSizePixel=0, Size=UDim2.new(1,0,1,0), ZIndex=200,
-            Visible=false, Parent=pageASE})
+            BorderSizePixel=0,
+            Size=UDim2.new(1,0,1,0),
+            Position=UDim2.new(0,0,0,0),
+            ZIndex=9999,
+            Visible=false,
+            Parent=_screenGui or pageASE})
         -- Blur handled by BlurEffect in Lighting
         local blur = Instance.new("BlurEffect")
         blur.Size = 0; blur.Parent = game:GetService("Lighting")
@@ -1007,17 +1015,17 @@ do
             Text="⚡  Autonomous Mastery",
             TextColor3=COL.PURP, TextSize=22,
             Size=UDim2.new(0.8,0,0,32), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=201, Parent=masteryGate})
+            ZIndex=10000, Parent=masteryGate})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamMedium,
             Text="You are about to unlock Autonomous Mastery.\nTo proceed, type the following exactly:",
             TextColor3=COL.MUTED, TextSize=12, TextWrapped=true,
             Size=UDim2.new(0.75,0,0,40), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=201, Parent=masteryGate})
+            ZIndex=10000, Parent=masteryGate})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
             Text='"I am responsible for my actions"',
             TextColor3=Color3.fromRGB(210,200,255), TextSize=14,
             Size=UDim2.new(0.75,0,0,22), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=201, Parent=masteryGate})
+            ZIndex=10000, Parent=masteryGate})
 
         local passphraseBox = mk("TextBox", {
             BackgroundColor3=Color3.fromRGB(20,18,28), BorderSizePixel=0,
@@ -1026,7 +1034,7 @@ do
             PlaceholderColor3=Color3.fromRGB(80,70,100),
             Text="", TextColor3=Color3.fromRGB(200,190,255),
             TextSize=12, Size=UDim2.new(0.65,0,0,36),
-            ZIndex=201, Parent=masteryGate})
+            ZIndex=10000, Parent=masteryGate})
         addCorner(passphraseBox, UDim.new(0,8))
         addStroke(passphraseBox, 1.5, 0.3)
         mk("UIPadding", {PaddingLeft=UDim.new(0,12), Parent=passphraseBox})
@@ -1035,19 +1043,19 @@ do
             BackgroundColor3=COL.PURP, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="Unlock Autonomous Mastery",
             TextColor3=Color3.fromRGB(255,255,255), TextSize=12,
-            Size=UDim2.new(0.5,0,0,38), ZIndex=201, Parent=masteryGate})
+            Size=UDim2.new(0.5,0,0,38), ZIndex=10000, Parent=masteryGate})
         addCorner(masterySubmitBtn, UDim.new(0,10))
 
         local masteryCancelBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundTransparency=1, BorderSizePixel=0,
             Font=Enum.Font.GothamMedium, Text="Cancel",
             TextColor3=COL.MUTED, TextSize=11,
-            Size=UDim2.new(0.3,0,0,28), ZIndex=201, Parent=masteryGate})
+            Size=UDim2.new(0.3,0,0,28), ZIndex=10000, Parent=masteryGate})
 
         local masteryError = mk("TextLabel", {BackgroundTransparency=1,
             Font=Enum.Font.Code, Text="", TextColor3=COL.RED, TextSize=11,
             Size=UDim2.new(0.7,0,0,20), TextXAlignment=Enum.TextXAlignment.Center,
-            ZIndex=201, Parent=masteryGate})
+            ZIndex=10000, Parent=masteryGate})
 
         local function showMasteryGate(show)
             masteryGate.Visible = show
