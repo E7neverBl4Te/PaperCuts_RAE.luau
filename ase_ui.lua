@@ -778,12 +778,17 @@ do
             OWNER     = {"Everything"},
         }
 
+        -- Forward declare so auto-select call after loop can reach it
+        local selectTier
+
         local function refreshCatRow()
             for _, c in ipairs(catRow:GetChildren()) do
                 if c:IsA("TextButton") then c:Destroy() end
             end
             catBtns = {}
             selectedCat = nil
+            local _firstCatName = nil
+            local _firstCatSelectFn = nil
             local cats = CAT_MAP[selectedTier] or {}
             for _, cat in ipairs(cats) do
                 local cname = cat
@@ -799,11 +804,11 @@ do
                     Parent=cb})
                 catBtns[cname] = cb
                 local ccat = cname
-                cb.MouseButton1Click:Connect(function()
+                local function selectCat(c)
                     clickSound()
-                    selectedCat = ccat
+                    selectedCat = c
                     for n, b in pairs(catBtns) do
-                        local active = (n == ccat)
+                        local active = (n == c)
                         local tcol = TIER_COL[selectedTier] or COL_AACG.TEAL
                         tween(b, TweenInfo.new(0.12), {
                             BackgroundColor3 = active
@@ -815,11 +820,19 @@ do
                                 active and tcol or COL_AACG.CARD_BDR
                         end
                     end
-                end)
+                end
+                cb.MouseButton1Click:Connect(function() selectCat(ccat) end)
+                if #catBtns == 1 then
+                    -- This is being added inside the loop; track first for auto-select
+                    _firstCatName = ccat
+                    _firstCatSelectFn = function() selectCat(ccat) end
+                end
             end
             -- Auto-select first category
-            if #cats > 0 then
-                catBtns[cats[1]].MouseButton1Click:Fire()
+            if _firstCatSelectFn then
+                _firstCatSelectFn()
+                _firstCatName = nil
+                _firstCatSelectFn = nil
             end
         end
 
@@ -837,19 +850,19 @@ do
             mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
                 Parent=tb})
             tierBtns[tk] = tb
-            tb.MouseButton1Click:Connect(function()
+            selectTier = function(t)
                 clickSound()
                 -- Owner tier requires Mastery
-                if tk == "OWNER" then
+                if t == "OWNER" then
                     local ASE2 = _G.PC and _G.PC.ASE
                     if not ASE2 or not ASE2.IsMasteryUnlocked() then
                         sendNotification("⚡ Mastery required for Game Owner tier.", "Warning")
                         return
                     end
                 end
-                selectedTier = tk
+                selectedTier = t
                 for n, b in pairs(tierBtns) do
-                    local active = (n == tk)
+                    local active = (n == t)
                     local ac = TIER_COL[n]
                     tween(b, TweenInfo.new(0.12), {
                         BackgroundColor3 = active
@@ -862,11 +875,12 @@ do
                     end
                 end
                 refreshCatRow()
-            end)
+            end
+            tb.MouseButton1Click:Connect(function() selectTier(tk) end)
         end
 
-        -- Select first tier by default
-        tierBtns["LOCALIZED"].MouseButton1Click:Fire()
+        -- Select first tier by default (no :Fire() — call directly)
+        selectTier("LOCALIZED")
 
         -- ── GENERATE button bar ────────────────────────────────────────────────
         local genBar = mk("Frame", {BackgroundColor3=Color3.fromRGB(16,15,22),
