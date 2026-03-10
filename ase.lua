@@ -1465,50 +1465,82 @@ function ASE_BedrockHandshake.StartHeartbeat(sinkRemote)
             local pair = ASE_BedrockPairs[sinkRemote]
             if not pair then break end
 
-            -- Quick re-verify with same nonce pattern
-            local testNonce   = ASE_GenNonce()
-            local alive       = false
-            local PR          = _G.PC.PR_Registry
-            local SARP        = _G.PC.SARP
+            local PR   = _G.PC.PR_Registry
+            local SARP = _G.PC.SARP
+            local alive = false
 
-            if PR and PR[sinkRemote] and SARP then
-                local listener = ASE_OpenNonceListener(testNonce, function()
+            -- ── Re-verify strategy depends on how the circuit was established ──
+            -- GHOST_HANDSHAKE / TWO_STAGE circuits are challenge-response via an RF
+            -- antecedent. Re-verify by invoking that RF and checking for non-nil return.
+            -- Classic nonce-echo circuits re-verify via the original nonce path.
+            local origin = pair.origin or ""
+            local isRFCircuit = (origin == "LINGER_GHOST_HANDSHAKE"
+                              or origin == "TWO_STAGE_SEQUENCE")
+            local antecedent  = pair.feedbackRemote  -- the RF that challenged us
+
+            if isRFCircuit and antecedent and PR and PR[antecedent] then
+                -- RF heartbeat: invoke the antecedent RF — any non-nil return = alive
+                local antRec = PR[antecedent]
+                if antRec and antRec.Remote and antRec.RemoteType == "RemoteFunction" then
+                    local RSM = _G.PC.RSM
+                    local rsmRec = RSM and RSM.Get(antecedent)
+                    local hbArgs = {}
+                    if rsmRec and rsmRec.ArgSig then
+                        for i, sig in ipairs(rsmRec.ArgSig) do
+                            if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
+                                hbArgs[i] = sig.SuccessValues[1]
+                            elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
+                                hbArgs[i] = sig.SuccessStrings[1]
+                            elseif sig.DominantType == "boolean" then
+                                hbArgs[i] = true
+                            end
+                        end
+                    end
+
+                    local ok, returnVal = pcall(function()
+                        return antRec.Remote:InvokeServer(table.unpack(hbArgs))
+                    end)
+                    -- Alive if invocation didn't error and returned something
+                    alive = ok and returnVal ~= nil
+                end
+
+            elseif PR and PR[sinkRemote] and SARP then
+                -- Classic nonce-echo heartbeat
+                local testNonce = ASE_GenNonce()
+                local listener  = ASE_OpenNonceListener(testNonce, function()
                     alive = true
                 end)
-
-                local testEnv = { __nonce=testNonce, __callback="heartbeat" }
+                local testEnv   = { __nonce=testNonce, __callback="heartbeat" }
                 local wrapped, sim = SARP.Build("Attribute", {testEnv}, nil, nil, sinkRemote)
                 if wrapped then
                     SARP.Execute(wrapped, sim, sinkRemote, function() end)
                 end
-
                 local t0 = os.clock()
                 while not alive and (os.clock()-t0) < 3.0 do task.wait(0.15) end
                 if listener then listener.cleanup() end
+            end
 
-                if not alive then
-                    -- Heartbeat lost — pipeline broken
-                    ASE.Panel.HeartbeatAlive = false
-                    ASE.Panel.BedrockConf    = 0.0
-                    pair.confidence          = 0.0
-                    warn(string.format("[ASE] ⚠ BEDROCK HEARTBEAT LOST: %s", sinkRemote))
-                    ASE_AppendTx({
-                        directive  = "HEARTBEAT LOST",
-                        rawPayload = {sinkRemote=sinkRemote},
-                        nonce      = testNonce,
-                        result     = "✗ PIPELINE BROKEN — entering RECOMPILE",
+            if not alive then
+                ASE.Panel.HeartbeatAlive = false
+                ASE.Panel.BedrockConf    = 0.0
+                pair.confidence          = 0.0
+                warn(string.format("[ASE] ⚠ BEDROCK HEARTBEAT LOST: %s", sinkRemote))
+                ASE_AppendTx({
+                    directive  = "HEARTBEAT LOST",
+                    rawPayload = { sinkRemote=sinkRemote, origin=origin },
+                    result     = "✗ PIPELINE BROKEN — entering RECOMPILE",
+                })
+                if ASE_Mode == ASE.MODE.MASTERY then
+                    ASE_GoalEngine.Push(ASE.GOAL.RECOMPILE, {
+                        sinkRemote     = sinkRemote,
+                        feedbackRemote = pair.feedbackRemote,
                     })
-                    -- Auto-trigger recompile if in MASTERY mode
-                    if ASE_Mode == ASE.MODE.MASTERY then
-                        ASE_GoalEngine.Push(ASE.GOAL.RECOMPILE, {
-                            sinkRemote     = sinkRemote,
-                            feedbackRemote = pair.feedbackRemote,
-                        })
-                    end
-                    break
-                else
-                    ASE.Panel.BedrockConf = 1.0
                 end
+                break
+            else
+                ASE.Panel.BedrockConf = pair.confidence
+                print(string.format("[ASE] ♥ Heartbeat alive: %s (via %s)",
+                    sinkRemote, isRFCircuit and antecedent or "nonce-echo"))
             end
         end
     end)
