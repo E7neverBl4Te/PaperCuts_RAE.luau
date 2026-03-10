@@ -694,98 +694,189 @@ do
     do
         local pg = subTabPages["Panel"]
 
-        -- Panel lock overlay (shown when Bedrock not confirmed)
-        local lockOverlay = mk("Frame", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, Size=UDim2.new(1,0,1,0),
-            ZIndex=50, Parent=pg})
-        addCorner(lockOverlay, UDim.new(0,0))
+        -- ── Lock overlay ────────────────────────────────────────────────────────
+        local lockOverlay = mk("Frame", {BackgroundColor3=Color3.fromRGB(14,13,18),
+            BorderSizePixel=0, Size=UDim2.new(1,0,1,0), ZIndex=50, Parent=pg})
         mk("UIListLayout", {VerticalAlignment=Enum.VerticalAlignment.Center,
-            HorizontalAlignment=Enum.HorizontalAlignment.Center, Parent=lockOverlay})
+            HorizontalAlignment=Enum.HorizontalAlignment.Center,
+            Padding=UDim.new(0,10), Parent=lockOverlay})
+        local lockIcon = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.GothamBold, Text="◈",
+            TextColor3=Color3.fromRGB(55,50,70), TextSize=48,
+            Size=UDim2.new(1,0,0,52), TextXAlignment=Enum.TextXAlignment.Center,
+            Parent=lockOverlay})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-            Text="⬛  Script Execution Panel",
-            TextColor3=COL.MUTED, TextSize=18,
-            Size=UDim2.new(1,0,0,30), TextXAlignment=Enum.TextXAlignment.Center,
+            Text="Script Execution Panel",
+            TextColor3=Color3.fromRGB(90,85,110), TextSize=16,
+            Size=UDim2.new(1,0,0,24), TextXAlignment=Enum.TextXAlignment.Center,
             Parent=lockOverlay})
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
-            Text="Awaiting Bedrock confirmation.\nRun a Bedrock goal to establish the pipeline.\nThis panel will appear automatically.",
-            TextColor3=Color3.fromRGB(70,70,80), TextSize=12, TextWrapped=true,
-            Size=UDim2.new(0.7,0,0,60), TextXAlignment=Enum.TextXAlignment.Center,
+            Text="Awaiting Bedrock confirmation.\nEstablish a pipeline to activate.",
+            TextColor3=Color3.fromRGB(55,50,70), TextSize=11, TextWrapped=true,
+            Size=UDim2.new(0.7,0,0,36), TextXAlignment=Enum.TextXAlignment.Center,
             Parent=lockOverlay})
 
-        -- Main execution panel (hidden until Bedrock confirmed)
-        local mainPanel = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
-            Size=UDim2.new(1,0,1,0), Visible=false, Parent=pg})
+        -- ── Main panel ──────────────────────────────────────────────────────────
+        local mainPanel = mk("Frame", {BackgroundColor3=Color3.fromRGB(14,13,18),
+            BorderSizePixel=0, Size=UDim2.new(1,0,1,0), Visible=false, Parent=pg})
 
-        -- ── Status bar ─────────────────────────────────────────────────────────
-        local statusBar = mk("Frame", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, Size=UDim2.new(1,0,0,32), Parent=mainPanel})
-        addStroke(statusBar, 1, 0.5)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), Parent=statusBar})
-        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
-            VerticalAlignment=Enum.VerticalAlignment.Center, Padding=UDim.new(0,10), Parent=statusBar})
+        -- ════════════════════════════════════════════════════════════════════════
+        -- STATUS BAR — circuit identity strip across the top
+        -- Shows: heartbeat pulse · SINK · via ANTECEDENT · ORIGIN chip · conf bar
+        -- ════════════════════════════════════════════════════════════════════════
+        local statusBar = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(18,17,24),
+            BorderSizePixel=0, Size=UDim2.new(1,0,0,44), Parent=mainPanel})
+        addStroke(statusBar, 1, 0.6)
 
-        heartbeatDot = mk("Frame", {BackgroundColor3=COL.RED,
-            BorderSizePixel=0, Size=UDim2.new(0,10,0,10), Parent=statusBar})
+        -- Left: heartbeat + sink identity
+        local hbPulseRing = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(0,0,0), BackgroundTransparency=1,
+            BorderSizePixel=0, Size=UDim2.new(0,44,1,0),
+            Position=UDim2.new(0,0,0,0), Parent=statusBar})
+        heartbeatDot = mk("Frame", {
+            BackgroundColor3=COL.RED, BorderSizePixel=0,
+            Size=UDim2.new(0,12,0,12),
+            Position=UDim2.new(0.5,-6,0.5,-6), Parent=hbPulseRing})
         addCorner(heartbeatDot, UDim.new(0,999))
+        -- Pulse ring (expands on heartbeat)
+        local hbRing = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(0,0,0), BackgroundTransparency=1,
+            BorderSizePixel=0, Size=UDim2.new(0,24,0,24),
+            Position=UDim2.new(0.5,-12,0.5,-12), Parent=hbPulseRing})
+        addCorner(hbRing, UDim.new(0,999))
+        addStroke(hbRing, 1.5, 0.5)
+        local hbRingStroke = hbRing:FindFirstChildOfClass("UIStroke")
+        if hbRingStroke then hbRingStroke.Color = COL.GREEN end
 
-        local sinkLabel = mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
-            Text="SINK: —   FEEDBACK: —", TextColor3=COL.TEXT, TextSize=10,
-            Size=UDim2.new(0.5,0,1,0), TextXAlignment=Enum.TextXAlignment.Left, Parent=statusBar})
+        -- Circuit identity labels
+        local identityBlock = mk("Frame", {BackgroundTransparency=1,
+            BorderSizePixel=0, Position=UDim2.new(0,48,0,0),
+            Size=UDim2.new(1,-48,0,44), Parent=statusBar})
 
-        local modeChip = mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-            Text="COMPILED", TextColor3=COL.BLUE, TextSize=10,
-            Size=UDim2.new(0,80,1,0), TextXAlignment=Enum.TextXAlignment.Right, Parent=statusBar})
-
-        local confLabel = mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
-            Text="conf: —%", TextColor3=COL.MUTED, TextSize=10,
-            Size=UDim2.new(0,60,1,0), TextXAlignment=Enum.TextXAlignment.Right, Parent=statusBar})
-
-        -- ── Split: Semantic Shell (top) / Forge (bottom) ───────────────────────
-        local splitContainer = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
-            Position=UDim2.new(0,0,0,32), Size=UDim2.new(1,0,1,-32), Parent=mainPanel})
-
-        -- Left column: input area (60%)
-        local leftCol = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
-            Size=UDim2.new(0.60,0,1,0), Parent=splitContainer})
-        mk("UIListLayout", {Padding=UDim.new(0,0), Parent=leftCol})
-
-        -- Right column: transaction buffer (40%)
-        local rightCol = mk("Frame", {BackgroundColor3=COL.DARK, BorderSizePixel=0,
-            Position=UDim2.new(0.60,1,0,0), Size=UDim2.new(0.40,-1,1,0), Parent=splitContainer})
-        addStroke(rightCol, 1, 0.5)
-
-        -- ── SEMANTIC SHELL ─────────────────────────────────────────────────────
-        local shellArea = mk("Frame", {BackgroundColor3=COL.CARD, BorderSizePixel=0,
-            Size=UDim2.new(1,0,0.5,0), Parent=leftCol})
-        addStroke(shellArea, 1, 0.5)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
-            PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6), Parent=shellArea})
-        mk("UIListLayout", {Padding=UDim.new(0,6), Parent=shellArea})
-
-        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-            Text="⬛ Semantic Shell", TextColor3=COL.BLUE, TextSize=11,
-            Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left,
-            LayoutOrder=1, Parent=shellArea})
-
-        -- Intent autocomplete row
-        local intentRow = mk("Frame", {BackgroundTransparency=1,
-            Size=UDim2.new(1,0,0,28), LayoutOrder=2, Parent=shellArea})
+        local sinkRow = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
+            Size=UDim2.new(1,-8,0,22), Position=UDim2.new(0,0,0,3),
+            Parent=identityBlock})
         mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
-            VerticalAlignment=Enum.VerticalAlignment.Center, Padding=UDim.new(0,6), Parent=intentRow})
-        local intentBox = mk("TextBox", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, ClearTextOnFocus=false, Font=Enum.Font.Code,
-            PlaceholderText="Economy.AddCurrency...",
-            PlaceholderColor3=COL.MUTED, Text="", TextColor3=COL.TEAL,
-            TextSize=11, Size=UDim2.new(1,-80,1,0), Parent=intentRow})
-        addCorner(intentBox, UDim.new(0,6)); addStroke(intentBox, 1, 0.4)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,8), Parent=intentBox})
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,8), Parent=sinkRow})
 
-        -- Autocomplete suggestions
-        local acHolder = mk("Frame", {BackgroundColor3=Color3.fromRGB(20,20,26),
-            BorderSizePixel=0, Size=UDim2.new(1,0,0,10),
-            AutomaticSize=Enum.AutomaticSize.Y, LayoutOrder=3, Parent=shellArea})
-        addCorner(acHolder, UDim.new(0,6)); addStroke(acHolder, 1, 0.5)
-        mk("UIListLayout", {Padding=UDim.new(0,2), Parent=acHolder})
+        local sinkNameLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.GothamBold, Text="SINK: —",
+            TextColor3=Color3.fromRGB(220,215,255), TextSize=12,
+            Size=UDim2.new(0,200,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=sinkRow})
+
+        local antecedentLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.Code, Text="via —",
+            TextColor3=Color3.fromRGB(80,200,140), TextSize=11,
+            Size=UDim2.new(0,160,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=sinkRow})
+
+        -- Origin chip (GHOST_HANDSHAKE / TWO_STAGE / STATE_GATE / etc)
+        local originChip = mk("TextLabel", {
+            BackgroundColor3=Color3.fromRGB(30,28,40), BorderSizePixel=0,
+            Font=Enum.Font.Code, Text="—",
+            TextColor3=Color3.fromRGB(140,120,200), TextSize=9,
+            Size=UDim2.new(0,130,0,18),
+            TextXAlignment=Enum.TextXAlignment.Center, Parent=sinkRow})
+        addCorner(originChip, UDim.new(0,4))
+        addStroke(originChip, 1, 0.5)
+
+        -- Mode chip
+        local modeChip = mk("TextLabel", {
+            BackgroundColor3=Color3.fromRGB(25,40,65), BorderSizePixel=0,
+            Font=Enum.Font.GothamBold, Text="COMPILED",
+            TextColor3=COL.BLUE, TextSize=9,
+            Size=UDim2.new(0,72,0,18),
+            TextXAlignment=Enum.TextXAlignment.Center, Parent=sinkRow})
+        addCorner(modeChip, UDim.new(0,4))
+        addStroke(modeChip, 1, 0.5)
+
+        -- Second row: conf bar
+        local confRow = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
+            Size=UDim2.new(1,-8,0,14), Position=UDim2.new(0,0,0,26),
+            Parent=identityBlock})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,8), Parent=confRow})
+
+        local confTextLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.Code, Text="conf: —",
+            TextColor3=Color3.fromRGB(100,95,120), TextSize=9,
+            Size=UDim2.new(0,54,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=confRow})
+
+        local confBg = mk("Frame", {BackgroundColor3=Color3.fromRGB(28,26,36),
+            BorderSizePixel=0, Size=UDim2.new(1,-70,0,4), Parent=confRow})
+        addCorner(confBg, UDim.new(0,2))
+        local confFill = mk("Frame", {BackgroundColor3=COL.GREEN, BorderSizePixel=0,
+            Size=UDim2.new(0,0,1,0), Parent=confBg})
+        addCorner(confFill, UDim.new(0,2))
+
+        -- ════════════════════════════════════════════════════════════════════════
+        -- MAIN CONTENT AREA — three-zone layout
+        --   Left  55%: Semantic Shell  (primary interaction surface)
+        --   Right 45%: split vertically
+        --     Right-top  42%: Protocol Forge
+        --     Right-bot  58%: Transaction Buffer
+        -- ════════════════════════════════════════════════════════════════════════
+        local contentArea = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
+            Position=UDim2.new(0,0,0,44), Size=UDim2.new(1,0,1,-44),
+            Parent=mainPanel})
+
+        local SEP = 1  -- separator px
+        local LEFT_W = 0.55
+
+        -- ── LEFT: Semantic Shell ───────────────────────────────────────────────
+        local shellPane = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(16,15,22),
+            BorderSizePixel=0, Size=UDim2.new(LEFT_W,-SEP,1,0), Parent=contentArea})
+        addStroke(shellPane, 1, 0.5)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,12), PaddingRight=UDim.new(0,12),
+            PaddingTop=UDim.new(0,10), PaddingBottom=UDim.new(0,10), Parent=shellPane})
+        mk("UIListLayout", {Padding=UDim.new(0,8), Parent=shellPane})
+
+        -- Shell header
+        local shellHdr = mk("Frame", {BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,18), LayoutOrder=1, Parent=shellPane})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,6), Parent=shellHdr})
+        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+            Text="◈ Semantic Shell", TextColor3=COL.TEAL, TextSize=12,
+            Size=UDim2.new(1,0,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=shellHdr})
+
+        -- Intent input row
+        local intentRow = mk("Frame", {BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,30), LayoutOrder=2, Parent=shellPane})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,6), Parent=intentRow})
+
+        local intentBox = mk("TextBox", {
+            BackgroundColor3=Color3.fromRGB(22,20,30), BorderSizePixel=0,
+            ClearTextOnFocus=false, Font=Enum.Font.Code,
+            PlaceholderText="Economy.AddCurrency...",
+            PlaceholderColor3=Color3.fromRGB(65,60,80),
+            Text="", TextColor3=COL.TEAL,
+            TextSize=11, Size=UDim2.new(1,0,1,0), Parent=intentRow})
+        addCorner(intentBox, UDim.new(0,6))
+        addStroke(intentBox, 1, 0.4)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,10), Parent=intentBox})
+
+        -- Autocomplete dropdown
+        local acHolder = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(20,18,28),
+            BorderSizePixel=0, Size=UDim2.new(1,0,0,0),
+            AutomaticSize=Enum.AutomaticSize.Y,
+            Visible=false, LayoutOrder=3, Parent=shellPane})
+        addCorner(acHolder, UDim.new(0,6))
+        addStroke(acHolder, 1, 0.4)
+        mk("UIListLayout", {Padding=UDim.new(0,1), Parent=acHolder})
+        mk("UIPadding", {PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4),
+            Parent=acHolder})
 
         local function updateAutocomplete(query)
             for _, c in ipairs(acHolder:GetChildren()) do
@@ -805,16 +896,18 @@ do
                     local btn = mk("TextButton", {AutoButtonColor=false,
                         BackgroundTransparency=1, BorderSizePixel=0,
                         Font=Enum.Font.Code, Text="  " .. name,
-                        TextColor3=COL.TEAL, TextSize=10,
-                        Size=UDim2.new(1,0,0,20),
+                        TextColor3=COL.TEAL, TextSize=11,
+                        Size=UDim2.new(1,0,0,22),
                         TextXAlignment=Enum.TextXAlignment.Left, Parent=acHolder})
                     local bname = name
                     btn.MouseButton1Click:Connect(function()
-                        intentBox.Text = bname
-                        acHolder.Visible = false
+                        intentBox.Text = bname; acHolder.Visible = false
                     end)
+                    hookHover(btn,
+                        Color3.fromRGB(30,28,40), Color3.fromRGB(0,0,0),
+                        Color3.fromRGB(0,0,0), Color3.fromRGB(0,0,0))
                     shown = shown + 1
-                    if shown >= 6 then break end
+                    if shown >= 7 then break end
                 end
             end
             acHolder.Visible = shown > 0
@@ -824,27 +917,45 @@ do
         end)
 
         -- Args input
-        local argsBox = mk("TextBox", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, ClearTextOnFocus=false, Font=Enum.Font.Code,
+        local argsBox = mk("TextBox", {
+            BackgroundColor3=Color3.fromRGB(22,20,30), BorderSizePixel=0,
+            ClearTextOnFocus=false, Font=Enum.Font.Code,
             PlaceholderText='args: "Gold", 5000',
-            PlaceholderColor3=COL.MUTED, Text="", TextColor3=COL.TEXT,
-            TextSize=11, Size=UDim2.new(1,0,0,26),
-            LayoutOrder=4, Parent=shellArea})
-        addCorner(argsBox, UDim.new(0,6)); addStroke(argsBox, 1, 0.4)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,8), Parent=argsBox})
+            PlaceholderColor3=Color3.fromRGB(65,60,80),
+            Text="", TextColor3=Color3.fromRGB(200,195,230),
+            TextSize=11, Size=UDim2.new(1,0,0,30),
+            LayoutOrder=4, Parent=shellPane})
+        addCorner(argsBox, UDim.new(0,6))
+        addStroke(argsBox, 1, 0.4)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,10), Parent=argsBox})
 
         -- Execute button
         local shellExecBtn = mk("TextButton", {AutoButtonColor=false,
-            BackgroundColor3=COL.BLUE, BorderSizePixel=0,
+            BackgroundColor3=COL.TEAL, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="▶  Execute Directive",
-            TextColor3=Color3.fromRGB(255,255,255), TextSize=11,
-            Size=UDim2.new(1,0,0,28), LayoutOrder=5, Parent=shellArea})
+            TextColor3=Color3.fromRGB(255,255,255), TextSize=12,
+            Size=UDim2.new(1,0,0,32), LayoutOrder=5, Parent=shellPane})
         addCorner(shellExecBtn, UDim.new(0,6))
 
+        -- Result label
         local shellResultLabel = mk("TextLabel", {BackgroundTransparency=1,
             Font=Enum.Font.Code, Text="", TextColor3=COL.GREEN, TextSize=10,
             TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
-            Size=UDim2.new(1,0,0,28), LayoutOrder=6, Parent=shellArea})
+            Size=UDim2.new(1,0,0,32), LayoutOrder=6, Parent=shellPane})
+
+        -- Live raw preview strip
+        local livePreviewLabel = mk("TextLabel", {
+            BackgroundColor3=Color3.fromRGB(20,18,26),
+            BorderSizePixel=0, Font=Enum.Font.Code,
+            Text="— raw payload preview —",
+            TextColor3=Color3.fromRGB(70,65,90), TextSize=9,
+            TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
+            TextYAlignment=Enum.TextYAlignment.Top,
+            Size=UDim2.new(1,0,0,40), LayoutOrder=7, Parent=shellPane})
+        addCorner(livePreviewLabel, UDim.new(0,4))
+        addStroke(livePreviewLabel, 1, 0.6)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,5),
+            Parent=livePreviewLabel})
 
         shellExecBtn.MouseButton1Click:Connect(function()
             clickSound(); pulseClick(shellExecBtn)
@@ -855,7 +966,6 @@ do
                 shellResultLabel.Text = "Enter an intent name."
                 shellResultLabel.TextColor3 = COL.AMBER; return
             end
-            -- Parse args
             local argsStr = argsBox.Text:match("^%s*(.-)%s*$")
             local args = {}
             if argsStr ~= "" then
@@ -867,120 +977,109 @@ do
             end
             local ok, result = ASE2.Execute(intent, args)
             shellResultLabel.Text = ok
-                and string.format("✓  %s  [nonce: %s]", intent, tostring(result):sub(1,16))
+                and string.format("✓  %s", intent)
                 or  "✗  " .. tostring(result)
             shellResultLabel.TextColor3 = ok and COL.GREEN or COL.RED
         end)
 
-        -- ── PROTOCOL FORGE ─────────────────────────────────────────────────────
-        local forgeArea = mk("Frame", {BackgroundColor3=Color3.fromRGB(20,16,14),
-            BorderSizePixel=0, Size=UDim2.new(1,0,0.5,0), Parent=leftCol})
-        addStroke(forgeArea, 1.5, 0.4)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
-            PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6), Parent=forgeArea})
-        mk("UIListLayout", {Padding=UDim.new(0,6), Parent=forgeArea})
-
-        -- Forge header row with view toggle
-        local forgeHdr = mk("Frame", {BackgroundTransparency=1,
-            Size=UDim2.new(1,0,0,20), LayoutOrder=1, Parent=forgeArea})
-        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
-            VerticalAlignment=Enum.VerticalAlignment.Center, Padding=UDim.new(0,8), Parent=forgeHdr})
-        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-            Text="⚙ Protocol Forge", TextColor3=COL.ORANGE, TextSize=11,
-            Size=UDim2.new(0,130,1,0), TextXAlignment=Enum.TextXAlignment.Left, Parent=forgeHdr})
-
-        -- Lua / Byte-string view toggle
-        local viewMode = "LUA"
-        local luaBtn = mk("TextButton", {AutoButtonColor=false,
-            BackgroundColor3=COL.ORANGE, BorderSizePixel=0,
-            Font=Enum.Font.GothamMedium, Text="Lua",
-            TextColor3=Color3.fromRGB(255,255,255), TextSize=10,
-            Size=UDim2.new(0,40,0,18), Parent=forgeHdr})
-        addCorner(luaBtn, UDim.new(0,4))
-        local byteBtn = mk("TextButton", {AutoButtonColor=false,
-            BackgroundColor3=COL.DARK, BorderSizePixel=0,
-            Font=Enum.Font.GothamMedium, Text="0xFF",
-            TextColor3=COL.MUTED, TextSize=10,
-            Size=UDim2.new(0,40,0,18), Parent=forgeHdr})
-        addCorner(byteBtn, UDim.new(0,4)); addStroke(byteBtn, 1, 0.5)
-
-        -- Raw input box
-        local forgeBox = mk("TextBox", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, ClearTextOnFocus=false, Font=Enum.Font.Code,
-            PlaceholderText='{[1]="cmd", [2]={["amt"]=5000}}',
-            PlaceholderColor3=COL.MUTED, Text="", TextColor3=COL.ORANGE,
-            TextSize=10, TextXAlignment=Enum.TextXAlignment.Left,
-            TextYAlignment=Enum.TextYAlignment.Top,
-            MultiLine=true, TextWrapped=true,
-            Size=UDim2.new(1,0,0,60), LayoutOrder=2, Parent=forgeArea})
-        addCorner(forgeBox, UDim.new(0,6)); addStroke(forgeBox, 1, 0.4)
-        mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=forgeBox})
-
-        -- Live raw preview (shown under Semantic Shell input)
-        local livePreviewLabel = mk("TextLabel", {BackgroundColor3=COL.DARK,
-            BorderSizePixel=0, Font=Enum.Font.Code,
-            Text="— raw payload preview —", TextColor3=Color3.fromRGB(90,80,60),
-            TextSize=9, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
-            TextYAlignment=Enum.TextYAlignment.Top,
-            Size=UDim2.new(1,0,0,36), LayoutOrder=3, Parent=forgeArea})
-        addCorner(livePreviewLabel, UDim.new(0,4))
-        mk("UIPadding", {PaddingLeft=UDim.new(0,6), PaddingTop=UDim.new(0,4), Parent=livePreviewLabel})
-
-        -- Update live preview from Semantic Shell
         intentBox:GetPropertyChangedSignal("Text"):Connect(function()
             local ASE2 = _G.PC.ASE
             if not ASE2 then return end
             local t = intentBox.Text:match("^%s*(.-)%s*$")
             if t ~= "" then
-                if viewMode == "LUA" then
-                    livePreviewLabel.Text = string.format(
-                        'Remote:FireServer({__intent="%s", __payload={...}})', t)
-                else
-                    livePreviewLabel.Text = ASE2.ToByteString({__intent=t, __payload={}}):sub(1,120)
-                end
+                livePreviewLabel.Text = string.format(
+                    'Remote:FireServer({__intent="%s", __payload={...}})', t)
             else
                 livePreviewLabel.Text = "— raw payload preview —"
             end
         end)
 
+        -- ── RIGHT COLUMN ───────────────────────────────────────────────────────
+        local rightCol = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
+            Position=UDim2.new(LEFT_W,SEP,0,0),
+            Size=UDim2.new(1-LEFT_W,-SEP,1,0), Parent=contentArea})
+
+        local FORGE_H = 0.40  -- forge takes 40% of right col height
+
+        -- ── RIGHT-TOP: Protocol Forge ──────────────────────────────────────────
+        local forgePane = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(16,12,10),
+            BorderSizePixel=0, Size=UDim2.new(1,0,FORGE_H,-SEP), Parent=rightCol})
+        addStroke(forgePane, 1, 0.5)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+            PaddingTop=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=forgePane})
+        mk("UIListLayout", {Padding=UDim.new(0,6), Parent=forgePane})
+
+        -- Forge header
+        local forgeHdr = mk("Frame", {BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,20), LayoutOrder=1, Parent=forgePane})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,6), Parent=forgeHdr})
+        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+            Text="⚙ Protocol Forge", TextColor3=COL.ORANGE, TextSize=11,
+            Size=UDim2.new(0,130,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=forgeHdr})
+
+        local viewMode = "LUA"
+        local luaBtn = mk("TextButton", {AutoButtonColor=false,
+            BackgroundColor3=COL.ORANGE, BorderSizePixel=0,
+            Font=Enum.Font.GothamMedium, Text="Lua",
+            TextColor3=Color3.fromRGB(255,255,255), TextSize=9,
+            Size=UDim2.new(0,36,0,18), Parent=forgeHdr})
+        addCorner(luaBtn, UDim.new(0,4))
+        local byteBtn = mk("TextButton", {AutoButtonColor=false,
+            BackgroundColor3=Color3.fromRGB(26,20,16), BorderSizePixel=0,
+            Font=Enum.Font.GothamMedium, Text="0xFF",
+            TextColor3=COL.MUTED, TextSize=9,
+            Size=UDim2.new(0,36,0,18), Parent=forgeHdr})
+        addCorner(byteBtn, UDim.new(0,4))
+        addStroke(byteBtn, 1, 0.5)
+
         luaBtn.MouseButton1Click:Connect(function()
             viewMode = "LUA"
-            luaBtn.BackgroundColor3  = COL.ORANGE; luaBtn.TextColor3 = Color3.fromRGB(10,10,14)
-            byteBtn.BackgroundColor3 = COL.DARK;   byteBtn.TextColor3 = COL.MUTED
-            forgeBox.TextColor3 = COL.ORANGE
+            tween(luaBtn, TweenInfo.new(0.1), {BackgroundColor3=COL.ORANGE})
+            tween(byteBtn, TweenInfo.new(0.1), {BackgroundColor3=Color3.fromRGB(26,20,16)})
         end)
         byteBtn.MouseButton1Click:Connect(function()
             viewMode = "BYTE"
-            byteBtn.BackgroundColor3 = COL.ORANGE; byteBtn.TextColor3 = Color3.fromRGB(10,10,14)
-            luaBtn.BackgroundColor3  = COL.DARK;   luaBtn.TextColor3 = COL.MUTED
-            forgeBox.TextColor3 = Color3.fromRGB(180,120,80)
-            -- Convert current box content to byte-string view
-            local ASE2 = _G.PC.ASE
-            if ASE2 and forgeBox.Text ~= "" then
-                local parsed = ASE2.ParseByteString(forgeBox.Text)
-                if parsed then
-                    forgeBox.Text = ASE2.ToByteString(parsed)
-                end
-            end
+            tween(byteBtn, TweenInfo.new(0.1), {BackgroundColor3=COL.ORANGE})
+            tween(luaBtn, TweenInfo.new(0.1), {BackgroundColor3=Color3.fromRGB(26,20,16)})
         end)
 
-        -- Forge action buttons
+        -- Raw input
+        local forgeBox = mk("TextBox", {
+            BackgroundColor3=Color3.fromRGB(20,16,12), BorderSizePixel=0,
+            ClearTextOnFocus=false, Font=Enum.Font.Code,
+            PlaceholderText='{[1]="cmd", [2]={["amt"]=5000}}',
+            PlaceholderColor3=Color3.fromRGB(70,55,40),
+            Text="", TextColor3=COL.ORANGE,
+            TextSize=10, TextXAlignment=Enum.TextXAlignment.Left,
+            TextYAlignment=Enum.TextYAlignment.Top,
+            MultiLine=true, TextWrapped=true,
+            Size=UDim2.new(1,0,0,56), LayoutOrder=2, Parent=forgePane})
+        addCorner(forgeBox, UDim.new(0,5))
+        addStroke(forgeBox, 1, 0.4)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,5), Parent=forgeBox})
+
+        -- Action buttons
         local forgeBtnRow = mk("Frame", {BackgroundTransparency=1,
-            Size=UDim2.new(1,0,0,28), LayoutOrder=4, Parent=forgeArea})
+            Size=UDim2.new(1,0,0,26), LayoutOrder=3, Parent=forgePane})
         mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
-            Padding=UDim.new(0,6), VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,5), VerticalAlignment=Enum.VerticalAlignment.Center,
             Parent=forgeBtnRow})
 
-        local function forgeActionBtn(parent, text, col, fn)
+        local function forgeBtn(parent, text, col, fn)
             local b = mk("TextButton", {AutoButtonColor=false, BackgroundColor3=col,
                 BorderSizePixel=0, Font=Enum.Font.GothamMedium, Text=text,
                 TextColor3=Color3.fromRGB(255,255,255), TextSize=10,
-                Size=UDim2.new(0,80,0,24), Parent=parent})
-            addCorner(b, UDim.new(0,6))
+                Size=UDim2.new(0,76,0,24), Parent=parent})
+            addCorner(b, UDim.new(0,5))
             b.MouseButton1Click:Connect(function() clickSound(); pulseClick(b); fn() end)
             return b
         end
-        forgeActionBtn(forgeBtnRow, "▶ Fire Raw", COL.ORANGE, function()
+
+        forgeBtn(forgeBtnRow, "▶ Fire Raw", COL.ORANGE, function()
             local ASE2 = _G.PC.ASE
             local sink = ASE2 and ASE2.Panel.ActiveSink
             if not sink then sendNotification("No active Bedrock sink.", "Warning"); return end
@@ -992,7 +1091,7 @@ do
             sendNotification(ok and "✓ Fired raw." or ("✗ " .. tostring(result)),
                 ok and "Success" or "Warning")
         end)
-        forgeActionBtn(forgeBtnRow, "⬆ Finalize", COL.TEAL, function()
+        forgeBtn(forgeBtnRow, "⬆ Finalize", COL.TEAL, function()
             local ASE2 = _G.PC.ASE
             local sink = ASE2 and ASE2.Panel.ActiveSink
             if not sink then sendNotification("No active Bedrock sink.", "Warning"); return end
@@ -1000,35 +1099,51 @@ do
             if raw == "" then sendNotification("Enter a payload to finalize.", "Warning"); return end
             local parsed = ASE2 and ASE2.ParseByteString(raw)
             if not parsed then sendNotification("Could not parse payload.", "Warning"); return end
-            -- Prompt for name via intentBox
             local dname = intentBox.Text:match("^%s*(.-)%s*$")
             if dname == "" then dname = "Custom_" .. tostring(math.random(1000,9999)) end
             ASE2.FinalizeDirective(dname, parsed, sink, "Custom")
             sendNotification("Finalized: " .. dname, "Success")
         end)
-        forgeActionBtn(forgeBtnRow, "↺ Recompile", COL.AMBER, function()
+        forgeBtn(forgeBtnRow, "↺ Recompile", COL.AMBER, function()
             local ASE2 = _G.PC.ASE
             local sink = ASE2 and ASE2.Panel.ActiveSink
             if sink then ASE2.Recompile(sink) end
         end)
 
-        -- ── TRANSACTION BUFFER (right column) ─────────────────────────────────
+        -- ── RIGHT-BOTTOM: Transaction Buffer ──────────────────────────────────
+        local txPane = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(14,14,20),
+            BorderSizePixel=0,
+            Position=UDim2.new(0,0,FORGE_H,SEP),
+            Size=UDim2.new(1,0,1-FORGE_H,-SEP), Parent=rightCol})
+        addStroke(txPane, 1, 0.5)
         mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8),
-            PaddingTop=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=rightCol})
-        mk("UIListLayout", {Padding=UDim.new(0,4), Parent=rightCol})
-        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-            Text="⧗ Transaction Buffer", TextColor3=COL.MUTED, TextSize=10,
-            Size=UDim2.new(1,0,0,16), TextXAlignment=Enum.TextXAlignment.Left,
-            LayoutOrder=1, Parent=rightCol})
+            PaddingTop=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=txPane})
+        mk("UIListLayout", {Padding=UDim.new(0,5), Parent=txPane})
 
-        local txScroll = mk("ScrollingFrame", {BackgroundTransparency=1, BorderSizePixel=0,
-            Size=UDim2.new(1,0,1,-24), ScrollBarThickness=2,
+        mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+            Text="⧗ Transaction Buffer", TextColor3=Color3.fromRGB(80,75,110),
+            TextSize=10, Size=UDim2.new(1,0,0,16),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            LayoutOrder=1, Parent=txPane})
+
+        local txScroll = mk("ScrollingFrame", {BackgroundTransparency=1,
+            BorderSizePixel=0, Size=UDim2.new(1,0,1,-24),
+            ScrollBarThickness=2,
             CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
             ScrollingDirection=Enum.ScrollingDirection.Y,
-            ScrollBarImageColor3=Color3.fromRGB(60,60,70),
-            LayoutOrder=2, Parent=rightCol})
-        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder, Padding=UDim.new(0,4),
-            Parent=txScroll})
+            ScrollBarImageColor3=Color3.fromRGB(50,48,70),
+            LayoutOrder=2, Parent=txPane})
+        mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,
+            Padding=UDim.new(0,3), Parent=txScroll})
+
+        local TX_COLORS = {
+            ok    = Color3.fromRGB(60,200,100),
+            fail  = Color3.fromRGB(220,70,70),
+            info  = Color3.fromRGB(90,140,220),
+            warn  = Color3.fromRGB(210,160,40),
+            muted = Color3.fromRGB(65,62,85),
+        }
 
         local function rebuildTxBuffer()
             for _, c in ipairs(txScroll:GetChildren()) do
@@ -1036,31 +1151,79 @@ do
             end
             local ASE2 = _G.PC.ASE
             if not ASE2 then return end
-            local entries = ASE2.GetTxBuffer(24)
+            local entries = ASE2.GetTxBuffer(28)
             for i, e in ipairs(entries) do
-                local row = mk("Frame", {BackgroundColor3=Color3.fromRGB(22,22,28),
-                    BorderSizePixel=0, Size=UDim2.new(1,0,0,10),
-                    AutomaticSize=Enum.AutomaticSize.Y, LayoutOrder=i, Parent=txScroll})
-                addCorner(row, UDim.new(0,4)); addStroke(row, 1, 0.5)
-                mk("UIPadding", {PaddingLeft=UDim.new(0,6), PaddingRight=UDim.new(0,6),
-                    PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4), Parent=row})
-                mk("UIListLayout", {Padding=UDim.new(0,2), Parent=row})
-                local isOk = tostring(e.result or ""):find("✓") ~= nil
+                local resultStr = tostring(e.result or "")
+                local isOk    = resultStr:find("✓") ~= nil
+                local isFail  = resultStr:find("✗") ~= nil
+                local accentCol = isOk and TX_COLORS.ok
+                               or isFail and TX_COLORS.fail
+                               or TX_COLORS.info
+
+                local row = mk("Frame", {
+                    BackgroundColor3=Color3.fromRGB(20,19,28),
+                    BorderSizePixel=0, Size=UDim2.new(1,0,0,0),
+                    AutomaticSize=Enum.AutomaticSize.Y,
+                    LayoutOrder=i, Parent=txScroll})
+                addCorner(row, UDim.new(0,4))
+                -- Left accent bar
+                local accent = mk("Frame", {BackgroundColor3=accentCol,
+                    BorderSizePixel=0, Size=UDim2.new(0,2,1,0),
+                    Position=UDim2.new(0,0,0,0), Parent=row})
+                addCorner(accent, UDim.new(0,2))
+
+                local innerPad = mk("Frame", {BackgroundTransparency=1,
+                    BorderSizePixel=0, Position=UDim2.new(0,8,0,0),
+                    Size=UDim2.new(1,-10,0,0),
+                    AutomaticSize=Enum.AutomaticSize.Y, Parent=row})
+                mk("UIPadding", {PaddingTop=UDim.new(0,4), PaddingBottom=UDim.new(0,4),
+                    Parent=innerPad})
+                mk("UIListLayout", {Padding=UDim.new(0,2), Parent=innerPad})
+
+                -- Directive name
                 mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
-                    Text=tostring(e.directive or ""):sub(1,28),
-                    TextColor3=COL.TEXT, TextSize=9,
+                    Text=tostring(e.directive or ""):sub(1,42),
+                    TextColor3=Color3.fromRGB(200,196,230), TextSize=9,
                     TextXAlignment=Enum.TextXAlignment.Left,
-                    Size=UDim2.new(1,0,0,12), LayoutOrder=1, Parent=row})
+                    Size=UDim2.new(1,0,0,12), LayoutOrder=1, Parent=innerPad})
+                -- Result
                 mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
-                    Text=tostring(e.result or ""):sub(1,36),
-                    TextColor3=isOk and COL.GREEN or COL.RED, TextSize=8,
+                    Text=resultStr:sub(1,52),
+                    TextColor3=accentCol, TextSize=8,
                     TextXAlignment=Enum.TextXAlignment.Left,
-                    Size=UDim2.new(1,0,0,10), LayoutOrder=2, Parent=row})
+                    Size=UDim2.new(1,0,0,10), LayoutOrder=2, Parent=innerPad})
+                -- Timestamp
+                if e.t then
+                    mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
+                        Text=string.format("t+%.1fs", e.t % 1000),
+                        TextColor3=TX_COLORS.muted, TextSize=8,
+                        TextXAlignment=Enum.TextXAlignment.Left,
+                        Size=UDim2.new(1,0,0,10), LayoutOrder=3, Parent=innerPad})
+                end
             end
         end
 
-        -- ── Panel show/hide and status update loop ─────────────────────────────
+        -- ════════════════════════════════════════════════════════════════════════
+        -- STATUS UPDATE + HEARTBEAT PULSE LOOP
+        -- ════════════════════════════════════════════════════════════════════════
         task.spawn(function()
+            local ORIGIN_COLORS = {
+                LINGER_GHOST_HANDSHAKE = Color3.fromRGB(80,220,160),
+                GHOST_HANDSHAKE        = Color3.fromRGB(80,220,160),
+                TWO_STAGE_SEQUENCE     = Color3.fromRGB(100,180,255),
+                STATE_GATE             = Color3.fromRGB(200,160,80),
+                STATE_NUDGE            = Color3.fromRGB(180,120,220),
+                LINGER_VERIFY          = Color3.fromRGB(120,160,220),
+            }
+            local ORIGIN_LABELS = {
+                LINGER_GHOST_HANDSHAKE = "GHOST HANDSHAKE",
+                GHOST_HANDSHAKE        = "GHOST HANDSHAKE",
+                TWO_STAGE_SEQUENCE     = "TWO-STAGE SEQ",
+                STATE_GATE             = "STATE GATE",
+                STATE_NUDGE            = "STATE NUDGE",
+                LINGER_VERIFY          = "NONCE ECHO",
+            }
+
             while true do
                 task.wait(1.5)
                 local ASE2 = _G.PC.ASE
@@ -1068,69 +1231,118 @@ do
                 local stats = ASE2.GetStats()
 
                 -- Show/hide main panel vs lock overlay
-                local panelShouldBeVisible = stats.PanelVisible or stats.ActiveSink ~= nil
-                if panelShouldBeVisible ~= mainPanel.Visible then
-                    mainPanel.Visible  = panelShouldBeVisible
-                    lockOverlay.Visible= not panelShouldBeVisible
-                    if panelShouldBeVisible then
-                        -- Update Panel tab label
+                local shouldShow = stats.PanelVisible or stats.ActiveSink ~= nil
+                if shouldShow ~= mainPanel.Visible then
+                    mainPanel.Visible   = shouldShow
+                    lockOverlay.Visible = not shouldShow
+                    if shouldShow then
                         subTabBtns["Panel"].Text = "✓ Panel"
                         subTabBtns["Panel"].TextColor3 = COL.GREEN
                     end
                 end
 
-                -- Status bar update
+                -- Status bar
                 if stats.ActiveSink then
-                    sinkLabel.Text = string.format("SINK: %s   FB: %s",
-                        stats.ActiveSink:sub(1,20),
-                        (stats.ActiveFeedback or "?"):sub(1,20))
+                    sinkNameLabel.Text = "SINK  " .. tostring(stats.ActiveSink):sub(1,22)
                 end
-                modeChip.Text = stats.Mode
-                modeChip.TextColor3 = stats.Mode=="COMPILED" and COL.BLUE
-                    or stats.Mode=="RAW" and COL.ORANGE or COL.PURP
-                confLabel.Text = string.format("conf: %.0f%%", (stats.BedrockConf or 0)*100)
+                if stats.ActiveFeedback then
+                    antecedentLabel.Text = "via " .. tostring(stats.ActiveFeedback):sub(1,20)
+                else
+                    antecedentLabel.Text = ""
+                end
 
-                -- Heartbeat dot
-                if heartbeatDot then
-                    local alive = stats.HeartbeatAlive
-                    if alive then
-                        -- Pulse green
-                        tween(heartbeatDot, TweenInfo.new(0.4), {BackgroundColor3=COL.GREEN})
-                        task.wait(0.4)
-                        tween(heartbeatDot, TweenInfo.new(0.4), {BackgroundColor3=Color3.fromRGB(20,80,30)})
-                    else
-                        heartbeatDot.BackgroundColor3 = COL.RED
+                -- Origin chip
+                local pairs2 = ASE2.GetBedrockPairs and ASE2.GetBedrockPairs() or {}
+                local origin = nil
+                for _, p in ipairs(pairs2) do
+                    if p.sinkRemote == stats.ActiveSink then
+                        origin = p.origin; break
+                    end
+                end
+                if origin then
+                    local oLabel = ORIGIN_LABELS[origin] or origin:sub(1,16)
+                    local oColor = ORIGIN_COLORS[origin] or Color3.fromRGB(140,120,200)
+                    originChip.Text = oLabel
+                    originChip.TextColor3 = oColor
+                    addStroke(originChip, 1, 0)
+                    if originChip:FindFirstChildOfClass("UIStroke") then
+                        originChip:FindFirstChildOfClass("UIStroke").Color = oColor
                     end
                 end
 
-                -- Rebuild tx buffer
-                if panelShouldBeVisible then
-                    pcall(rebuildTxBuffer)
+                -- Mode chip
+                local modeCol = stats.Mode=="COMPILED" and COL.BLUE
+                             or stats.Mode=="RAW"      and COL.ORANGE
+                             or                            COL.PURP
+                modeChip.Text = stats.Mode or "—"
+                modeChip.TextColor3 = modeCol
+
+                -- Conf bar
+                local conf = stats.BedrockConf or 0
+                confTextLabel.Text = string.format("conf: %.0f%%", conf * 100)
+                tween(confFill, TweenInfo.new(0.4),
+                    {Size=UDim2.new(math.clamp(conf,0,1),0,1,0)})
+                local confCol = conf >= 0.9 and COL.GREEN
+                             or conf >= 0.5 and COL.AMBER
+                             or                 COL.RED
+                tween(confFill, TweenInfo.new(0.4), {BackgroundColor3=confCol})
+
+                -- Heartbeat pulse
+                if heartbeatDot then
+                    local alive = stats.HeartbeatAlive
+                    if alive then
+                        -- Dot pulses bright then dims
+                        tween(heartbeatDot, TweenInfo.new(0.25),
+                            {BackgroundColor3=COL.GREEN,
+                             Size=UDim2.new(0,14,0,14),
+                             Position=UDim2.new(0.5,-7,0.5,-7)})
+                        -- Ring expands and fades
+                        if hbRingStroke then
+                            tween(hbRing, TweenInfo.new(0.5),
+                                {Size=UDim2.new(0,36,0,36),
+                                 Position=UDim2.new(0.5,-18,0.5,-18)})
+                            tween(hbRingStroke, TweenInfo.new(0.5),
+                                {Color=COL.GREEN, Transparency=0.0})
+                        end
+                        task.wait(0.35)
+                        tween(heartbeatDot, TweenInfo.new(0.4),
+                            {BackgroundColor3=Color3.fromRGB(20,80,35),
+                             Size=UDim2.new(0,10,0,10),
+                             Position=UDim2.new(0.5,-5,0.5,-5)})
+                        if hbRingStroke then
+                            tween(hbRing, TweenInfo.new(0.6),
+                                {Size=UDim2.new(0,24,0,24),
+                                 Position=UDim2.new(0.5,-12,0.5,-12)})
+                            tween(hbRingStroke, TweenInfo.new(0.6), {Transparency=1.0})
+                        end
+                    else
+                        tween(heartbeatDot, TweenInfo.new(0.3),
+                            {BackgroundColor3=COL.RED,
+                             Size=UDim2.new(0,10,0,10),
+                             Position=UDim2.new(0.5,-5,0.5,-5)})
+                    end
                 end
+
+                -- Rebuild TxBuffer
+                if shouldShow then pcall(rebuildTxBuffer) end
             end
         end)
 
         -- ── MASTERY GATE OVERLAY ──────────────────────────────────────────────
-        -- Mastery gate lives in screenGui so it covers the full screen
         local _screenGui = _G.PCU and _G.PCU.screenGui
                            or game:GetService("Players").LocalPlayer
                               :WaitForChild("PlayerGui"):WaitForChild("PaperCuts_RAE", 10)
         local masteryGate = mk("Frame", {
             BackgroundColor3=Color3.fromRGB(8,8,12), BackgroundTransparency=0.05,
-            BorderSizePixel=0,
-            Size=UDim2.new(1,0,1,0),
-            Position=UDim2.new(0,0,0,0),
-            ZIndex=9999,
-            Visible=false,
+            BorderSizePixel=0, Size=UDim2.new(1,0,1,0),
+            Position=UDim2.new(0,0,0,0), ZIndex=9999, Visible=false,
             Parent=_screenGui or pageASE})
-        -- Blur handled by BlurEffect in Lighting
         local blur = Instance.new("BlurEffect")
         blur.Size = 0; blur.Parent = game:GetService("Lighting")
         mk("UIListLayout", {VerticalAlignment=Enum.VerticalAlignment.Center,
             HorizontalAlignment=Enum.HorizontalAlignment.Center,
             SortOrder=Enum.SortOrder.LayoutOrder,
             Padding=UDim.new(0,14), Parent=masteryGate})
-
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.GothamBold,
             Text="⚡  Autonomous Mastery",
             TextColor3=COL.PURP, TextSize=22,
@@ -1146,7 +1358,6 @@ do
             TextColor3=Color3.fromRGB(210,200,255), TextSize=14,
             Size=UDim2.new(0.75,0,0,22), TextXAlignment=Enum.TextXAlignment.Center,
             LayoutOrder=3, ZIndex=10000, Parent=masteryGate})
-
         local passphraseBox = mk("TextBox", {
             BackgroundColor3=Color3.fromRGB(20,18,28), BorderSizePixel=0,
             ClearTextOnFocus=false, Font=Enum.Font.GothamMedium,
@@ -1158,20 +1369,17 @@ do
         addCorner(passphraseBox, UDim.new(0,8))
         addStroke(passphraseBox, 1.5, 0.3)
         mk("UIPadding", {PaddingLeft=UDim.new(0,12), Parent=passphraseBox})
-
         local masterySubmitBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=COL.PURP, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="Unlock Autonomous Mastery",
             TextColor3=Color3.fromRGB(255,255,255), TextSize=12,
             Size=UDim2.new(0.5,0,0,38), LayoutOrder=5, ZIndex=10000, Parent=masteryGate})
         addCorner(masterySubmitBtn, UDim.new(0,10))
-
         local masteryCancelBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundTransparency=1, BorderSizePixel=0,
             Font=Enum.Font.GothamMedium, Text="Cancel",
             TextColor3=COL.MUTED, TextSize=11,
             Size=UDim2.new(0.3,0,0,28), LayoutOrder=6, ZIndex=10000, Parent=masteryGate})
-
         local masteryError = mk("TextLabel", {BackgroundTransparency=1,
             Font=Enum.Font.Code, Text="", TextColor3=COL.RED, TextSize=11,
             Size=UDim2.new(0.7,0,0,20), TextXAlignment=Enum.TextXAlignment.Center,
@@ -1182,7 +1390,6 @@ do
             tween(blur, TweenInfo.new(0.3), {Size = show and 24 or 0})
             if show then passphraseBox.Text = ""; masteryError.Text = "" end
         end
-
         masterySubmitBtn.MouseButton1Click:Connect(function()
             clickSound()
             local ASE2 = _G.PC.ASE
@@ -1192,11 +1399,6 @@ do
                 showMasteryGate(false)
                 ASE2.SetMode("MASTERY")
                 sendNotification("⚡ Autonomous Mastery unlocked.", "Success")
-                -- Flash the mode button purple
-                local mb = modeButtons and modeButtons["MASTERY"]
-                if mb then
-                    pulseClick(mb.btn)
-                end
             else
                 masteryError.Text = "Incorrect. Try again."
                 tween(passphraseBox, TweenInfo.new(0.05), {Position=UDim2.new(0.175,-8,0,0)})
@@ -1209,8 +1411,6 @@ do
         masteryCancelBtn.MouseButton1Click:Connect(function()
             clickSound(); showMasteryGate(false)
         end)
-
-        -- Poll for gate show request from mode buttons
         task.spawn(function()
             while true do
                 task.wait(0.2)
