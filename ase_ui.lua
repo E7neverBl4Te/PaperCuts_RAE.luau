@@ -70,7 +70,7 @@ do
     end
 
     -- ── Sub-tab system ─────────────────────────────────────────────────────────
-    local SUB_TABS = {"Overview","Goals","Bedrock","Directives","Panel"}
+    local SUB_TABS = {"Overview","Goals","Bedrock","Directives","AACG","Panel"}
     local subTabBtns  = {}
     local subTabPages = {}
     local activeSubTab = nil
@@ -107,13 +107,13 @@ do
         local btn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=Color3.fromRGB(225,220,212), BorderSizePixel=0,
             Size=UDim2.new(0,96,0,28), Font=Enum.Font.GothamMedium,
-            Text= isPanelTab and "⬛ Panel" or name,
+            Text= isPanelTab and "⬛ Panel" or (name == "AACG" and "⚡ AACG" or name),
             TextColor3=Color3.fromRGB(90,80,70),
             TextSize=11, Parent=tabBar})
         addCorner(btn, UDim.new(0,6)); addStroke(btn, 1, 0.4)
 
-        -- Panel tab is a raw Frame (not scroll) — we build it custom
-        if isPanelTab then
+        -- Panel and AACG tabs are raw Frames (not scroll) — built custom
+        if isPanelTab or name == "AACG" then
             local p = mk("Frame", {BackgroundColor3=COL.BG, BorderSizePixel=0,
                 Size=UDim2.new(1,0,1,0), ClipsDescendants=true,
                 Visible=false, Parent=subContent})
@@ -688,6 +688,434 @@ do
             clickSound(); pulseClick(btnRefD2.Button); doRefreshDirectives()
         end)
         subTabBtns["Directives"].MouseButton1Click:Connect(doRefreshDirectives)
+    end
+
+    
+    -- ── TAB: AACG — Autonomous Action Card Generator ─────────────────────────
+    do
+        local pg = subTabPages["AACG"]
+
+        -- Dark base background
+        pg.BackgroundColor3 = Color3.fromRGB(12, 11, 17)
+
+        local COL_AACG = {
+            BG       = Color3.fromRGB(12, 11, 17),
+            CARD_BG  = Color3.fromRGB(20, 19, 28),
+            CARD_BDR = Color3.fromRGB(38, 35, 52),
+            HEADER   = Color3.fromRGB(80, 75, 110),
+            TEXT     = Color3.fromRGB(210, 206, 235),
+            MUTED    = Color3.fromRGB(75, 70, 95),
+            TEAL     = Color3.fromRGB(40, 200, 155),
+            AMBER    = Color3.fromRGB(220, 165, 40),
+            RED      = Color3.fromRGB(220, 65, 65),
+            PURP     = Color3.fromRGB(150, 100, 240),
+            GOLD     = Color3.fromRGB(255, 195, 40),
+            BLUE     = Color3.fromRGB(80, 150, 240),
+            GREEN    = Color3.fromRGB(60, 200, 100),
+        }
+
+        -- Tier colors
+        local TIER_COL = {
+            LOCALIZED = COL_AACG.TEAL,
+            SERVER    = COL_AACG.BLUE,
+            OWNER     = COL_AACG.PURP,
+        }
+        local TIER_LABEL = {
+            LOCALIZED = "Localized Server-Side",
+            SERVER    = "Server-Side (All Players)",
+            OWNER     = "⚡ Game Owner Rights",
+        }
+
+        -- ── TOP BAR: tier + category selectors ─────────────────────────────────
+        local topBar = mk("Frame", {BackgroundColor3=Color3.fromRGB(16,15,22),
+            BorderSizePixel=0, Size=UDim2.new(1,0,0,82), Parent=pg})
+        addStroke(topBar, 1, 0.5)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,12), PaddingRight=UDim.new(0,12),
+            PaddingTop=UDim.new(0,8), PaddingBottom=UDim.new(0,6), Parent=topBar})
+        mk("UIListLayout", {Padding=UDim.new(0,8), Parent=topBar})
+
+        -- Tier selector row
+        local tierRowLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.GothamBold, Text="TIER",
+            TextColor3=COL_AACG.MUTED, TextSize=9,
+            Size=UDim2.new(1,0,0,12),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            LayoutOrder=1, Parent=topBar})
+
+        local tierRow = mk("Frame", {BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,26), LayoutOrder=2, Parent=topBar})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            Padding=UDim.new(0,6), VerticalAlignment=Enum.VerticalAlignment.Center,
+            Parent=tierRow})
+
+        -- Category selector row
+        local catRowLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.GothamBold, Text="CATEGORY",
+            TextColor3=COL_AACG.MUTED, TextSize=9,
+            Size=UDim2.new(1,0,0,12),
+            TextXAlignment=Enum.TextXAlignment.Left,
+            LayoutOrder=3, Parent=topBar})
+
+        local catRow = mk("Frame", {BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,24), LayoutOrder=4, Parent=topBar})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            Padding=UDim.new(0,5), VerticalAlignment=Enum.VerticalAlignment.Center,
+            Parent=catRow})
+
+        -- ── State ──────────────────────────────────────────────────────────────
+        local selectedTier = "LOCALIZED"
+        local selectedCat  = nil
+        local tierBtns     = {}
+        local catBtns      = {}
+        local currentCards = {}
+        local generatedLabel = nil
+
+        -- ── Tier chips ─────────────────────────────────────────────────────────
+        local TIERS = {"LOCALIZED", "SERVER", "OWNER"}
+        local CAT_MAP = {
+            LOCALIZED = {"Tools & Items", "Client Editing", "WorldState Control"},
+            SERVER    = {"Admin Tools", "Player Editing", "WorldState Control"},
+            OWNER     = {"Everything"},
+        }
+
+        local function refreshCatRow()
+            for _, c in ipairs(catRow:GetChildren()) do
+                if c:IsA("TextButton") then c:Destroy() end
+            end
+            catBtns = {}
+            selectedCat = nil
+            local cats = CAT_MAP[selectedTier] or {}
+            for _, cat in ipairs(cats) do
+                local cname = cat
+                local cb = mk("TextButton", {AutoButtonColor=false,
+                    BackgroundColor3=Color3.fromRGB(22,20,30), BorderSizePixel=0,
+                    Font=Enum.Font.GothamMedium, Text=cname,
+                    TextColor3=COL_AACG.MUTED, TextSize=10,
+                    Size=UDim2.new(0,0,1,0), AutomaticSize=Enum.AutomaticSize.X,
+                    Parent=catRow})
+                addCorner(cb, UDim.new(0,5))
+                addStroke(cb, 1, 0.5)
+                mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+                    Parent=cb})
+                catBtns[cname] = cb
+                local ccat = cname
+                cb.MouseButton1Click:Connect(function()
+                    clickSound()
+                    selectedCat = ccat
+                    for n, b in pairs(catBtns) do
+                        local active = (n == ccat)
+                        local tcol = TIER_COL[selectedTier] or COL_AACG.TEAL
+                        tween(b, TweenInfo.new(0.12), {
+                            BackgroundColor3 = active
+                                and Color3.fromRGB(28,26,38) or Color3.fromRGB(22,20,30),
+                            TextColor3 = active and tcol or COL_AACG.MUTED,
+                        })
+                        if b:FindFirstChildOfClass("UIStroke") then
+                            b:FindFirstChildOfClass("UIStroke").Color =
+                                active and tcol or COL_AACG.CARD_BDR
+                        end
+                    end
+                end)
+            end
+            -- Auto-select first category
+            if #cats > 0 then
+                catBtns[cats[1]].MouseButton1Click:Fire()
+            end
+        end
+
+        for _, tierKey in ipairs(TIERS) do
+            local tk = tierKey
+            local tcol = TIER_COL[tk]
+            local tb = mk("TextButton", {AutoButtonColor=false,
+                BackgroundColor3=Color3.fromRGB(22,20,30), BorderSizePixel=0,
+                Font=Enum.Font.GothamMedium, Text=TIER_LABEL[tk],
+                TextColor3=COL_AACG.MUTED, TextSize=10,
+                Size=UDim2.new(0,0,1,0), AutomaticSize=Enum.AutomaticSize.X,
+                Parent=tierRow})
+            addCorner(tb, UDim.new(0,5))
+            addStroke(tb, 1, 0.5)
+            mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+                Parent=tb})
+            tierBtns[tk] = tb
+            tb.MouseButton1Click:Connect(function()
+                clickSound()
+                -- Owner tier requires Mastery
+                if tk == "OWNER" then
+                    local ASE2 = _G.PC and _G.PC.ASE
+                    if not ASE2 or not ASE2.IsMasteryUnlocked() then
+                        sendNotification("⚡ Mastery required for Game Owner tier.", "Warning")
+                        return
+                    end
+                end
+                selectedTier = tk
+                for n, b in pairs(tierBtns) do
+                    local active = (n == tk)
+                    local ac = TIER_COL[n]
+                    tween(b, TweenInfo.new(0.12), {
+                        BackgroundColor3 = active
+                            and Color3.fromRGB(28,26,38) or Color3.fromRGB(22,20,30),
+                        TextColor3 = active and ac or COL_AACG.MUTED,
+                    })
+                    if b:FindFirstChildOfClass("UIStroke") then
+                        b:FindFirstChildOfClass("UIStroke").Color =
+                            active and ac or COL_AACG.CARD_BDR
+                    end
+                end
+                refreshCatRow()
+            end)
+        end
+
+        -- Select first tier by default
+        tierBtns["LOCALIZED"].MouseButton1Click:Fire()
+
+        -- ── GENERATE button bar ────────────────────────────────────────────────
+        local genBar = mk("Frame", {BackgroundColor3=Color3.fromRGB(16,15,22),
+            BorderSizePixel=0,
+            Position=UDim2.new(0,0,0,82), Size=UDim2.new(1,0,0,38),
+            Parent=pg})
+        addStroke(genBar, 1, 0.5)
+        mk("UIPadding", {PaddingLeft=UDim.new(0,12), PaddingRight=UDim.new(0,12),
+            PaddingTop=UDim.new(0,5), PaddingBottom=UDim.new(0,5), Parent=genBar})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,10), Parent=genBar})
+
+        local genBtn = mk("TextButton", {AutoButtonColor=false,
+            BackgroundColor3=COL_AACG.TEAL, BorderSizePixel=0,
+            Font=Enum.Font.GothamBold, Text="⚡ Generate Cards",
+            TextColor3=Color3.fromRGB(10,10,14), TextSize=11,
+            Size=UDim2.new(0,140,1,-8), Parent=genBar})
+        addCorner(genBtn, UDim.new(0,6))
+
+        generatedLabel = mk("TextLabel", {BackgroundTransparency=1,
+            Font=Enum.Font.Code, Text="Select a tier and category, then generate.",
+            TextColor3=COL_AACG.MUTED, TextSize=10,
+            Size=UDim2.new(1,-158,1,0),
+            TextXAlignment=Enum.TextXAlignment.Left, Parent=genBar})
+
+        -- ── CARD GRID ─────────────────────────────────────────────────────────
+        local cardScroll = mk("ScrollingFrame", {
+            BackgroundColor3=COL_AACG.BG, BorderSizePixel=0,
+            Position=UDim2.new(0,0,0,120), Size=UDim2.new(1,0,1,-120),
+            ScrollBarThickness=3, CanvasSize=UDim2.new(0,0,0,0),
+            AutomaticCanvasSize=Enum.AutomaticSize.Y,
+            ScrollingDirection=Enum.ScrollingDirection.Y,
+            ScrollBarImageColor3=Color3.fromRGB(50,48,70),
+            Parent=pg})
+        mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+            PaddingTop=UDim.new(0,10), PaddingBottom=UDim.new(0,10), Parent=cardScroll})
+        mk("UIGridLayout", {CellSize=UDim2.new(0.5,-6,0,96),
+            CellPadding=UDim2.new(0,8,0,8),
+            FillDirection=Enum.FillDirection.Horizontal,
+            HorizontalAlignment=Enum.HorizontalAlignment.Left,
+            SortOrder=Enum.SortOrder.LayoutOrder,
+            Parent=cardScroll})
+
+        -- ── Card builder ───────────────────────────────────────────────────────
+        local function buildCard(card, idx)
+            local AACG2   = _G.PC and _G.PC.AACG
+            local tierCol = TIER_COL[card.tier] or COL_AACG.TEAL
+            local confPct = math.clamp(card.confidence, 0, 1)
+            local confCol = confPct >= 0.75 and COL_AACG.GREEN
+                         or confPct >= 0.45 and COL_AACG.AMBER
+                         or                     COL_AACG.RED
+
+            local cFrame = mk("Frame", {BackgroundColor3=COL_AACG.CARD_BG,
+                BorderSizePixel=0, LayoutOrder=idx, Parent=cardScroll})
+            addCorner(cFrame, UDim.new(0,8))
+            addStroke(cFrame, 1, 0)
+            if cFrame:FindFirstChildOfClass("UIStroke") then
+                cFrame:FindFirstChildOfClass("UIStroke").Color = COL_AACG.CARD_BDR
+            end
+
+            -- Left tier accent strip
+            local strip = mk("Frame", {BackgroundColor3=tierCol,
+                BorderSizePixel=0, Size=UDim2.new(0,3,1,0), Parent=cFrame})
+            addCorner(strip, UDim.new(0,4))
+
+            local body = mk("Frame", {BackgroundTransparency=1, BorderSizePixel=0,
+                Position=UDim2.new(0,10,0,0), Size=UDim2.new(1,-14,1,0),
+                Parent=cFrame})
+            mk("UIPadding", {PaddingTop=UDim.new(0,7), PaddingBottom=UDim.new(0,7),
+                PaddingRight=UDim.new(0,4), Parent=body})
+            mk("UIListLayout", {Padding=UDim.new(0,3), Parent=body})
+
+            -- Card name + favorite star
+            local nameRow = mk("Frame", {BackgroundTransparency=1,
+                Size=UDim2.new(1,0,0,16), LayoutOrder=1, Parent=body})
+            mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+                VerticalAlignment=Enum.VerticalAlignment.Center,
+                Padding=UDim.new(0,4), Parent=nameRow})
+
+            local nameLabel = mk("TextLabel", {BackgroundTransparency=1,
+                Font=Enum.Font.GothamBold, Text=card.name:sub(1,22),
+                TextColor3=COL_AACG.TEXT, TextSize=11,
+                Size=UDim2.new(1,-22,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=nameRow})
+
+            local starBtn = mk("TextButton", {AutoButtonColor=false,
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Font=Enum.Font.GothamBold,
+                Text= card.favorited and "⭐" or "☆",
+                TextColor3= card.favorited and COL_AACG.GOLD or COL_AACG.MUTED,
+                TextSize=14, Size=UDim2.new(0,18,1,0),
+                TextXAlignment=Enum.TextXAlignment.Center, Parent=nameRow})
+
+            -- Description
+            mk("TextLabel", {BackgroundTransparency=1,
+                Font=Enum.Font.Code, Text=card.description:sub(1,72),
+                TextColor3=COL_AACG.MUTED, TextSize=9,
+                TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left,
+                Size=UDim2.new(1,0,0,22), LayoutOrder=2, Parent=body})
+
+            -- Remote + conf row
+            local metaRow = mk("Frame", {BackgroundTransparency=1,
+                Size=UDim2.new(1,0,0,14), LayoutOrder=3, Parent=body})
+            mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+                VerticalAlignment=Enum.VerticalAlignment.Center,
+                Padding=UDim.new(0,6), Parent=metaRow})
+
+            mk("TextLabel", {BackgroundTransparency=1,
+                Font=Enum.Font.Code, Text=card.remote:sub(1,18),
+                TextColor3=tierCol, TextSize=9,
+                Size=UDim2.new(1,-50,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=metaRow})
+
+            mk("TextLabel", {BackgroundTransparency=1,
+                Font=Enum.Font.Code,
+                Text=string.format("%.0f%%", confPct*100),
+                TextColor3=confCol, TextSize=9,
+                Size=UDim2.new(0,44,1,0),
+                TextXAlignment=Enum.TextXAlignment.Right, Parent=metaRow})
+
+            -- Fire button
+            local fireBtn = mk("TextButton", {AutoButtonColor=false,
+                BackgroundColor3=tierCol, BorderSizePixel=0,
+                Font=Enum.Font.GothamBold, Text="▶ Fire",
+                TextColor3=Color3.fromRGB(10,10,14), TextSize=10,
+                Size=UDim2.new(1,0,0,20), LayoutOrder=4, Parent=body})
+            addCorner(fireBtn, UDim.new(0,5))
+
+            -- Favorite toggle logic
+            starBtn.MouseButton1Click:Connect(function()
+                clickSound()
+                if AACG2 then
+                    if card.favorited then
+                        AACG2.Unfavorite(card)
+                        starBtn.Text = "☆"
+                        starBtn.TextColor3 = COL_AACG.MUTED
+                        tween(cFrame:FindFirstChildOfClass("UIStroke"), TweenInfo.new(0.2),
+                            {Color=COL_AACG.CARD_BDR, Thickness=1})
+                    else
+                        AACG2.Favorite(card)
+                        starBtn.Text = "⭐"
+                        starBtn.TextColor3 = COL_AACG.GOLD
+                        tween(cFrame:FindFirstChildOfClass("UIStroke"), TweenInfo.new(0.2),
+                            {Color=COL_AACG.GOLD, Thickness=1.5})
+                        sendNotification("⭐ Favorited: " .. card.name, "Success")
+                    end
+                end
+            end)
+
+            -- Fire logic
+            fireBtn.MouseButton1Click:Connect(function()
+                clickSound(); pulseClick(fireBtn)
+                fireBtn.Text = "Firing..."
+                fireBtn.BackgroundColor3 = COL_AACG.AMBER
+                if AACG2 then
+                    AACG2.Execute(card, function(ok, msg)
+                        if ok then
+                            fireBtn.Text = "✓ Done"
+                            tween(fireBtn, TweenInfo.new(0.2),
+                                {BackgroundColor3=COL_AACG.GREEN})
+                            sendNotification("✓ " .. card.name .. " executed.", "Success")
+                        else
+                            fireBtn.Text = "✗ Failed"
+                            tween(fireBtn, TweenInfo.new(0.2),
+                                {BackgroundColor3=COL_AACG.RED})
+                            sendNotification("✗ " .. tostring(msg):sub(1,48), "Warning")
+                        end
+                        -- Reset button after 2.5s
+                        task.delay(2.5, function()
+                            fireBtn.Text = "▶ Fire"
+                            tween(fireBtn, TweenInfo.new(0.3),
+                                {BackgroundColor3=tierCol})
+                        end)
+                    end)
+                end
+            end)
+
+            -- Highlight favorited cards on spawn
+            if card.favorited then
+                if cFrame:FindFirstChildOfClass("UIStroke") then
+                    cFrame:FindFirstChildOfClass("UIStroke").Color = COL_AACG.GOLD
+                    cFrame:FindFirstChildOfClass("UIStroke").Thickness = 1.5
+                end
+            end
+
+            return cFrame
+        end
+
+        -- ── Generate button logic ──────────────────────────────────────────────
+        genBtn.MouseButton1Click:Connect(function()
+            clickSound(); pulseClick(genBtn)
+
+            if not selectedTier or not selectedCat then
+                generatedLabel.Text = "Select a tier and category first."
+                generatedLabel.TextColor3 = COL_AACG.AMBER
+                return
+            end
+
+            genBtn.Text = "Generating..."
+            genBtn.BackgroundColor3 = COL_AACG.AMBER
+
+            -- Clear existing cards
+            for _, c in ipairs(cardScroll:GetChildren()) do
+                if c:IsA("Frame") then c:Destroy() end
+            end
+
+            task.spawn(function()
+                local AACG2 = _G.PC and _G.PC.AACG
+                if not AACG2 then
+                    generatedLabel.Text = "AACG module not loaded."
+                    generatedLabel.TextColor3 = COL_AACG.RED
+                    genBtn.Text = "⚡ Generate Cards"
+                    genBtn.BackgroundColor3 = COL_AACG.TEAL
+                    return
+                end
+
+                local ASE2   = _G.PC and _G.PC.ASE
+                local mastery = ASE2 and ASE2.IsMasteryUnlocked() or false
+                local cards, err = AACG2.Generate(selectedTier, selectedCat, mastery)
+
+                currentCards = cards
+
+                if err or #cards == 0 then
+                    local msg = err or "No cards generated for this category."
+                    generatedLabel.Text = msg
+                    generatedLabel.TextColor3 = COL_AACG.AMBER
+                    genBtn.Text = "⚡ Generate Cards"
+                    genBtn.BackgroundColor3 = COL_AACG.TEAL
+                    return
+                end
+
+                -- Populate grid
+                for i, card in ipairs(cards) do
+                    pcall(buildCard, card, i)
+                end
+
+                -- Update gen label
+                local favCount = 0
+                for _, c in ipairs(cards) do if c.favorited then favCount=favCount+1 end end
+                generatedLabel.Text = string.format(
+                    "%d card(s) generated  •  %d favorited",
+                    #cards, favCount)
+                generatedLabel.TextColor3 = TIER_COL[selectedTier] or COL_AACG.TEAL
+
+                genBtn.Text = "⚡ Generate Cards"
+                tween(genBtn, TweenInfo.new(0.3), {BackgroundColor3=COL_AACG.TEAL})
+            end)
+        end)
     end
 
     -- ── TAB: Panel — Script Execution Panel ────────────────────────────────────
