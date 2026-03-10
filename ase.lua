@@ -972,18 +972,36 @@ end
 
 -- ── Two-Stage Sequencer ───────────────────────────────────────────────────────
 
--- Watch LingerWatch snapshots for stun signature (WalkSpeed=0, JumpPower=0)
-local function TSS_WaitForStun(remoteName, timeout)
+-- Capture live physics state — used as pre-fire baseline to detect genuine
+-- drops to zero rather than leftover state from prior steering/nudge phases.
+local function TSS_PhysicsBaseline()
+    local Players = game:GetService("Players")
+    local lp   = Players and Players.LocalPlayer
+    local char = lp and lp.Character
+    local hum  = char and char:FindFirstChildOfClass("Humanoid")
+    return {
+        walkSpeed = hum and hum.WalkSpeed or 16,
+        jumpPower = hum and hum.JumpPower or 50,
+    }
+end
+
+-- Stun watch: compares live Humanoid values against pre-fire baseline.
+-- Only returns true when values DROPPED from a non-zero baseline to zero —
+-- confirming the server stunned the character AFTER Stage 1 fired.
+local function TSS_WaitForStun(timeout, baseline)
+    local Players = game:GetService("Players")
+    local lp = Players and Players.LocalPlayer
     local t0 = os.clock()
     while (os.clock() - t0) < timeout do
         task.wait(0.05)
-        local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
-        for _, d in ipairs(deltas) do
-            if d.key == "CHAR:HUM.WalkSpeed" and (d.to or 999) == 0 then
-                return true, "WalkSpeed=0"
+        local char = lp and lp.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if hum.WalkSpeed == 0 and (baseline.walkSpeed or 0) > 0 then
+                return true, string.format("WalkSpeed 0 (was %.0f)", baseline.walkSpeed)
             end
-            if d.key == "CHAR:HUM.JumpPower" and (d.to or 999) == 0 then
-                return true, "JumpPower=0"
+            if hum.JumpPower == 0 and (baseline.jumpPower or 0) > 0 then
+                return true, string.format("JumpPower 0 (was %.0f)", baseline.jumpPower)
             end
         end
     end
@@ -1044,133 +1062,169 @@ function ASE_TwoStageSequencer.Run(targetRemote, onResolved)
             i, c.name, c.score, c.confidence, c.jaccardSim, c.source))
     end
 
-    local top = candidates[1]
-    print(string.format("[TSS] Selected Stage 1: %s (score=%.3f)", top.name, top.score))
+    -- Prioritise CDG-sourced and Jaccard-nonzero candidates; PR_FALLBACK
+    -- zero-score entries go last. Cap at 4 attempts to avoid flooding.
+    local ordered = {}
+    for _, c in ipairs(candidates) do
+        if c.source == "CDG" or c.jaccardSim > 0 then
+            table.insert(ordered, 1, c)
+        else
+            table.insert(ordered, c)
+        end
+    end
+    local maxAttempts = math.min(4, #ordered)
 
     ASE_AppendTx({
-        directive  = string.format("TWO-STAGE SEQUENCE: %s -> %s", top.name, targetRemote),
-        rawPayload = { stage1 = top.name, stage2 = targetRemote },
-        result     = string.format("Stage 1 candidate: %s (conf=%.2f jaccard=%.2f)",
-            top.name, top.confidence, top.jaccardSim),
+        directive  = string.format("TWO-STAGE: -> %s", targetRemote),
+        rawPayload = { candidates = maxAttempts },
+        result     = string.format("Cycling %d antecedent candidate(s)", maxAttempts),
     })
 
     task.spawn(function()
-        -- Ensure LingerWatch is active for stun detection
         ASE_LingerWatch.Start(targetRemote)
+        local sequenceResolved = false
 
-        -- ── STAGE 1: Fire the antecedent ("The Key") ──────────────────────
-        local prRec1   = PR[top.name]
-        local rsmRec1  = RSM and RSM.Get(top.name)
-        local args1    = {}
-        if rsmRec1 and rsmRec1.ArgSig then
-            for i, sig in ipairs(rsmRec1.ArgSig) do
-                if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
-                    args1[i] = sig.SuccessValues[1]
-                elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
-                    args1[i] = sig.SuccessStrings[1]
-                elseif sig.DominantType == "boolean" then
-                    args1[i] = true
+        for attemptIdx = 1, maxAttempts do
+            if sequenceResolved then break end
+            if ASE.Panel.HeartbeatAlive or
+               (ASE_BedrockPairs[targetRemote] and
+                ASE_BedrockPairs[targetRemote].confidence >= 0.90) then
+                break
+            end
+
+            local top = ordered[attemptIdx]
+            print(string.format("[TSS] Attempt %d/%d — Stage 1: %s (score=%.3f jaccard=%.2f src=%s)",
+                attemptIdx, maxAttempts, top.name, top.score, top.jaccardSim, top.source))
+
+            -- Build Stage 1 args from RSM
+            local rsmRec1 = RSM and RSM.Get(top.name)
+            local args1   = {}
+            if rsmRec1 and rsmRec1.ArgSig then
+                for i, sig in ipairs(rsmRec1.ArgSig) do
+                    if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
+                        args1[i] = sig.SuccessValues[1]
+                    elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
+                        args1[i] = sig.SuccessStrings[1]
+                    elseif sig.DominantType == "boolean" then
+                        args1[i] = true
+                    end
                 end
             end
-        end
 
-        print(string.format("[TSS] Firing Stage 1: %s", top.name))
-        local w1, s1, e1 = SARP.Build("Attribute", args1, nil, nil, top.name)
-        if w1 then
-            SARP.Execute(w1, s1, top.name, function(ok, result, err)
-                print(string.format("[TSS] Stage 1 result: %s", ok and "OK" or tostring(err)))
-            end)
-        else
-            print(string.format("[TSS] Stage 1 SARP.Build failed: %s", tostring(e1)))
-        end
+            -- Fresh physics baseline BEFORE Stage 1 fires — prevents false
+            -- stun detection from leftover zeroes of prior steering/nudge phases
+            local baseline = TSS_PhysicsBaseline()
+            print(string.format("[TSS] Pre-fire baseline: WalkSpeed=%.0f JumpPower=%.0f",
+                baseline.walkSpeed, baseline.jumpPower))
 
-        -- ── STUN WATCH: Wait for server to stun the character ─────────────
-        -- Stun (WalkSpeed=0, JumpPower=0) confirms Stage 1 was accepted and
-        -- the server is in the preparation phase. Max wait: 3s.
-        local stunned, stunKey = TSS_WaitForStun(targetRemote, 3.0)
-        if stunned then
-            print(string.format("[TSS] Stun detected (%s) — firing Stage 2 immediately.",
-                stunKey))
-        else
-            print("[TSS] No stun detected after Stage 1 — firing Stage 2 anyway.")
-        end
-
-        -- ── STAGE 2: Fire the target remote ("The Lock") ──────────────────
-        -- Fire immediately after stun — the server is in preparation phase
-        -- and waiting for a transaction ID or destination key. The Stage 2
-        -- payload carries the SARP-optimized args for the target remote.
-        local rsmRec2 = RSM and RSM.Get(targetRemote)
-        local args2   = {}
-        if rsmRec2 and rsmRec2.ArgSig then
-            for i, sig in ipairs(rsmRec2.ArgSig) do
-                if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
-                    args2[i] = sig.SuccessValues[1]
-                elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
-                    args2[i] = sig.SuccessStrings[1]
-                elseif sig.DominantType == "boolean" then
-                    args2[i] = true
+            -- Skip this candidate if character is already stunned — the stun
+            -- watch would immediately return true before Stage 1 even fires
+            if baseline.walkSpeed == 0 or baseline.jumpPower == 0 then
+                print(string.format("[TSS] Skipping %s — character already stunned. Waiting 2s.",
+                    top.name))
+                task.wait(2.0)
+                baseline = TSS_PhysicsBaseline()
+                if baseline.walkSpeed == 0 and baseline.jumpPower == 0 then
+                    print("[TSS] Stun persists after 2s — aborting sequence.")
+                    break
                 end
             end
-        end
 
-        print(string.format("[TSS] Firing Stage 2: %s", targetRemote))
-        local w2, s2, e2 = SARP.Build("Attribute", args2, nil, nil, targetRemote)
-        if w2 then
-            SARP.Execute(w2, s2, targetRemote, function(ok, result, err)
-                print(string.format("[TSS] Stage 2 result: %s err=%s",
-                    ok and "OK" or "FAIL", tostring(err)))
-            end)
-        else
-            print(string.format("[TSS] Stage 2 SARP.Build failed: %s", tostring(e2)))
-        end
-
-        -- ── RESOLUTION WATCH: Look for CFrame delta (teleport executed) ───
-        local teleported, teleKey = TSS_WaitForTeleport(targetRemote, 5.0)
-
-        if teleported then
-            print(string.format(
-                "[TSS] TWO-STAGE COMPLETE: %s resolved — %s",
-                targetRemote, teleKey))
-
-            -- Lock as Bedrock
-            ASE_BedrockPairs[targetRemote] = {
-                sinkRemote     = targetRemote,
-                feedbackRemote = top.name,
-                nonce          = nil,
-                confirmedAt    = os.clock(),
-                cargo          = {},
-                confidence     = 0.95,
-                origin         = "TWO_STAGE_SEQUENCE",
-                antecedent     = top.name,
-                resolvedBy     = teleKey,
-            }
-            ASE.Panel.Visible        = true
-            ASE.Panel.ActiveSink     = targetRemote
-            ASE.Panel.ActiveFeedback = top.name
-            ASE.Panel.BedrockConf    = 0.95
-            ASE.Panel.HeartbeatAlive = true
-
-            local CSK = _G.PC.CSK
-            if CSK then
-                CSK.Annotate(targetRemote, string.format(
-                    "BEDROCK via TWO_STAGE: key=%s lock=%s", top.name, targetRemote))
+            -- Fire Stage 1
+            print(string.format("[TSS] Firing Stage 1: %s", top.name))
+            local w1, s1, e1 = SARP.Build("Attribute", args1, nil, nil, top.name)
+            if w1 then
+                SARP.Execute(w1, s1, top.name, function(ok, result, err)
+                    print(string.format("[TSS] Stage 1 result: %s", ok and "OK" or tostring(err)))
+                end)
+            else
+                print(string.format("[TSS] Stage 1 SARP.Build failed: %s", tostring(e1)))
             end
 
-            ASE_AppendTx({
-                directive  = "TWO-STAGE COMPLETE",
-                rawPayload = { antecedent=top.name, resolvedBy=teleKey },
-                result     = string.format("BEDROCK [TWO_STAGE] — %s", teleKey),
-            })
+            -- Stun watch — compares against the baseline taken above
+            local stunned, stunKey = TSS_WaitForStun(3.0, baseline)
+            if stunned then
+                print(string.format("[TSS] Stun detected (%s) — firing Stage 2.", stunKey))
+            else
+                print(string.format("[TSS] No stun after Stage 1 (%s) — firing Stage 2 anyway.", top.name))
+            end
 
-            ASE_LingerWatch.Stop(targetRemote)
-            if onResolved then onResolved(top.name, teleKey) end
-        else
-            print(string.format("[TSS] Two-stage exhausted on %s — no teleport detected.",
-                targetRemote))
+            -- Build and fire Stage 2
+            local rsmRec2 = RSM and RSM.Get(targetRemote)
+            local args2   = {}
+            if rsmRec2 and rsmRec2.ArgSig then
+                for i, sig in ipairs(rsmRec2.ArgSig) do
+                    if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
+                        args2[i] = sig.SuccessValues[1]
+                    elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
+                        args2[i] = sig.SuccessStrings[1]
+                    elseif sig.DominantType == "boolean" then
+                        args2[i] = true
+                    end
+                end
+            end
+
+            print(string.format("[TSS] Firing Stage 2: %s", targetRemote))
+            local w2, s2, e2 = SARP.Build("Attribute", args2, nil, nil, targetRemote)
+            if w2 then
+                SARP.Execute(w2, s2, targetRemote, function(ok, result, err)
+                    print(string.format("[TSS] Stage 2 result: %s err=%s",
+                        ok and "OK" or "FAIL", tostring(err)))
+                end)
+            else
+                print(string.format("[TSS] Stage 2 SARP.Build failed: %s", tostring(e2)))
+            end
+
+            -- Resolution watch: CFrame delta > 5 studs = teleport executed
+            local teleported, teleKey = TSS_WaitForTeleport(targetRemote, 4.0)
+            if teleported then
+                sequenceResolved = true
+                print(string.format("[TSS] TWO-STAGE COMPLETE: %s via %s — %s",
+                    targetRemote, top.name, teleKey))
+
+                ASE_BedrockPairs[targetRemote] = {
+                    sinkRemote     = targetRemote,
+                    feedbackRemote = top.name,
+                    nonce          = nil,
+                    confirmedAt    = os.clock(),
+                    cargo          = {},
+                    confidence     = 0.95,
+                    origin         = "TWO_STAGE_SEQUENCE",
+                    antecedent     = top.name,
+                    resolvedBy     = teleKey,
+                }
+                ASE.Panel.Visible        = true
+                ASE.Panel.ActiveSink     = targetRemote
+                ASE.Panel.ActiveFeedback = top.name
+                ASE.Panel.BedrockConf    = 0.95
+                ASE.Panel.HeartbeatAlive = true
+
+                local CSK = _G.PC.CSK
+                if CSK then
+                    CSK.Annotate(targetRemote, string.format(
+                        "BEDROCK via TWO_STAGE: key=%s lock=%s", top.name, targetRemote))
+                end
+                ASE_AppendTx({
+                    directive  = "TWO-STAGE COMPLETE",
+                    rawPayload = { antecedent=top.name, resolvedBy=teleKey },
+                    result     = string.format("BEDROCK [TWO_STAGE:%s]", top.name),
+                })
+                ASE_LingerWatch.Stop(targetRemote)
+                if onResolved then onResolved(top.name, teleKey) end
+            else
+                print(string.format("[TSS] Attempt %d/%d no resolution — next candidate.",
+                    attemptIdx, maxAttempts))
+                task.wait(1.5)
+            end
+        end
+
+        if not sequenceResolved then
+            print(string.format("[TSS] All %d candidate(s) exhausted on %s.",
+                maxAttempts, targetRemote))
             ASE_AppendTx({
-                directive  = string.format("TWO-STAGE FAILED: %s", targetRemote),
-                rawPayload = { antecedent = top.name },
-                result     = "Sequence fired — no CFrame resolution detected.",
+                directive  = string.format("TWO-STAGE EXHAUSTED: %s", targetRemote),
+                rawPayload = {},
+                result     = "CDG needs passive observation — run CDG Primer.",
             })
             ASE_LingerWatch.Stop(targetRemote)
         end
