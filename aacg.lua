@@ -324,81 +324,69 @@ function AACG.Generate(tier, category, masteryUnlocked)
         local sbiRec = SBI and SBI.Get and SBI.Get(name)
         local prRec  = PR[name]
 
-        -- Skip S2C-only remotes (server → client, not fireable by us)
-        if prRec and prRec.Direction == "S2C" then
-            -- only include for LOCALIZED tier (server pushes to our client)
-            if tier ~= AACG.TIER.LOCALIZED and tier ~= AACG.TIER.OWNER then
-                goto continue_remote
+        -- Gate: S2C-only remotes only allowed for LOCALIZED / OWNER tier
+        local s2cBlocked = prRec and prRec.Direction == "S2C"
+            and tier ~= AACG.TIER.LOCALIZED
+            and tier ~= AACG.TIER.OWNER
+
+        -- Gate: no RSM record → can't build a payload (except OWNER)
+        local noRsmBlocked = not rsmRec and tier ~= AACG.TIER.OWNER
+
+        if not s2cBlocked and not noRsmBlocked then
+            -- OWNER tier: include everything, no classifier needed
+            if tier == AACG.TIER.OWNER and masteryUnlocked then
+                local conf = (sbiRec and sbiRec.Confidence) or 0.5
+                local args = buildArgs(rsmRec)
+                local id   = cardId(name, AACG.CATEGORY.EVERYTHING)
+                local card = {
+                    id          = id,
+                    name        = humanizeName(name),
+                    remote      = name,
+                    description = inferDescription(name, AACG.CATEGORY.EVERYTHING,
+                                    rsmRec and rsmRec.ArgSig),
+                    category    = AACG.CATEGORY.EVERYTHING,
+                    tier        = AACG.TIER.OWNER,
+                    args        = args,
+                    confidence  = conf,
+                    favorited   = AACG_Favorites[name] ~= nil,
+                    generatedAt = os.clock(),
+                    argCount    = rsmRec and #(rsmRec.ArgSig or {}) or 0,
+                }
+                table.insert(cards, card)
+                AACG_Cards[id] = card
+            else
+                -- Classify and filter by tier + category
+                local cls = classifyRemote(name, prRec)
+                if cls and cls.tier == tier and cls.category == category then
+                    local conf = (sbiRec and sbiRec.Confidence) or
+                                 (cls.score / 20.0)
+                    conf = math.clamp(conf, 0.1, 1.0)
+
+                    -- Suppress very low confidence
+                    if conf >= 0.25 then
+                        local args = buildArgs(rsmRec)
+                        local id   = cardId(name, category)
+                        local card = {
+                            id          = id,
+                            name        = humanizeName(name),
+                            remote      = name,
+                            description = inferDescription(name, category,
+                                            rsmRec and rsmRec.ArgSig),
+                            category    = category,
+                            tier        = tier,
+                            args        = args,
+                            confidence  = conf,
+                            favorited   = AACG_Favorites[name] ~= nil,
+                            generatedAt = os.clock(),
+                            argCount    = rsmRec and #(rsmRec.ArgSig or {}) or 0,
+                            classScore  = cls.score,
+                        }
+                        table.insert(cards, card)
+                        AACG_Cards[id] = card
+                    end
+                end
             end
         end
-
-        -- Skip if no RSM record (we have no arg data — can't build payload)
-        if not rsmRec and tier ~= AACG.TIER.OWNER then
-            goto continue_remote
-        end
-
-        -- OWNER tier: include everything
-        if tier == AACG.TIER.OWNER and masteryUnlocked then
-            local conf = (sbiRec and sbiRec.Confidence) or 0.5
-            local args = buildArgs(rsmRec)
-            local id   = cardId(name, AACG.CATEGORY.EVERYTHING)
-            local card = {
-                id          = id,
-                name        = humanizeName(name),
-                remote      = name,
-                description = inferDescription(name, AACG.CATEGORY.EVERYTHING,
-                                rsmRec and rsmRec.ArgSig),
-                category    = AACG.CATEGORY.EVERYTHING,
-                tier        = AACG.TIER.OWNER,
-                args        = args,
-                confidence  = conf,
-                favorited   = AACG_Favorites[name] ~= nil,
-                generatedAt = os.clock(),
-                argCount    = rsmRec and #(rsmRec.ArgSig or {}) or 0,
-            }
-            table.insert(cards, card)
-            AACG_Cards[id] = card
-            goto continue_remote
-        end
-
-        -- Classify the remote
-        do
-            local cls = classifyRemote(name, prRec)
-            if not cls then goto continue_remote end
-            if cls.tier ~= tier then goto continue_remote end
-            if cls.category ~= category then goto continue_remote end
-
-            local conf = (sbiRec and sbiRec.Confidence) or
-                         (cls.score / 20.0)
-            conf = math.clamp(conf, 0.1, 1.0)
-
-            -- Suppress very low confidence unless Owner
-            if conf < 0.25 and tier ~= AACG.TIER.OWNER then
-                goto continue_remote
-            end
-
-            local args = buildArgs(rsmRec)
-            local id   = cardId(name, category)
-            local card = {
-                id          = id,
-                name        = humanizeName(name),
-                remote      = name,
-                description = inferDescription(name, category,
-                                rsmRec and rsmRec.ArgSig),
-                category    = category,
-                tier        = tier,
-                args        = args,
-                confidence  = conf,
-                favorited   = AACG_Favorites[name] ~= nil,
-                generatedAt = os.clock(),
-                argCount    = rsmRec and #(rsmRec.ArgSig or {}) or 0,
-                classScore  = cls.score,
-            }
-            table.insert(cards, card)
-            AACG_Cards[id] = card
-        end
-
-        ::continue_remote::
     end
 
     -- Sort: favorites first, then by confidence desc, then by classScore desc
