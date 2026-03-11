@@ -296,14 +296,27 @@ local function walkService(serviceEntry, allRemotes, instanceCount)
 
             -- ── Phase 2: Deep extraction by class ─────────────────────────────
 
-            -- ModuleScript: read source
+            -- ModuleScript: read source (may be unavailable in executor context)
             if className == "ModuleScript" then
-                local src = safeProp(child, "Source")
-                if src and #src > 0 then
-                    node.source = src:sub(1, MAX_SOURCE_BYTES)
+                local msrc = safeProp(child, "Source")
+                if msrc and #msrc > 0 then
+                    node.source = msrc:sub(1, MAX_SOURCE_BYTES)
                     node.sourceAnalysis = analyzeSource(node.source)
                 else
-                    node.sourceAnalysis = { empty=true }
+                    -- Source not exposed — record module presence with stub analysis
+                    node.sourceAnalysis = {
+                        empty        = false,
+                        unavailable  = true,
+                        lineCount    = 0,
+                        byteCount    = 0,
+                        functions    = {},
+                        remoteRefs   = {},
+                        datastoreRefs= {},
+                        httpRefs     = {},
+                        requireChain = {},
+                        globalWrites = {},
+                        suspiciousKeys={},
+                    }
                 end
 
             -- Value objects: capture live value
@@ -462,10 +475,11 @@ local function synthesize(serviceMap, allRemotes)
         for _, node in ipairs(svcNodes) do
             if node.className == "ModuleScript" and node.sourceAnalysis and not node.sourceAnalysis.empty then
                 table.insert(moduleIndex, {
-                    name     = node.name,
-                    path     = node.path,
-                    analysis = node.sourceAnalysis,
-                    source   = node.source,
+                    name        = node.name,
+                    path        = node.path,
+                    analysis    = node.sourceAnalysis,
+                    source      = node.source,
+                    unavailable = node.sourceAnalysis.unavailable,
                 })
             end
         end

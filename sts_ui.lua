@@ -987,14 +987,16 @@ do
             scanBtn.TextColor3 = Color3.fromRGB(10,10,14)
             scanBtn.Text = "◈  Decompile Server"
             if scanBtnStroke then
-                tween(scanBtnStroke, TweenInfo.new(0.3), {Color=C.TEAL, Transparency=0.3})
+                tween(scanBtnStroke, TweenInfo.new(0.3), {Color=C.TEAL})
+                tween(scanBtnStroke, TweenInfo.new(0.3), {Transparency=0.3})
             end
         else
             tween(scanBtn, TweenInfo.new(0.3), {BackgroundColor3=C.DIM})
             scanBtn.TextColor3 = C.MUTED
             scanBtn.Text = "⬛  Decompile Server"
             if scanBtnStroke then
-                tween(scanBtnStroke, TweenInfo.new(0.3), {Color=C.BORDER, Transparency=0.5})
+                tween(scanBtnStroke, TweenInfo.new(0.3), {Color=C.BORDER})
+                tween(scanBtnStroke, TweenInfo.new(0.3), {Transparency=0.5})
             end
         end
     end
