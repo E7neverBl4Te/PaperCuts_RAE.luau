@@ -121,6 +121,328 @@ do
 
     pageSTS.BackgroundColor3 = C.BG
 
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- VIEW SOURCE OVERLAY
+    -- ══════════════════════════════════════════════════════════════════════════
+    local viewerOverlay = mk("Frame", {
+        BackgroundColor3=Color3.fromRGB(8,7,12), BorderSizePixel=0,
+        Size=UDim2.new(1,0,1,0), ZIndex=20,
+        Visible=false, Parent=pageSTS})
+    addStroke(viewerOverlay, 1, 0.3)
+
+    local vHeader = mk("Frame", {
+        BackgroundColor3=Color3.fromRGB(14,13,20), BorderSizePixel=0,
+        Size=UDim2.new(1,0,0,40), ZIndex=20, Parent=viewerOverlay})
+    addStroke(vHeader, 1, 0.5)
+    mk("UIPadding", {PaddingLeft=UDim.new(0,14), PaddingRight=UDim.new(0,10),
+        PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6), Parent=vHeader})
+    mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+        VerticalAlignment=Enum.VerticalAlignment.Center,
+        Padding=UDim.new(0,8), Parent=vHeader})
+
+    local vIcon = mk("TextLabel", {
+        BackgroundColor3=Color3.fromRGB(18,14,28), BorderSizePixel=0,
+        Font=Enum.Font.Code, Text="◈ SRC", TextColor3=C.PURP, TextSize=10,
+        Size=UDim2.new(0,52,0,24), TextXAlignment=Enum.TextXAlignment.Center,
+        ZIndex=20, Parent=vHeader})
+    addCorner(vIcon, UDim.new(0,4))
+
+    local vTitle = mk("TextLabel", {
+        BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+        Text="script.lua", TextColor3=C.TEXT, TextSize=13,
+        Size=UDim2.new(0.5,0,1,0),
+        TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=vHeader})
+
+    local vMeta = mk("TextLabel", {
+        BackgroundTransparency=1, Font=Enum.Font.Code,
+        Text="", TextColor3=C.MUTED, TextSize=9,
+        Size=UDim2.new(0.3,0,1,0),
+        TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=vHeader})
+
+    local vCopyBtn = mk("TextButton", {
+        AutoButtonColor=false, BackgroundColor3=C.DIM, BorderSizePixel=0,
+        Font=Enum.Font.GothamMedium, Text="Copy", TextColor3=C.MUTED, TextSize=10,
+        Size=UDim2.new(0,64,0,26), ZIndex=20, Parent=vHeader})
+    addCorner(vCopyBtn, UDim.new(0,6))
+
+    local vCloseBtn = mk("TextButton", {
+        AutoButtonColor=false, BackgroundColor3=Color3.fromRGB(40,16,16),
+        BorderSizePixel=0, Font=Enum.Font.GothamBold,
+        Text="X", TextColor3=C.RED, TextSize=12,
+        Size=UDim2.new(0,32,0,26), ZIndex=20, Parent=vHeader})
+    addCorner(vCloseBtn, UDim.new(0,6))
+
+    local vBody = mk("Frame", {
+        BackgroundTransparency=1, BorderSizePixel=0,
+        Position=UDim2.new(0,0,0,40), Size=UDim2.new(1,0,1,-40),
+        ZIndex=20, Parent=viewerOverlay})
+    mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal, Parent=vBody})
+
+    local vSourcePane = mk("Frame", {
+        BackgroundColor3=Color3.fromRGB(10,9,14), BorderSizePixel=0,
+        Size=UDim2.new(0.68,0,1,0), ZIndex=20, Parent=vBody})
+    addStroke(vSourcePane, 1, 0.6)
+
+    local vScroll = mk("ScrollingFrame", {
+        BackgroundTransparency=1, BorderSizePixel=0,
+        Size=UDim2.new(1,0,1,0),
+        CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=3, ScrollingDirection=Enum.ScrollingDirection.Y,
+        ScrollBarImageColor3=C.MUTED, ZIndex=20, Parent=vSourcePane})
+    mk("UIPadding", {
+        PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8),
+        PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6), Parent=vScroll})
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,
+        Padding=UDim.new(0,0), Parent=vScroll})
+
+    local vAnalysisPane = mk("ScrollingFrame", {
+        BackgroundColor3=Color3.fromRGB(13,12,18), BorderSizePixel=0,
+        Size=UDim2.new(0.32,0,1,0),
+        CanvasSize=UDim2.new(0,0,0,0),
+        AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ScrollBarThickness=3, ScrollingDirection=Enum.ScrollingDirection.Y,
+        ScrollBarImageColor3=C.MUTED, ZIndex=20, Parent=vBody})
+    mk("UIPadding", {
+        PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+        PaddingTop=UDim.new(0,8), PaddingBottom=UDim.new(0,8), Parent=vAnalysisPane})
+    mk("UIListLayout", {SortOrder=Enum.SortOrder.LayoutOrder,
+        Padding=UDim.new(0,4), Parent=vAnalysisPane})
+
+    -- ── Lightweight per-line colorizer ────────────────────────────────────────
+    local LUA_KEYWORDS = {
+        ["local"]=true,["function"]=true,["end"]=true,["if"]=true,
+        ["then"]=true,["else"]=true,["elseif"]=true,["for"]=true,
+        ["while"]=true,["do"]=true,["return"]=true,["not"]=true,
+        ["and"]=true,["or"]=true,["true"]=true,["false"]=true,
+        ["nil"]=true,["repeat"]=true,["until"]=true,["in"]=true,
+        ["break"]=true,["continue"]=true,
+    }
+    local function lineColor(line)
+        if line:match("^%s*%-%-") then return C.DIM end
+        if line:match([=[^%s*[%w_]+%s*=?%s*["']]=]) then return C.GREEN end
+        if line:match("^%s*local%s+function") or line:match("^%s*function%s+") then return C.PURP end
+        if line:match("^%s*return%s") then return C.AMBER end
+        local first = line:match("^%s*([%w_]+)")
+        if first and LUA_KEYWORDS[first] then return C.BLUE end
+        if line:match(":FireServer") or line:match(":InvokeServer") or
+           line:match(":FireClient") or line:match(":FireAllClients") then return C.TEAL end
+        return C.TEXT
+    end
+
+    -- ── Analysis pane builder ─────────────────────────────────────────────────
+    local function buildAnalysisPane(analysis)
+        for _, c in ipairs(vAnalysisPane:GetChildren()) do
+            if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+        end
+        if not analysis or analysis.unavailable or analysis.empty then
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text="Source not available in this environment.",
+                TextColor3=C.MUTED, TextSize=10,
+                Size=UDim2.new(1,0,0,24), LayoutOrder=1,
+                TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20,
+                Parent=vAnalysisPane})
+            return
+        end
+        local alo = 1
+        local function aSection(title, col)
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+                Text=title, TextColor3=col or C.MUTED, TextSize=10,
+                Size=UDim2.new(1,0,0,18), LayoutOrder=alo, ZIndex=20,
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=vAnalysisPane})
+            alo = alo + 1
+        end
+        local function aEntry(text, col)
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=text, TextColor3=col or C.MUTED, TextSize=9,
+                TextWrapped=true, Size=UDim2.new(1,0,0,0),
+                AutomaticSize=Enum.AutomaticSize.Y,
+                LayoutOrder=alo, ZIndex=20,
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=vAnalysisPane})
+            alo = alo + 1
+        end
+
+        aEntry(string.format("%d lines  %d fn  %d bytes",
+            analysis.lineCount or 0, #(analysis.functions or {}),
+            analysis.byteCount or 0), C.MUTED)
+
+        local flags = {}
+        if analysis.usesPlayerLocal then table.insert(flags, "LocalPlayer") end
+        if analysis.usesTween       then table.insert(flags, "Tween") end
+        if analysis.usesRunService  then table.insert(flags, "RunService") end
+        if analysis.usesPhysics     then table.insert(flags, "Physics") end
+        if #flags > 0 then aEntry("flags: " .. table.concat(flags, "  "), C.CYAN) end
+
+        if analysis.functions and #analysis.functions > 0 then
+            aSection("Functions", C.PURP)
+            for _, fn in ipairs(analysis.functions) do
+                aEntry(string.format("  %s(%s)", fn.name, fn.args or ""), C.TEXT)
+            end
+        end
+        if analysis.services and #analysis.services > 0 then
+            aSection("Services", C.BLUE)
+            for _, s in ipairs(analysis.services) do aEntry("  "..s, C.TEXT) end
+        end
+        if analysis.remoteCallTypes and #analysis.remoteCallTypes > 0 then
+            aSection("Remote Calls", C.TEAL)
+            aEntry("  "..table.concat(analysis.remoteCallTypes,"  "), C.TEAL)
+        end
+        if analysis.waitForChildRefs and #analysis.waitForChildRefs > 0 then
+            aSection("WaitForChild", C.CYAN)
+            for _, r in ipairs(analysis.waitForChildRefs) do aEntry("  "..r, C.TEXT) end
+        end
+        if analysis.findFirstChildRefs and #analysis.findFirstChildRefs > 0 then
+            aSection("FindFirstChild", C.CYAN)
+            for _, r in ipairs(analysis.findFirstChildRefs) do aEntry("  "..r, C.TEXT) end
+        end
+        if analysis.connections and #analysis.connections > 0 then
+            aSection("Connections", C.AMBER)
+            aEntry("  "..table.concat(analysis.connections,"  "):sub(1,200), C.AMBER)
+        end
+        if analysis.datastoreRefs and #analysis.datastoreRefs > 0 then
+            aSection("DataStores", C.GOLD)
+            for _, ds in ipairs(analysis.datastoreRefs) do aEntry("  "..ds, C.TEXT) end
+            if analysis.datastoreKeys and #analysis.datastoreKeys > 0 then
+                aEntry("  keys: "..table.concat(analysis.datastoreKeys,", "):sub(1,120), C.MUTED)
+            end
+        end
+        if analysis.instanceNews and #analysis.instanceNews > 0 then
+            aSection("Instance.new", C.GREEN)
+            aEntry("  "..table.concat(analysis.instanceNews,"  "):sub(1,200), C.TEXT)
+        end
+        if analysis.httpRefs and #analysis.httpRefs > 0 then
+            aSection("HTTP", C.ORANGE)
+            for _, h in ipairs(analysis.httpRefs) do aEntry("  "..h:sub(1,80), C.TEXT) end
+        end
+        if analysis.requireChain and #analysis.requireChain > 0 then
+            aSection("require()", C.PURP)
+            for _, r in ipairs(analysis.requireChain) do aEntry("  "..r, C.TEXT) end
+        end
+        if analysis.globalWrites and #analysis.globalWrites > 0 then
+            aSection("_G Writes", C.RED)
+            aEntry("  "..table.concat(analysis.globalWrites,"  "):sub(1,120), C.TEXT)
+        end
+        if analysis.suspiciousKeys and #analysis.suspiciousKeys > 0 then
+            aSection("Suspicious", C.RED)
+            for _, s in ipairs(analysis.suspiciousKeys) do aEntry("  "..s, C.RED) end
+        end
+    end
+
+    -- ── Source renderer ───────────────────────────────────────────────────────
+    local _viewerCurrentSource = nil
+
+    local function renderSource(source, scriptName, analysis)
+        for _, c in ipairs(vScroll:GetChildren()) do
+            if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+        end
+        vTitle.Text = scriptName
+        buildAnalysisPane(analysis)
+
+        if not source or #source == 0 then
+            vMeta.Text = "[source unavailable]"
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text="Source not exposed in this executor environment.",
+                TextColor3=C.MUTED, TextSize=10,
+                Size=UDim2.new(1,0,0,24), LayoutOrder=1,
+                TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=vScroll})
+            return
+        end
+
+        local srcLines = {}
+        local idx2 = 1
+        while idx2 <= #source do
+            local nl = source:find("\n", idx2, true)
+            if nl then
+                table.insert(srcLines, source:sub(idx2, nl-1))
+                idx2 = nl + 1
+            else
+                table.insert(srcLines, source:sub(idx2))
+                break
+            end
+        end
+
+        vMeta.Text = string.format("%d lines  %d bytes", #srcLines, #source)
+
+        local MAX_RENDERED = 1200
+        local lo = 1
+        local limit = math.min(#srcLines, MAX_RENDERED)
+        for i = 1, limit do
+            local line = srcLines[i]
+            local row = mk("Frame", {
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Size=UDim2.new(1,0,0,13), LayoutOrder=lo, ZIndex=20,
+                Parent=vScroll})
+            lo = lo + 1
+            mk("UIListLayout", {
+                FillDirection=Enum.FillDirection.Horizontal,
+                VerticalAlignment=Enum.VerticalAlignment.Center,
+                Parent=row})
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=string.format("%4d", i),
+                TextColor3=C.DIM, TextSize=9,
+                Size=UDim2.new(0,34,1,0),
+                TextXAlignment=Enum.TextXAlignment.Right, ZIndex=20, Parent=row})
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=" "..line:sub(1,120),
+                TextColor3=lineColor(line), TextSize=9,
+                Size=UDim2.new(1,-38,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=row})
+        end
+        if #srcLines > MAX_RENDERED then
+            local note = mk("Frame", {
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Size=UDim2.new(1,0,0,18), LayoutOrder=lo, ZIndex=20, Parent=vScroll})
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=string.format("... %d more lines (copy for full)", #srcLines - MAX_RENDERED),
+                TextColor3=C.AMBER, TextSize=9,
+                Size=UDim2.new(1,0,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=note})
+        end
+    end
+
+    local function openViewer(scriptName, source, analysis)
+        _viewerCurrentSource = source
+        renderSource(source, scriptName, analysis)
+        viewerOverlay.Visible = true
+    end
+
+    local function closeViewer()
+        viewerOverlay.Visible = false
+        _viewerCurrentSource = nil
+    end
+
+    vCloseBtn.MouseButton1Click:Connect(function()
+        clickSound(); closeViewer()
+    end)
+
+    vCopyBtn.MouseButton1Click:Connect(function()
+        clickSound()
+        if _viewerCurrentSource and #_viewerCurrentSource > 0 then
+            local ok = pcall(function()
+                game:GetService("GuiService"):SetClipboard(_viewerCurrentSource)
+            end)
+            vCopyBtn.Text = ok and "OK" or "Fail"
+            vCopyBtn.TextColor3 = ok and C.GREEN or C.RED
+            task.delay(1.8, function()
+                vCopyBtn.Text = "Copy"
+                vCopyBtn.TextColor3 = C.MUTED
+            end)
+        end
+    end)
+
+    local function triggerViewSource(scriptName, source, analysis)
+        openViewer(scriptName, source, analysis)
+    end
+
+
     -- ══════════════════════════════════════════════════════════════════════════
     -- TOP BAR — title + scan button + status strip
     -- ══════════════════════════════════════════════════════════════════════════
@@ -771,11 +1093,31 @@ do
 
             local ilo = 3
 
-            -- Functions
-            if #a.functions > 0 then
+            -- Feature flags
+            local flags = {}
+            if a.usesPlayerLocal then table.insert(flags,"LocalPlayer") end
+            if a.usesTween       then table.insert(flags,"Tween") end
+            if a.usesRunService  then table.insert(flags,"RunService") end
+            if a.usesPhysics     then table.insert(flags,"Physics") end
+            if #flags > 0 then
                 mk("TextLabel", {
                     BackgroundTransparency=1, Font=Enum.Font.Code,
-                    Text="fn  " .. table.concat(a.functions, "  ·  "):sub(1,180),
+                    Text="flags  " .. table.concat(flags,"  "),
+                    TextColor3=C.CYAN, TextSize=9,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                    Size=UDim2.new(1,0,0,12), LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
+            end
+
+            -- Functions
+            if a.functions and #a.functions > 0 then
+                local fnNames = {}
+                for _, fn in ipairs(a.functions) do
+                    table.insert(fnNames, fn.name)
+                end
+                mk("TextLabel", {
+                    BackgroundTransparency=1, Font=Enum.Font.Code,
+                    Text="fn  " .. table.concat(fnNames, "  ·  "):sub(1,180),
                     TextColor3=C.PURP, TextSize=9, TextWrapped=true,
                     TextXAlignment=Enum.TextXAlignment.Left,
                     Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
@@ -783,11 +1125,11 @@ do
                 ilo = ilo + 1
             end
 
-            -- Remote refs
-            if #a.remoteRefs > 0 then
+            -- Remote call types
+            if a.remoteCallTypes and #a.remoteCallTypes > 0 then
                 mk("TextLabel", {
                     BackgroundTransparency=1, Font=Enum.Font.Code,
-                    Text="remote  " .. table.concat(a.remoteRefs, "  "):sub(1,180),
+                    Text="remote  " .. table.concat(a.remoteCallTypes, "  "):sub(1,180),
                     TextColor3=C.TEAL, TextSize=9, TextWrapped=true,
                     TextXAlignment=Enum.TextXAlignment.Left,
                     Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
@@ -795,11 +1137,35 @@ do
                 ilo = ilo + 1
             end
 
-            -- DataStores
-            if #a.datastoreRefs > 0 then
+            -- Services used
+            if a.services and #a.services > 0 then
                 mk("TextLabel", {
                     BackgroundTransparency=1, Font=Enum.Font.Code,
-                    Text="ds  " .. table.concat(a.datastoreRefs, "  "):sub(1,180),
+                    Text="svc  " .. table.concat(a.services, "  "):sub(1,180),
+                    TextColor3=C.BLUE, TextSize=9, TextWrapped=true,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                    Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+                    LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
+            end
+
+            -- WaitForChild / FindFirstChild refs
+            if a.waitForChildRefs and #a.waitForChildRefs > 0 then
+                mk("TextLabel", {
+                    BackgroundTransparency=1, Font=Enum.Font.Code,
+                    Text="wfc  " .. table.concat(a.waitForChildRefs, "  "):sub(1,180),
+                    TextColor3=C.CYAN, TextSize=9, TextWrapped=true,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                    Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+                    LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
+            end
+
+            -- Connections
+            if a.connections and #a.connections > 0 then
+                mk("TextLabel", {
+                    BackgroundTransparency=1, Font=Enum.Font.Code,
+                    Text="conn  " .. table.concat(a.connections, "  "):sub(1,180),
                     TextColor3=C.AMBER, TextSize=9, TextWrapped=true,
                     TextXAlignment=Enum.TextXAlignment.Left,
                     Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
@@ -807,8 +1173,23 @@ do
                 ilo = ilo + 1
             end
 
+            -- DataStores
+            if a.datastoreRefs and #a.datastoreRefs > 0 then
+                local dsText = "ds  " .. table.concat(a.datastoreRefs, "  "):sub(1,120)
+                if a.datastoreKeys and #a.datastoreKeys > 0 then
+                    dsText = dsText .. "  keys: " .. table.concat(a.datastoreKeys,","):sub(1,60)
+                end
+                mk("TextLabel", {
+                    BackgroundTransparency=1, Font=Enum.Font.Code,
+                    Text=dsText, TextColor3=C.GOLD, TextSize=9, TextWrapped=true,
+                    TextXAlignment=Enum.TextXAlignment.Left,
+                    Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+                    LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
+            end
+
             -- HTTP
-            if #a.httpRefs > 0 then
+            if a.httpRefs and #a.httpRefs > 0 then
                 mk("TextLabel", {
                     BackgroundTransparency=1, Font=Enum.Font.Code,
                     Text="http  " .. table.concat(a.httpRefs, "  "):sub(1,180),
@@ -820,7 +1201,7 @@ do
             end
 
             -- Suspicious
-            if #a.suspiciousKeys > 0 then
+            if a.suspiciousKeys and #a.suspiciousKeys > 0 then
                 mk("TextLabel", {
                     BackgroundTransparency=1, Font=Enum.Font.Code,
                     Text="⚠  " .. table.concat(a.suspiciousKeys, "  "):sub(1,180),
@@ -828,6 +1209,41 @@ do
                     TextXAlignment=Enum.TextXAlignment.Left,
                     Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
                     LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
+            end
+
+            -- View Source button row
+            local btnRow = mk("Frame", {
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Size=UDim2.new(1,0,0,28), LayoutOrder=ilo, Parent=body})
+            mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+                VerticalAlignment=Enum.VerticalAlignment.Center,
+                Padding=UDim.new(0,6), Parent=btnRow})
+
+            local canView = mod.source and #mod.source > 0
+            local viewBtn = mk("TextButton", {
+                AutoButtonColor=false,
+                BackgroundColor3= canView and Color3.fromRGB(20,16,30) or C.CARD,
+                BorderSizePixel=0,
+                Font=Enum.Font.GothamMedium,
+                Text= canView and "▷ View Source" or "Source unavailable",
+                TextColor3= canView and C.PURP or C.DIM,
+                TextSize=10,
+                Size=UDim2.new(0,128,0,22), Parent=btnRow})
+            addCorner(viewBtn, UDim.new(0,5))
+            addStroke(viewBtn, 1, canView and 0.4 or 0.7)
+            if viewBtn:FindFirstChildOfClass("UIStroke") then
+                viewBtn:FindFirstChildOfClass("UIStroke").Color =
+                    canView and C.PURP or C.DIM
+            end
+
+            if canView then
+                -- Capture for closure
+                local capturedMod = mod
+                viewBtn.MouseButton1Click:Connect(function()
+                    clickSound()
+                    triggerViewSource(capturedMod.name, capturedMod.source, capturedMod.analysis)
+                end)
             end
         end
     end

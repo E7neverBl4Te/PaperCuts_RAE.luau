@@ -126,85 +126,134 @@ end
 
 -- ── Module Source Analyzer ────────────────────────────────────────────────────
 -- Scans ModuleScript source for patterns of interest.
+local function dedup(t)
+    local seen, out = {}, {}
+    for _, v in ipairs(t) do if not seen[v] then seen[v]=true; table.insert(out,v) end end
+    return out
+end
+
 local function analyzeSource(source)
-    if not source or #source == 0 then
-        return { empty=true }
-    end
+    if not source or #source == 0 then return { empty=true } end
 
     local analysis = {
+        empty           = false,
         lineCount       = 0,
         byteCount       = #source,
-        functions       = {},
-        remoteRefs      = {},
+        -- basic
+        functions       = {},   -- { name, args }
+        remoteNames     = {},   -- string literals passed to FindFirstChild/WaitForChild on Remotes
+        remoteCallTypes = {},   -- FireServer / InvokeServer / FireAllClients / FireClient / OnClientEvent etc.
+        -- services
+        services        = {},   -- all game:GetService("X") calls
+        instanceNews    = {},   -- Instance.new("X") calls
+        -- data
         datastoreRefs   = {},
+        datastoreKeys   = {},   -- string literals passed to :GetAsync/:SetAsync/:UpdateAsync
         httpRefs        = {},
+        -- architecture
         requireChain    = {},
-        marketplaceRefs = {},
         globalWrites    = {},
+        globalReads     = {},
+        connections     = {},   -- :Connect() / :Once() event bindings
+        waitForChildRefs= {},   -- WaitForChild("X") string literals
+        findFirstChildRefs={},  -- FindFirstChild("X") string literals
+        -- marketplace
+        marketplaceRefs = {},
+        -- flags
+        usesPlayerLocal = false,
+        usesTween       = false,
+        usesPhysics     = false,
+        usesRunService  = false,
+        -- suspicious
         suspiciousKeys  = {},
-        empty           = false,
     }
 
     -- Line count
-    for _ in source:gmatch("\n") do
-        analysis.lineCount = analysis.lineCount + 1
-    end
+    for _ in source:gmatch("\n") do analysis.lineCount = analysis.lineCount + 1 end
     analysis.lineCount = analysis.lineCount + 1
 
-    -- Function declarations
-    for fname in source:gmatch("function%s+([%w_%.]+)%s*%(") do
-        table.insert(analysis.functions, fname)
+    -- ── Functions (name + args) ──────────────────────────────────────────────
+    -- named: function Foo.Bar(a, b)
+    for fname, args in source:gmatch("function%s+([%w_%.]+)%s*%(([^%)]*)%)") do
+        local argStr = args:match("^%s*(.-)%s*$"):sub(1,60)
+        table.insert(analysis.functions, { name=fname, args=argStr })
     end
-    for fname in source:gmatch("local%s+function%s+([%w_]+)%s*%(") do
-        table.insert(analysis.functions, fname)
+    -- local function foo(a, b)
+    for fname, args in source:gmatch("local%s+function%s+([%w_]+)%s*%(([^%)]*)%)") do
+        local argStr = args:match("^%s*(.-)%s*$"):sub(1,60)
+        table.insert(analysis.functions, { name=fname, args=argStr })
     end
-    -- Deduplicate
-    local seen = {}
-    local uniq = {}
+    -- anonymous assigned: local foo = function(a, b)
+    for fname, args in source:gmatch("local%s+([%w_]+)%s*=%s*function%s*%(([^%)]*)%)") do
+        local argStr = args:match("^%s*(.-)%s*$"):sub(1,60)
+        table.insert(analysis.functions, { name=fname.."(anon)", args=argStr })
+    end
+    -- dedup by name
+    local fnSeen, fnUniq = {}, {}
     for _, f in ipairs(analysis.functions) do
-        if not seen[f] then seen[f]=true; table.insert(uniq, f) end
+        if not fnSeen[f.name] then fnSeen[f.name]=true; table.insert(fnUniq, f) end
     end
-    analysis.functions = uniq
+    analysis.functions = fnUniq
 
-    -- RemoteEvent/RemoteFunction references
-    for ref in source:gmatch(":FireServer%(") do
-        table.insert(analysis.remoteRefs, "FireServer")
-    end
-    for ref in source:gmatch(":InvokeServer%(") do
-        table.insert(analysis.remoteRefs, "InvokeServer")
-    end
-    for ref in source:gmatch(":FireAllClients%(") do
-        table.insert(analysis.remoteRefs, "FireAllClients")
-    end
-    for ref in source:gmatch(":FireClient%(") do
-        table.insert(analysis.remoteRefs, "FireClient")
-    end
-    for name in source:gmatch("RemoteEvent[\"']?:?%s*([%w_]+)") do
-        table.insert(analysis.remoteRefs, name)
-    end
-    -- Deduplicate remote refs
-    seen = {}; uniq = {}
-    for _, r in ipairs(analysis.remoteRefs) do
-        if not seen[r] then seen[r]=true; table.insert(uniq, r) end
-    end
-    analysis.remoteRefs = uniq
-
-    -- DataStore references
-    for dsname in source:gmatch("GetDataStore%([\"']([^\"']+)[\"']%)") do
-        table.insert(analysis.datastoreRefs, dsname)
-    end
-    for dsname in source:gmatch("GetOrderedDataStore%([\"']([^\"']+)[\"']%)") do
-        table.insert(analysis.datastoreRefs, "ORDERED:" .. dsname)
-    end
-    if source:find("DataStoreService") then
-        if #analysis.datastoreRefs == 0 then
-            table.insert(analysis.datastoreRefs, "[DataStoreService referenced]")
+    -- ── Remote call types ────────────────────────────────────────────────────
+    local remCallPatterns = {
+        "FireServer", "InvokeServer", "FireAllClients", "FireClient",
+        "OnClientEvent", "OnServerEvent", "OnServerInvoke", "OnClientInvoke",
+    }
+    for _, p in ipairs(remCallPatterns) do
+        if source:find(":" .. p .. "%(") or source:find("." .. p) then
+            table.insert(analysis.remoteCallTypes, p)
         end
     end
+    analysis.remoteCallTypes = dedup(analysis.remoteCallTypes)
 
-    -- HTTP references
+    -- ── Remote name literals (string args to FindFirstChild/WaitForChild) ───
+    for rname in source:gmatch([=[%f[%w]%a*[Ww]ait[Ff]or[Cc]hild%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.waitForChildRefs, rname:sub(1,48))
+    end
+    for rname in source:gmatch([=[%a*[Ff]ind[Ff]irst[Cc]hild%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.findFirstChildRefs, rname:sub(1,48))
+    end
+    -- direct index strings that look like remote names near Remote keywords
+    for rname in source:gmatch([=[Remotes?%s*[%.:%[]%s*["'](.-)["']]=]) do
+        table.insert(analysis.remoteNames, rname:sub(1,48))
+    end
+    analysis.waitForChildRefs  = dedup(analysis.waitForChildRefs)
+    analysis.findFirstChildRefs= dedup(analysis.findFirstChildRefs)
+    analysis.remoteNames       = dedup(analysis.remoteNames)
+
+    -- ── Services used ────────────────────────────────────────────────────────
+    for svcName in source:gmatch([=[GetService%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.services, svcName)
+    end
+    analysis.services = dedup(analysis.services)
+
+    -- ── Instance.new() calls ─────────────────────────────────────────────────
+    for iclass in source:gmatch([=[Instance%.new%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.instanceNews, iclass)
+    end
+    analysis.instanceNews = dedup(analysis.instanceNews)
+
+    -- ── DataStore references + key literals ─────────────────────────────────
+    for dsname in source:gmatch([=[GetDataStore%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.datastoreRefs, dsname)
+    end
+    for dsname in source:gmatch([=[GetOrderedDataStore%s*%(["'](.-)["']%)]=]) do
+        table.insert(analysis.datastoreRefs, "ORDERED:"..dsname)
+    end
+    if source:find("DataStoreService") and #analysis.datastoreRefs == 0 then
+        table.insert(analysis.datastoreRefs, "[DataStoreService referenced]")
+    end
+    -- DataStore key literals from :GetAsync/:SetAsync/:UpdateAsync/:RemoveAsync
+    for key in source:gmatch([=[:[GgSsUuRr]%a+[Aa]sync%s*%(["'](.-)["']]=]) do
+        table.insert(analysis.datastoreKeys, key:sub(1,48))
+    end
+    analysis.datastoreRefs = dedup(analysis.datastoreRefs)
+    analysis.datastoreKeys = dedup(analysis.datastoreKeys)
+
+    -- ── HTTP ─────────────────────────────────────────────────────────────────
     if source:find("HttpService") or source:find("HttpGet") or source:find("PostAsync") then
-        for url in source:gmatch("[\"'](https?://[^\"']+)[\"']") do
+        for url in source:gmatch([=[["']([Hh][Tt][Tt][Pp][Ss]?://[^"']+)["']]=]) do
             table.insert(analysis.httpRefs, url:sub(1,120))
         end
         if #analysis.httpRefs == 0 then
@@ -212,12 +261,32 @@ local function analyzeSource(source)
         end
     end
 
-    -- require() chains
+    -- ── require() chains ─────────────────────────────────────────────────────
     for req in source:gmatch("require%s*%(([^%)]+)%)") do
         table.insert(analysis.requireChain, req:match("^%s*(.-)%s*$"):sub(1,60))
     end
+    analysis.requireChain = dedup(analysis.requireChain)
 
-    -- MarketplaceService
+    -- ── _G reads and writes ──────────────────────────────────────────────────
+    for key in source:gmatch("_G%.([%w_]+)%s*=") do
+        table.insert(analysis.globalWrites, key)
+    end
+    for key in source:gmatch("_G%.([%w_]+)[^%s*=]") do
+        table.insert(analysis.globalReads, key)
+    end
+    analysis.globalWrites = dedup(analysis.globalWrites)
+    analysis.globalReads  = dedup(analysis.globalReads)
+
+    -- ── Event connections ────────────────────────────────────────────────────
+    for evname in source:gmatch("%.([%w_]+)%s*:[Cc]onnect%s*%(") do
+        table.insert(analysis.connections, evname)
+    end
+    for evname in source:gmatch("%.([%w_]+)%s*:[Oo]nce%s*%(") do
+        table.insert(analysis.connections, evname.."(Once)")
+    end
+    analysis.connections = dedup(analysis.connections)
+
+    -- ── Marketplace ──────────────────────────────────────────────────────────
     if source:find("MarketplaceService") then
         for prod in source:gmatch("GetProductInfo%s*%(([^%)]+)%)") do
             table.insert(analysis.marketplaceRefs, prod:sub(1,40))
@@ -227,20 +296,25 @@ local function analyzeSource(source)
         end
     end
 
-    -- Global writes (_G assignments)
-    for key in source:gmatch("_G%.([%w_]+)%s*=") do
-        table.insert(analysis.globalWrites, key)
-    end
+    -- ── Feature flags ────────────────────────────────────────────────────────
+    analysis.usesPlayerLocal = source:find("Players%.LocalPlayer") ~= nil
+    analysis.usesTween       = source:find("TweenService") ~= nil or source:find(":Tween%(") ~= nil
+    analysis.usesPhysics     = source:find("BodyVelocity") ~= nil or source:find("BodyPosition") ~= nil
+                            or source:find("VectorForce") ~= nil or source:find("Constraint") ~= nil
+    analysis.usesRunService  = source:find("RunService") ~= nil
 
-    -- Suspicious patterns
+    -- ── Suspicious patterns ──────────────────────────────────────────────────
     local suspPatterns = {
-        { pat="getfenv",     label="getfenv() — environment access" },
-        { pat="setfenv",     label="setfenv() — environment override" },
-        { pat="loadstring",  label="loadstring() — dynamic execution" },
-        { pat="rawset",      label="rawset() — bypass __newindex" },
-        { pat="rawget",      label="rawget() — bypass __index" },
-        { pat="debug%.info", label="debug.info — stack introspection" },
-        { pat="coroutine",   label="coroutine usage" },
+        { pat="getfenv",       label="getfenv() — environment access"    },
+        { pat="setfenv",       label="setfenv() — environment override"  },
+        { pat="loadstring",    label="loadstring() — dynamic execution"  },
+        { pat="rawset",        label="rawset() — bypass __newindex"      },
+        { pat="rawget",        label="rawget() — bypass __index"         },
+        { pat="debug%.info",   label="debug.info — stack introspection"  },
+        { pat="coroutine",     label="coroutine usage"                   },
+        { pat="pcall",         label="pcall — error suppression"        },
+        { pat="xpcall",        label="xpcall — extended error handling"  },
+        { pat="string%.dump",  label="string.dump — bytecode extraction" },
     }
     for _, sp in ipairs(suspPatterns) do
         if source:find(sp.pat) then
