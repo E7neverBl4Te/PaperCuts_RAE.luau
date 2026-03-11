@@ -37,8 +37,8 @@ do
     hookHover2(navBtn,
         Color3.fromRGB(245,239,231),
         Color3.fromRGB(236,229,219),
-        Color3.fromRGB(52,47,42),
-        Color3.fromRGB(52,47,42))
+        0.6,
+        0.0)
 
     navBtn.MouseButton1Click:Connect(function()
         _C2.clickSound()
@@ -914,7 +914,8 @@ do
         end
 
         local lo = 1
-        for _, svcEntry in ipairs(STS.SCAN_SERVICES) do
+        local STS_ref = _G.PC and _G.PC.STS
+        for _, svcEntry in ipairs(STS_ref and STS_ref.SCAN_SERVICES or {}) do
             local nodes = report.serviceMap[svcEntry.name]
             if not nodes or #nodes == 0 then continue end
 
