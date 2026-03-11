@@ -1,5 +1,5 @@
 -- ============================================================
---   Paper & Clay + RAE v2 + SARP v4 + PR v5 — Loader
+--   PaperCuts RAE — Final Stack Loader
 --   Fetches each chunk from the private repo and runs it.
 --   Each chunk has its own fresh register budget.
 -- ============================================================
@@ -40,6 +40,8 @@ local chunks = {
     "tsr_ui.lua",         -- TSR: dashboard
     "sts.lua",             -- STS: Server Topology Scanner engine
     "sts_ui.lua",          -- STS: Topology Scanner UI (self-registering)
+    "bre.lua",             -- BRE: BedRock Execution Engine (final stage)
+    "bre_ui.lua",          -- BRE: Execution console UI (self-registering)
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
