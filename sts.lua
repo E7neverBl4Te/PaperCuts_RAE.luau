@@ -374,11 +374,11 @@ local function synthesize(serviceMap, allRemotes)
 
         -- RSM signature
         if RSM and RSM.Get then
-            local sig = pcall(RSM.Get, name) and RSM.Get(name) or nil
-            if sig then
+            local rOk, sig = pcall(RSM.Get, RSM, name)
+            if rOk and sig then
                 entry.rsmSig = {
-                    fireCount   = sig.FireCount,
-                    successRate = sig.SuccessRate,
+                    fireCount   = sig.FireCount or 0,
+                    successRate = sig.SuccessRate or 0,
                     argCount    = sig.ArgSig and #sig.ArgSig or 0,
                     lastSeen    = sig.LastSeen,
                 }
@@ -387,15 +387,15 @@ local function synthesize(serviceMap, allRemotes)
 
         -- SBI confidence
         if SBI and SBI.Get then
-            local conf = pcall(SBI.Get, name) and SBI.Get(name) or nil
-            if conf then
-                entry.sbiConf = conf.Confidence
+            local sOk, conf = pcall(SBI.Get, SBI, name)
+            if sOk and conf then
+                entry.sbiConf = conf.Confidence or 0
             end
         end
 
         -- CDG edges
         if CDG and CDG.GetEdgesFor then
-            local ok, edges = pcall(CDG.GetEdgesFor, name)
+            local ok, edges = pcall(CDG.GetEdgesFor, CDG, name)
             if ok and edges then
                 entry.cdgEdges = {}
                 for _, e in ipairs(edges) do
@@ -439,7 +439,7 @@ local function synthesize(serviceMap, allRemotes)
         -- Overall intelligence score (0–1) for sorting
         local score = 0
         if entry.sbiConf   then score = score + entry.sbiConf * 0.4 end
-        if entry.rsmSig    then score = score + math.min(entry.rsmSig.fireCount / 20, 1) * 0.3 end
+        if entry.rsmSig    then score = score + math.min((entry.rsmSig.fireCount or 0) / 20, 1) * 0.3 end
         if entry.cdgEdges  then score = score + math.min(#entry.cdgEdges / 3, 1) * 0.2 end
         if entry.bedrockPair then score = score + 0.1 end
         entry.intelScore = score
