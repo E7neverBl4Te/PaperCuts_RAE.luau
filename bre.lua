@@ -330,12 +330,14 @@ local function recordBaseline(sinkRemote)
         task.wait(0.1)
     end
 
-    baseline.avgLatency = totalLatency / math.max(SAMPLE_COUNT - errors, 1)
+    local rawAvg = totalLatency / math.max(SAMPLE_COUNT - errors, 1)
+    -- Floor to 4ms so ratio comparisons work even for near-instant RE fires
+    baseline.avgLatency = math.max(rawAvg, 0.004)
     baseline.errorRate  = errors / SAMPLE_COUNT
 
     log("INFO", string.format(
-        "Baseline: avgLatency=%.4fs  errorRate=%.0f%%  fireMode=%s",
-        baseline.avgLatency, baseline.errorRate * 100, baseline.fireMode))
+        "Baseline: avgLatency=%.4fs (raw=%.4fs)  errorRate=%.0f%%  fireMode=%s",
+        baseline.avgLatency, rawAvg, baseline.errorRate * 100, baseline.fireMode))
 
     return baseline
 end
@@ -466,10 +468,17 @@ local function scoreAnomaly(baseline, probeResult, latency)
         end
     end
 
-    -- Nil where non-nil expected
-    if probeResult == nil and (baseline.errorRate or 0) < 0.3 then
+    -- RE (RemoteEvent) FireServer always returns nil — expected, not anomalous
+    -- Only penalize nil for RF (RemoteFunction) which should return a value
+    local isRE = baseline.fireMode == "RE"
+    if probeResult == nil and not isRE and (baseline.errorRate or 0) < 0.3 then
         score = score + 0.20
         table.insert(reasons, "unexpected nil response")
+    end
+    -- For RE: if server sends data back, that IS anomalous
+    if probeResult ~= nil and isRE then
+        score = score + 0.45
+        table.insert(reasons, "RE returned data — server response leak")
     end
 
     -- Non-nil where nil expected
@@ -615,7 +624,11 @@ function BRE.RunProbePhase()
                         end
 
                         -- High-confidence anomaly — escalate to primitive check
-                        if aScore >= CFG.PrimitiveTrigger then
+                        -- RE mode has lower signal ceiling — use adaptive threshold
+                        local primTrigger = (baseline.fireMode == "RE")
+                            and math.max(CFG.PrimitiveTrigger - 0.10, 0.35)
+                            or CFG.PrimitiveTrigger
+                        if aScore >= primTrigger then
                             BRE.EvaluatePrimitive(probe, baseline)
                         end
                     end
@@ -728,7 +741,12 @@ function BRE.EvaluatePrimitive(triggerProbe, baseline)
 
             local confidence = confirmations / 5.0
 
-            if confidence >= CFG.PrimitiveConfMin then
+            -- RE mode: confirmation bar is lower since nil is always expected
+            local confMin = (triggerProbe.fireMode == "RE" or
+                (baseline and baseline.fireMode == "RE"))
+                and math.max(CFG.PrimitiveConfMin - 0.20, 0.35)
+                or CFG.PrimitiveConfMin
+            if confidence >= confMin then
                 BRE.Stats.confirmedPrims = BRE.Stats.confirmedPrims + 1
 
                 local primitive = {
