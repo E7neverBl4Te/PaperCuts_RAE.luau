@@ -427,173 +427,84 @@ end
 -- Compares a probe response against the baseline.
 -- Returns anomaly score 0-1 and a description of what diverged.
 
--- scoreAnomaly: RE-aware anomaly scorer.
--- RemoteEvent fires never return a value — nil result is always expected for RE.
--- Latency ratio is meaningless when baseline ~= 0ms (RE is fire-and-forget async).
--- For RE: use absolute latency thresholds + error status as primary signal.
--- For RF: use latency ratios + response content as primary signal.
-local function scoreAnomaly(baseline, probeResult, latency, fireOk)
+local function scoreAnomaly(baseline, probeResult, latency)
     if not baseline then return 0, "no baseline" end
 
-    local isRE = baseline.fireMode == "RE"
     local score = 0
     local reasons = {}
 
-    -- ── Latency analysis ─────────────────────────────────────────────────────
-    if isRE then
-        -- RE: baseline is near-zero, ratios are noise. Use absolute thresholds.
-        -- A normal FireServer call returns in < 5ms client-side.
-        -- Anything > 20ms suggests the C++ deserializer is doing real work.
-        -- Anything > 80ms suggests stall / allocation struggle.
-        if latency > 0.08 then
+    -- Latency analysis
+    if baseline.avgLatency > 0 then
+        local ratio = latency / baseline.avgLatency
+        if ratio > 5.0 then
+            -- EXPANSION: C++ deserializer struggling to allocate — primitive heartbeat
             score = score + 0.55
-            table.insert(reasons, string.format(
-                "RE latency STALL %.0fms — C-side allocation stall", latency*1000))
-        elseif latency > 0.04 then
-            score = score + 0.40
-            table.insert(reasons, string.format(
-                "RE latency ELEVATED %.0fms — deserializer pressure", latency*1000))
-        elseif latency > 0.020 then
-            score = score + 0.25
-            table.insert(reasons, string.format(
-                "RE latency high %.0fms", latency*1000))
-        end
-        -- RE pcall error = deserializer rejected — that IS a signal
-        if fireOk == false then
+            table.insert(reasons, string.format("latency EXPANSION %.1fx — C-side stall candidate", ratio))
+        elseif ratio > 3.0 then
             score = score + 0.35
-            table.insert(reasons, "RE:FireServer pcall error — C-side rejection")
+            table.insert(reasons, string.format("latency spike %.1fx", ratio))
+        elseif ratio > 1.8 then
+            score = score + 0.20
+            table.insert(reasons, string.format("latency elevated %.1fx", ratio))
+        elseif ratio < 0.25 then
+            -- COLLAPSE: schema rejection at C++ boundary — confirms naked fire hit deserializer
+            score = score + 0.25
+            table.insert(reasons, string.format("latency collapse %.1fx — schema rejection at C boundary", ratio))
+        elseif ratio < 0.5 then
+            score = score + 0.15
+            table.insert(reasons, string.format("latency collapse %.1fx", ratio))
         end
-    else
-        -- RF: ratio-based analysis is valid since RF returns synchronously
-        if baseline.avgLatency > 0.001 then
-            local ratio = latency / baseline.avgLatency
-            if ratio > 5.0 then
-                score = score + 0.55
-                table.insert(reasons, string.format(
-                    "RF latency EXPANSION %.1fx — C-side stall", ratio))
-            elseif ratio > 3.0 then
-                score = score + 0.35
-                table.insert(reasons, string.format("RF latency spike %.1fx", ratio))
-            elseif ratio > 1.8 then
-                score = score + 0.20
-                table.insert(reasons, string.format("RF latency elevated %.1fx", ratio))
-            elseif ratio < 0.25 then
-                score = score + 0.25
-                table.insert(reasons, string.format(
-                    "RF latency collapse %.1fx — schema rejection", ratio))
-            elseif ratio < 0.5 then
-                score = score + 0.15
-                table.insert(reasons, string.format("RF latency collapse %.1fx", ratio))
-            end
-        elseif latency > 0.04 then
-            -- Baseline was near zero but probe took real time
-            score = score + 0.40
-            table.insert(reasons, string.format(
-                "RF latency from near-zero to %.0fms", latency*1000))
-        end
+    end
 
-        -- RF: nil where non-nil expected
-        if probeResult == nil and (baseline.errorRate or 0) < 0.3 then
+    -- Response type changed
+    if probeResult ~= nil then
+        local rtype = type(probeResult)
+        local baseTypes = baseline.responseTypes or {}
+        if not baseTypes[rtype] or baseTypes[rtype] == 0 then
+            score = score + 0.25
+            table.insert(reasons, "response type changed to " .. rtype)
+        end
+    end
+
+    -- Nil where non-nil expected
+    if probeResult == nil and (baseline.errorRate or 0) < 0.3 then
+        score = score + 0.20
+        table.insert(reasons, "unexpected nil response")
+    end
+
+    -- Non-nil where nil expected
+    if probeResult ~= nil and (baseline.errorRate or 0) > 0.7 then
+        score = score + 0.20
+        table.insert(reasons, "unexpected non-nil response")
+    end
+
+    -- String response containing memory-like patterns
+    if type(probeResult) == "string" then
+        if #probeResult > 256 then
+            score = score + 0.15
+            table.insert(reasons, "large string response")
+        end
+        if probeResult:find("\0") then
             score = score + 0.20
-            table.insert(reasons, "unexpected nil response")
+            table.insert(reasons, "null bytes in response")
         end
-        -- RF: non-nil where nil expected
-        if probeResult ~= nil and (baseline.errorRate or 0) > 0.7 then
-            score = score + 0.20
-            table.insert(reasons, "unexpected non-nil response")
+    end
+
+    -- Table response with unexpected depth
+    if type(probeResult) == "table" then
+        local depth = 0
+        local cur = probeResult
+        while type(cur) == "table" and depth < 20 do
+            cur = cur[1] or cur.child or nil
+            depth = depth + 1
         end
-        -- RF: response type changed
-        if probeResult ~= nil then
-            local rtype = type(probeResult)
-            local baseTypes = baseline.responseTypes or {}
-            if not baseTypes[rtype] or baseTypes[rtype] == 0 then
-                score = score + 0.25
-                table.insert(reasons, "response type changed to " .. rtype)
-            end
-        end
-        -- RF: string with memory-like content
-        if type(probeResult) == "string" then
-            if #probeResult > 256 then
-                score = score + 0.15
-                table.insert(reasons, "large string response")
-            end
-            if probeResult:find("\0") then
-                score = score + 0.20
-                table.insert(reasons, "null bytes in response")
-            end
-        end
-        -- RF: deep table response
-        if type(probeResult) == "table" then
-            local depth, cur = 0, probeResult
-            while type(cur) == "table" and depth < 20 do
-                cur = cur[1] or cur.child or nil
-                depth = depth + 1
-            end
-            if depth > 4 then
-                score = score + 0.15
-                table.insert(reasons, string.format("deep table response d=%d", depth))
-            end
+        if depth > 4 then
+            score = score + 0.15
+            table.insert(reasons, string.format("deep table response depth=%d", depth))
         end
     end
 
     return math.min(score, 1.0), table.concat(reasons, "; ")
-end
-
--- Collective pattern detector: checks if a probe category showed consistent
--- timing deviation across its runs — a weak but repeatable RE signal.
--- Returns: avgScore, maxScore, patternDesc
-local function analyzeCategoryPattern(probeLog, categoryId, baseline)
-    local catProbes = {}
-    for _, p in ipairs(probeLog) do
-        if p.category == categoryId then
-            table.insert(catProbes, p)
-        end
-    end
-    if #catProbes < 4 then return 0, 0, "insufficient samples" end
-
-    local totalLatency = 0
-    local maxLatency   = 0
-    local errorCount   = 0
-    local highLatency  = 0  -- probes > 20ms
-
-    for _, p in ipairs(catProbes) do
-        totalLatency = totalLatency + p.latency
-        if p.latency > maxLatency then maxLatency = p.latency end
-        if p.latency > 0.020 then highLatency = highLatency + 1 end
-    end
-
-    local avgL = totalLatency / #catProbes
-    local highRatio = highLatency / #catProbes
-
-    local patScore = 0
-    local patDesc  = {}
-
-    if baseline.fireMode == "RE" then
-        -- For RE: consistent high-latency ratio is meaningful
-        if highRatio >= 0.5 then
-            patScore = patScore + highRatio * 0.60
-            table.insert(patDesc, string.format(
-                "%.0f%% probes >20ms avg=%.0fms max=%.0fms",
-                highRatio*100, avgL*1000, maxLatency*1000))
-        end
-        if maxLatency > 0.08 then
-            patScore = patScore + 0.30
-            table.insert(patDesc, string.format("peak stall %.0fms", maxLatency*1000))
-        end
-    else
-        -- RF: any consistent score elevation
-        local totalScore = 0
-        for _, p in ipairs(catProbes) do
-            totalScore = totalScore + (p.anomalyScore or 0)
-        end
-        local avgScore = totalScore / #catProbes
-        patScore = avgScore
-        if avgScore > 0 then
-            table.insert(patDesc, string.format("avg anomaly score %.2f", avgScore))
-        end
-    end
-
-    return math.min(patScore, 1.0), maxLatency, table.concat(patDesc, "; ")
 end
 
 -- ── Layer 2: Deserializer Probe Engine ────────────────────────────────────────
@@ -658,8 +569,8 @@ function BRE.RunProbePhase()
                     latency = latency or (os.clock() - t0)
 
                     local result = fireOk and fireResult or nil
-                    -- Score anomaly — pass fireOk so RE scorer can detect pcall errors
-                    local aScore, aReason = scoreAnomaly(baseline, result, latency, fireOk)
+                    -- Score anomaly
+                    local aScore, aReason = scoreAnomaly(baseline, result, latency)
 
                     local probe = {
                         category    = cat.id,
@@ -717,35 +628,6 @@ function BRE.RunProbePhase()
                             "[%s] Sufficient anomalies (%d) — moving to next category",
                             cat.id, catAnomalies))
                         break
-                    end
-                end
-
-                -- ── Collective pattern check ──────────────────────────────────
-                -- Even if no single probe broke PrimitiveTrigger, a category
-                -- with consistent weak signals across all its probes is worth
-                -- evaluating as a collective primitive candidate.
-                if catAnomalies >= 3 then
-                    local patScore, maxLat, patDesc =
-                        analyzeCategoryPattern(BRE.ProbeLog, cat.id, baseline)
-                    if patScore >= 0.45 then
-                        log("PRIMITIVE", string.format(
-                            "[%s] COLLECTIVE pattern score=%.2f  %s",
-                            cat.id, patScore, patDesc))
-                        -- Synthesize a virtual probe representing the whole category
-                        local virtualProbe = {
-                            category      = cat.id,
-                            categoryLabel = cat.label,
-                            index         = 0,  -- 0 = collective
-                            payload       = generateProbe(cat.id, 1),
-                            anomalyScore  = patScore,
-                            anomalyReason = "COLLECTIVE: " .. patDesc,
-                            latency       = maxLat,
-                            firedAt       = os.clock(),
-                            sinkRemote    = sinkRemote,
-                            fireMode      = probe_fireMode,
-                            collective    = true,
-                        }
-                        BRE.EvaluatePrimitive(virtualProbe, baseline)
                     end
                 end
             end
@@ -812,7 +694,7 @@ function BRE.EvaluatePrimitive(triggerProbe, baseline)
                     latency = os.clock() - t1
                 end
                 latency = latency or (os.clock() - t0)
-                local aScore  = scoreAnomaly(baseline, fOk and fResult or nil, latency, fOk)
+                local aScore  = scoreAnomaly(baseline, fOk and fResult or nil, latency)
 
                 if aScore >= CFG.AnomalyThreshold then
                     confirmations = confirmations + 1
