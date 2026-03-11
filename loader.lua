@@ -38,6 +38,8 @@ local chunks = {
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
     "tsr_ui.lua",         -- TSR: dashboard
+    "sts.lua",             -- STS: Server Topology Scanner engine
+    "sts_ui.lua",          -- STS: Topology Scanner UI (self-registering)
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
