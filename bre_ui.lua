@@ -354,6 +354,8 @@ do
         tabPages2[t.key] = makeTabPage2()
     end
 
+    local tabBuilders = {}  -- populated at init after builders defined
+
     local function switchTab(key)
         if activeTab == key then return end
         for k, p in pairs(tabPages2) do p.Visible = (k==key) end
@@ -370,6 +372,7 @@ do
             end
         end
         activeTab = key
+        if tabBuilders[key] then task.defer(tabBuilders[key]) end
     end
 
     for _, tab in ipairs(TABS) do
@@ -1440,6 +1443,13 @@ do
     -- ══════════════════════════════════════════════════════════════════════════
     -- INIT
     -- ══════════════════════════════════════════════════════════════════════════
+    tabBuilders["overview"]   = buildOverview
+    tabBuilders["probes"]     = buildProbes
+    tabBuilders["anomalies"]  = buildAnomalies
+    tabBuilders["primitives"] = buildPrimitives
+    tabBuilders["gadgets"]    = buildGadgets
+    tabBuilders["chain"]      = buildChain
+
     wireCallbacks()
     setupConsole()
     setupLog()

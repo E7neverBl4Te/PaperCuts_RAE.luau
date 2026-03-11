@@ -203,11 +203,8 @@ local function recordBaseline(sinkRemote)
     for i = 1, SAMPLE_COUNT do
         local t0 = os.clock()
         local ok, result = pcall(function()
-            return ASE.FinalizeDirective and ASE.FinalizeDirective({
-                remote   = sinkRemote,
-                args     = { __bre_baseline = true, sample = i },
-                timeout  = 3.0,
-            })
+            return ASE.FinalizeDirective and
+                ASE.FinalizeDirective(sinkRemote, { __bre_baseline=true, sample=i }, sinkRemote)
         end)
         local latency = os.clock() - t0
 
@@ -437,11 +434,7 @@ function BRE.RunProbePhase()
 
                     local fireOk, fireResult = pcall(function()
                         if ASE.FinalizeDirective then
-                            return ASE.FinalizeDirective({
-                                remote  = sinkRemote,
-                                args    = payload,
-                                timeout = 4.0,
-                            })
+                            return ASE.FinalizeDirective(sinkRemote, payload, sinkRemote)
                         end
                         return nil
                     end)
@@ -559,11 +552,8 @@ function BRE.EvaluatePrimitive(triggerProbe, baseline)
             for attempt = 1, 5 do
                 local t0 = os.clock()
                 local fOk, fResult = pcall(function()
-                    return ASE.FinalizeDirective and ASE.FinalizeDirective({
-                        remote  = sinkRemote,
-                        args    = triggerProbe.payload,
-                        timeout = 4.0,
-                    })
+                    return ASE.FinalizeDirective and
+                    ASE.FinalizeDirective(sinkRemote, triggerProbe.payload, sinkRemote)
                 end)
                 local latency = os.clock() - t0
                 local aScore  = scoreAnomaly(baseline, fOk and fResult or nil, latency)
@@ -969,11 +959,8 @@ function BRE.FireChain()
                     link.gadget and link.gadget.id or "?"))
 
                 local fOk, fResult = pcall(function()
-                    return ASE.FinalizeDirective and ASE.FinalizeDirective({
-                        remote  = sinkRemote,
-                        args    = link.payload,
-                        timeout = 5.0,
-                    })
+                    return ASE.FinalizeDirective and
+                    ASE.FinalizeDirective(sinkRemote, link.payload, sinkRemote)
                 end)
 
                 table.insert(results, {
@@ -1039,11 +1026,8 @@ function BRE.EvaluateCommandSurface(chainResult)
 
     local t0 = os.clock()
     local fOk, fResult = pcall(function()
-        return ASE.FinalizeDirective and ASE.FinalizeDirective({
-            remote  = sinkRemote,
-            args    = testPayload,
-            timeout = 6.0,
-        })
+        return ASE.FinalizeDirective and
+        ASE.FinalizeDirective(sinkRemote, testPayload, sinkRemote)
     end)
     local latency = os.clock() - t0
 
@@ -1099,11 +1083,8 @@ function BRE.StartCommandKeepalive(sinkRemote)
             if not ASE then break end
 
             local fOk = pcall(function()
-                return ASE.FinalizeDirective and ASE.FinalizeDirective({
-                    remote  = sinkRemote,
-                    args    = { __bre_keepalive=true, t=os.clock() },
-                    timeout = 3.0,
-                })
+                return ASE.FinalizeDirective and
+                ASE.FinalizeDirective(sinkRemote, { __bre_keepalive=true, t=os.clock() }, sinkRemote)
             end)
 
             if not fOk then
@@ -1140,11 +1121,7 @@ function BRE.SendCommand(cmdType, cmdData)
 
     local t0 = os.clock()
     local fOk, fResult = pcall(function()
-        return ASE.FinalizeDirective({
-            remote  = sinkRemote,
-            args    = payload,
-            timeout = CFG.CommandTimeout,
-        })
+        return ASE.FinalizeDirective(sinkRemote, payload, sinkRemote)
     end)
     local latency = os.clock() - t0
 
