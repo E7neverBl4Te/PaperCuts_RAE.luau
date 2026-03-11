@@ -30,28 +30,30 @@ AACG.TIER = {
 }
 
 AACG.CATEGORY = {
-    -- Localized tier
-    TOOLS      = "Tools & Items",
-    CLIENT_EDIT= "Client Editing",
-    WORLD_CTRL = "WorldState Control",
-    -- Server tier
-    ADMIN      = "Admin Tools",
-    PLAYER_EDIT= "Player Editing",
-    WORLD_SV   = "WorldState Control",
+    -- Localized Server-Side tier
+    S2C_EXEC   = "Server-Side Executions",   -- replicated fx sent to local client
+    LOC_TOOLS  = "Admin / Player Tools",      -- god-mode gear, admin panels, vehicles
+    LOC_CLIENT = "Local Client Editing",      -- model swaps, GUI overlays, FOV, anims
+    LOC_WORLD  = "WorldState Control",        -- props, weather, NPC summons, gravity
+    -- Server-Side (All Players) tier
+    SV_TOOLS   = "Server Admin / Player Tools", -- permanent admin, ban/kick, force-equip
+    SV_PLAYER  = "Player Editing",              -- leaderstats, XP, skins, team swaps
+    SV_WORLD   = "WorldState Controlling",      -- economy, shop, terrain, game modes
     -- Owner tier
     EVERYTHING = "Everything",
 }
 
 AACG.TIER_CATEGORIES = {
     [AACG.TIER.LOCALIZED] = {
-        AACG.CATEGORY.TOOLS,
-        AACG.CATEGORY.CLIENT_EDIT,
-        AACG.CATEGORY.WORLD_CTRL,
+        AACG.CATEGORY.S2C_EXEC,
+        AACG.CATEGORY.LOC_TOOLS,
+        AACG.CATEGORY.LOC_CLIENT,
+        AACG.CATEGORY.LOC_WORLD,
     },
     [AACG.TIER.SERVER] = {
-        AACG.CATEGORY.ADMIN,
-        AACG.CATEGORY.PLAYER_EDIT,
-        AACG.CATEGORY.WORLD_SV,
+        AACG.CATEGORY.SV_TOOLS,
+        AACG.CATEGORY.SV_PLAYER,
+        AACG.CATEGORY.SV_WORLD,
     },
     [AACG.TIER.OWNER] = {
         AACG.CATEGORY.EVERYTHING,
@@ -65,71 +67,223 @@ local AACG_Cards     = {}   -- cache of last generated set, keyed by id
 
 -- ── Classifier keyword tables ─────────────────────────────────────────────────
 -- Each entry: { patterns={...}, tier=T, category=C, weight=N }
--- Patterns are matched against the lowercase remote name.
--- Highest cumulative weight wins.
+-- Patterns matched against lowercase remote name. Highest cumulative weight wins.
 local CLASSIFIERS = {
-    -- ── LOCALIZED: Tools & Items ───────────────────────────────────────────
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- LOCALIZED SERVER-SIDE TIER
+    -- ══════════════════════════════════════════════════════════════════════════
+
+    -- Category: Server-Side Executions
+    -- Replicated character animations, global sound broadcasts, particle triggers,
+    -- status effect icons, synced lighting, broadcast chat, tool equip anims, hitmarkers
+    { patterns={"replicateanim","replicateanimation","charanimation","characteranim",
+                "syncanim","syncanimation","equipeanimation","toolequipanim"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"soundbroadcast","globalSound","playsound","soundreplicate",
+                "replicatesound","triggersound","broadcastsound"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"particletrigger","triggerparticle","spawnparticle","particleeffect",
+                "fireparticle","replicateparticle","emitterfire"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"statuseffect","statusicon","applyeffect","effectapply",
+                "buffeffect","debuffeffect","statusreplicate"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"synclighting","lightingchange","ambientchange","replicatelighting",
+                "setlighting","lightupdate","lightreplicate"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"broadcastchat","chatbroadcast","systemmessage","chatmessage",
+                "sendchat","globalchat","serverchat","chatannounce"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"hitmarker","hitreplicate","replicatehit","hiteffect",
+                "damageeffect","hitvisual","hitconfirm"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=12 },
+    { patterns={"replicate","broadcast","sync","notify","clientevent",
+                "clientfire","localfire","s2c","sendclient"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.S2C_EXEC, weight=4 },
+
+    -- Category: Admin / Player Tools (Localized)
+    -- God-mode swords, infinite-ammo guns, admin panels, teleport batons,
+    -- vehicle spawners, force-fields, invisibility, speed boosts, explosives, healing
+    { patterns={"godmode","godsword","infammo","infiniteammo","admingun",
+                "godgun","cheatweapon","devweapon","adminweapon"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
+    { patterns={"adminpanel","admincommand","adminmenu","devpanel","devtool",
+                "commandpanel","modpanel","staffpanel"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
+    { patterns={"teleportbaton","tpbaton","teleporttool","tptool","warpbaton",
+                "vehiclespawner","spawnvehicle","spawncustom"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
+    { patterns={"forcefield","forceShield","shieldtool","invisibilitycloak",
+                "inviztool","cloaktool","invisibletool"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
+    { patterns={"speedboost","speedgadget","boosttool","speedhack","speedtool",
+                "explosive","throwable","bombitem","grenadeitem"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
+    { patterns={"healstaff","healingtool","healtool","healitem","staffheal",
+                "healwand","medtool"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=12 },
     { patterns={"giveitem","grantitem","additem","equipitem","spawnitem",
                 "givetool","granttool","addtool","equiptool","spawntool",
-                "givegear","grantgear","addgear"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.TOOLS, weight=10 },
-    { patterns={"give","grant","award","equip","spawn","tool","item",
-                "weapon","gun","sword","gear","accessory","hat","shirt","pants"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.TOOLS, weight=4 },
+                "giveweapon","grantweapon","spawnweapon","addweapon",
+                "givegear","grantgear","givesword","grantgun"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=10 },
+    { patterns={"sword","gun","weapon","tool","item","gear","baton","wand",
+                "shield","vehicle","explosive","grenade","staff","gadget"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_TOOLS, weight=3 },
 
-    -- ── LOCALIZED: Client Editing ──────────────────────────────────────────
-    { patterns={"localui","clientui","localeffect","clienteffect",
-                "localnotif","clientnotif","localdisplay","clientdisplay",
-                "screengui","playerui","hudupdate","headsup"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.CLIENT_EDIT, weight=10 },
-    { patterns={"notification","notify","alert","message","dialog",
-                "popup","hud","overlay","display","local","client"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.CLIENT_EDIT, weight=3 },
+    -- Category: Local Client Editing
+    -- Character model swaps, GUI overlays, crosshairs, name tags, FOV,
+    -- walk animations, headshot markers, health bar reskins
+    { patterns={"modelswap","charswap","characterswap","swapcmodel",
+                "skinswap","charmodel","setcharactermodel","replacemodel"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=12 },
+    { patterns={"guioverlay","overlayinject","injectgui","customgui",
+                "screenoverlaya","uiinject","insertgui","guiinsert"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=12 },
+    { patterns={"crosshair","customcrosshair","crosshairswap","setcrosshair",
+                "nametag","nametagmod","tagoverride","usernametag"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=12 },
+    { patterns={"fovoverride","setfov","camerafov","fovchange","fovset",
+                "walkanim","walkreplace","animreplace","locomotionanim"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=12 },
+    { patterns={"headshotmarker","headmarker","hsmarker","custommarker",
+                "healthbarreskin","hpreskin","healthbarskin","hbreskin"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=12 },
+    { patterns={"localmodel","localchar","localui","localoverlay","clientmodel",
+                "clientgui","clientanim","clientskin","clientfov"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=8 },
+    { patterns={"model","gui","overlay","crosshair","fov","camera","skin",
+                "anim","reskin","marker","nametag","hud","bar"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_CLIENT, weight=3 },
 
-    -- ── LOCALIZED: WorldState Control ─────────────────────────────────────
-    { patterns={"setstat","addstat","updatestat","modifystat",
-                "setcurrency","addcurrency","givecurrency","grantcurrency",
-                "setpoints","addpoints","givepoints",
-                "setgold","addgold","givegold",
-                "setcash","addcash","givecash",
-                "setcoins","addcoins","givecoins",
-                "setlevel","addlevel","setxp","addxp","setrank","addrank"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.WORLD_CTRL, weight=10 },
-    { patterns={"stat","currency","economy","points","gold","cash",
-                "coins","level","xp","rank","score","balance"},
-      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.WORLD_CTRL, weight=4 },
+    -- Category: WorldState Control (Localized)
+    -- Temp prop spawns, weather shifts, time-of-day, billboards, NPC summons,
+    -- explosion visuals, gravity flip zones, color filter overlays
+    { patterns={"spawnprop","tempprop","propspawn","spawndecor","spawnobject",
+                "envprop","worldprop","sceneobject"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"weathershift","setweather","weatherchange","weatherupdate",
+                "timeofday","settime","daycycle","timecycle","setday"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"billboard","floatingtext","textbillboard","worldtext",
+                "billboardgui","floating","worldlabel","namebillboard"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"npcspawn","spawnnpc","summon","npcSummon","summonentity",
+                "spawnentity","spawnbot","entityspawn"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"explosionvisual","localexplosion","explodevisual","boomeffect",
+                "gravityflip","setgravity","gravityzONE","gravitychange"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"colorfilter","coloroverlay","screencolor","colorgrade",
+                "colorcorrect","tintoverlay","colorshift"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=12 },
+    { patterns={"weather","gravity","billboard","npc","prop","explosion",
+                "visual","environment","color","filter","time","day"},
+      tier=AACG.TIER.LOCALIZED, category=AACG.CATEGORY.LOC_WORLD, weight=3 },
 
-    -- ── SERVER: Admin Tools ────────────────────────────────────────────────
-    { patterns={"kick","ban","mute","unmute","unban","warn","teleportplayer",
-                "tpplayer","admincommand","servercommand","modcommand"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.ADMIN, weight=10 },
-    { patterns={"admin","mod","moderator","command","manage","control",
-                "enforce","punishment","report"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.ADMIN, weight=4 },
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- SERVER-SIDE (ALL PLAYERS) TIER
+    -- ══════════════════════════════════════════════════════════════════════════
 
-    -- ── SERVER: Player Editing ─────────────────────────────────────────────
-    { patterns={"teleport","warp","moveplayer","setposition","setpos",
-                "respawn","revive","setcharacter","editplayer","setplayerdata",
-                "updateplayer","playerupdate","sethealth","addhealth",
-                "sethp","addhp","setspeed","setjump","setwalkspeed"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.PLAYER_EDIT, weight=10 },
-    { patterns={"player","character","health","speed","jump","move",
-                "position","respawn","revive","heal","damage"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.PLAYER_EDIT, weight=3 },
+    -- Category: Server Admin / Player Tools
+    -- Permanent admin menus, ban/kick, spawn-any-item, weapon stat modifiers,
+    -- infinite inventory, force-equip, announcement horns, global teleport, ownership transfer
+    { patterns={"permanentadmin","adminmenuserver","globaladmin","serveradmin",
+                "admincommandserver","fullAdmin","ownerAdmin"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"ban","kick","kickplayer","banplayer","permaban","tempban",
+                "globalban","serverban","forceban","kickall"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"spawnanyitem","spawnall","universalspawn","forceSpawnItem",
+                "weaponstatmod","statmodifier","weaponmodifier","weaponstats"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"infinventory","infiniteinv","unlimitedinventory","invbag",
+                "forceequip","forcetool","servertool","globalequip"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"announce","announcement","globalannounce","serverannounce",
+                "broadcastannounce","horn","serverhorn","alertall"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"globalteleport","tpall","teleportall","massTeleport",
+                "ownership","transferowner","ownerTransfer","ownerorb"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=12 },
+    { patterns={"admin","ban","kick","mute","announce","ownership","serverop",
+                "globalequip","forceequip","spawnany"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_TOOLS, weight=4 },
 
-    -- ── SERVER: WorldState Control ─────────────────────────────────────────
-    { patterns={"setmap","loadmap","changemap","changelevel","loadlevel",
-                "startround","endround","setround","newround",
-                "setgame","startgame","endgame","restartgame",
-                "setweather","settime","setlighting","setambient",
-                "worldevent","triggerevent","fireworldevent",
-                "seteconomy","updateeconomy","economyupdate",
-                "setshop","updateshop","shopupdate",
-                "broadcast","serverbroadcast","globalbroadcast"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.WORLD_SV, weight=10 },
-    { patterns={"world","map","round","game","event","weather","time",
-                "lighting","economy","shop","broadcast","global","server"},
-      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.WORLD_SV, weight=3 },
+    -- Category: Player Editing (Server)
+    -- Leaderstat money, kill/death resets, level/XP overrides, inventory unlocks,
+    -- skin changes, username tag overrides, team swaps, stat multipliers
+    { patterns={"leaderstat","addmoney","setmoney","givemoney","grantmoney",
+                "addcash","setcash","addcoins","setcoins","addcurrency","setcurrency"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"resetkills","resetdeaths","resetkd","kdReset","killreset",
+                "deathreset","statReset","resetstat"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"setlevel","addlevel","leveloverride","setxp","addxp",
+                "xpoverride","levelup","grantxp","grantlevel"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"inventoryunlock","unlockinventory","invunlock","unlockslot",
+                "inventoryslot","addslot","grantslot"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"skinchange","permanentskin","charskin","playerskin",
+                "usernameoverride","tagoverride","nametag","nameoverride"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"teamswap","changeteam","setteam","teamchange","teamassign",
+                "statmultiplier","multiplier","multistats","booststat"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=12 },
+    { patterns={"leaderstat","xp","level","kill","death","inventory","skin",
+                "team","multiplier","stat","money","coins","cash","currency"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_PLAYER, weight=3 },
+
+    -- Category: WorldState Controlling (Server)
+    -- Shop prices, currency drop rates, economy resets, terrain sculpting,
+    -- game mode switches, round timers, spawn points, leaderboard locks,
+    -- resource nodes, door/state persistence
+    { patterns={"shopprice","setprice","pricemultiplier","shopupdate","updateshop",
+                "storeprice","itemcost","pricechange"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"currencydrop","dropratechange","droprate","currencyrate",
+                "economyreset","reseteconomy","globaleconomy","economyupdate"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"terrainsculpt","mapedit","terrainEdit","worldterrain",
+                "gamemodeswitch","setgamemode","chanegamemode","modeswitch"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"roundtimer","setTimer","timeroverride","roundtime","timeoverride",
+                "spawnpoint","setspawn","spawnlocation","relocatespawn"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"leaderboardlock","lockleaderboard","lbLock","statlock",
+                "resourcenode","nodemodify","resourcemodify","nodestate"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"doorstate","persiststate","statelock","doorpersist",
+                "worldstate","statepersist","editstate","globalstate"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=12 },
+    { patterns={"shop","economy","price","terrain","map","gamemode","round",
+                "timer","spawn","leaderboard","resource","door","state","world"},
+      tier=AACG.TIER.SERVER, category=AACG.CATEGORY.SV_WORLD, weight=3 },
+
+    -- ══════════════════════════════════════════════════════════════════════════
+    -- OWNER TIER — matched against everything (masteryUnlocked gate in Generate)
+    -- ══════════════════════════════════════════════════════════════════════════
+    { patterns={"shutdown","servershutdown","forceShutdown","globalshutdown",
+                "datawipe","wipeplayer","wipedata","permanentwipe",
+                "scripaccess","backendaccess","consoleexec","serverConsole"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
+    { patterns={"forcerestart","serverrestart","globalrestart","restartall",
+                "hiddenmodule","devmodule","ownermodule","secretmodule"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
+    { patterns={"worldreset","globalreset","resetworld","fullreset",
+                "gamepassinject","injectgamepass","passoverride","passunlock"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
+    { patterns={"accountoverride","fullAccountoverride","playerAccountEdit",
+                "devtoolactivate","activatedevtool","hiddentool","devactivate"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
+    { patterns={"economydatabase","databaserewrite","fulleconomy","econdb",
+                "mapfilereplacement","replacemap","filemap","mapoverride"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
+    { patterns={"bypassgamerule","ruleBypass","enforcebypass","adminbypass",
+                "universaladmin","unlockadmin","fulladmin","owneradmin"},
+      tier=AACG.TIER.OWNER, category=AACG.CATEGORY.EVERYTHING, weight=12 },
 }
 
 -- ── Name humanizer ─────────────────────────────────────────────────────────────

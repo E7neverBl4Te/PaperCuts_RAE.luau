@@ -717,13 +717,24 @@ do
         }
         local TIER_LABEL = {
             LOCALIZED = "Localized Server-Side",
-            SERVER    = "Server-Side (All Players)",
+            SERVER    = "Server-Side  (All Players)",
             OWNER     = "⚡ Game Owner Rights",
         }
         local CAT_MAP = {
-            LOCALIZED = {"Tools & Items", "Client Editing", "WorldState Control"},
-            SERVER    = {"Admin Tools", "Player Editing", "WorldState Control"},
-            OWNER     = {"Everything"},
+            LOCALIZED = {
+                "Server-Side Executions",   -- replicated fx, sounds, particles, hitmarkers
+                "Admin / Player Tools",     -- god-mode gear, admin panels, vehicles
+                "Local Client Editing",     -- model swaps, GUI overlays, FOV, anims
+                "WorldState Control",       -- props, weather, NPCs, gravity, color filters
+            },
+            SERVER = {
+                "Server Admin / Player Tools", -- permanent admin, ban/kick, force-equip
+                "Player Editing",              -- leaderstats, XP, skins, team swaps
+                "WorldState Controlling",      -- economy, shop, terrain, game modes
+            },
+            OWNER = {
+                "Everything",
+            },
         }
 
         -- ── State ──────────────────────────────────────────────────────────────
