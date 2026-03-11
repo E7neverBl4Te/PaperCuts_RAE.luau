@@ -87,8 +87,8 @@ STS.INTEREST_CLASSES = {
 
 -- Max depth to traverse (prevents infinite loops on circular refs)
 local MAX_DEPTH = 32
--- Max instances per service (safety cap)
-local MAX_INSTANCES = 2000
+-- Max instances per service (per-service cap — prevents one service starving others)
+local MAX_INSTANCES = 4000
 -- Max source bytes to read from a ModuleScript
 local MAX_SOURCE_BYTES = 64000
 
@@ -567,11 +567,12 @@ function STS.Scan()
             local totalSvcs   = #STS.SCAN_SERVICES
             local instanceCount = {n=0}
 
-            -- Phase 1 + 2: Walk all services
+            -- Phase 1 + 2: Walk all services (fresh cap per service)
             for i, svcEntry in ipairs(STS.SCAN_SERVICES) do
                 notify(1, svcEntry.name, i, totalSvcs)
-                local nodes = walkService(svcEntry, allRemotes, instanceCount)
+                local nodes = walkService(svcEntry, allRemotes, {n=0})
                 serviceMap[svcEntry.name] = nodes
+                instanceCount.n = instanceCount.n + #nodes
                 -- Yield to avoid frame budget exhaustion
                 task.wait()
             end
@@ -581,8 +582,9 @@ function STS.Scan()
             if char then
                 notify(1, "Character", totalSvcs, totalSvcs)
                 local charEntry = { name="Character", svc=char, priority=99 }
-                local charNodes = walkService(charEntry, allRemotes, instanceCount)
+                local charNodes = walkService(charEntry, allRemotes, {n=0})
                 serviceMap["Character"] = charNodes
+                instanceCount.n = instanceCount.n + #charNodes
             end
 
             -- Phase 3: Intelligence synthesis
