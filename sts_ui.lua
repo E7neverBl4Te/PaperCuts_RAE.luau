@@ -442,6 +442,261 @@ do
         openViewer(scriptName, source, analysis)
     end
 
+    -- ── Intel viewer for remotes ──────────────────────────────────────────────
+    -- Builds a rich text dump of all pipeline intel and renders it in the
+    -- source pane as plain text, with the analysis pane showing live stats.
+
+    local function buildIntelText(entry)
+        local lines = {}
+        local function ln(text) table.insert(lines, text or "") end
+
+        ln("══ Remote Intel Report ══")
+        ln(string.format("Name      : %s", entry.name))
+        ln(string.format("Class     : %s", entry.className))
+        ln(string.format("Path      : %s", entry.path))
+        ln(string.format("Service   : %s", entry.service))
+        ln(string.format("IntelScore: %.4f", entry.intelScore or 0))
+        ln("")
+
+        -- RSM
+        if entry.rsmSig then
+            local r = entry.rsmSig
+            ln("── RSM Signature ──")
+            ln(string.format("  FireCount   : %d", r.fireCount or 0))
+            ln(string.format("  SuccessRate : %.1f%%", (r.successRate or 0)*100))
+            ln(string.format("  ArgCount    : %d", r.argCount or 0))
+            if r.lastSeen then
+                ln(string.format("  LastSeen    : %s", tostring(r.lastSeen)))
+            end
+            ln("")
+        else
+            ln("── RSM Signature ──")
+            ln("  No RSM data — remote not observed through pipeline")
+            ln("")
+        end
+
+        -- SBI
+        if entry.sbiConf then
+            ln("── SBI Confidence ──")
+            ln(string.format("  Confidence  : %.1f%%", entry.sbiConf*100))
+            -- Confidence tier label
+            local tier = entry.sbiConf >= 0.85 and "HIGH"
+                      or entry.sbiConf >= 0.60 and "MEDIUM"
+                      or entry.sbiConf >= 0.35 and "LOW"
+                      or "VERY LOW"
+            ln(string.format("  Tier        : %s", tier))
+            ln("")
+        else
+            ln("── SBI Confidence ──")
+            ln("  No SBI data")
+            ln("")
+        end
+
+        -- CDG edges
+        if entry.cdgEdges and #entry.cdgEdges > 0 then
+            ln("── CDG Causal Edges ──")
+            for i, e in ipairs(entry.cdgEdges) do
+                ln(string.format("  [%d] antecedent : %s", i, e.ante or "?"))
+                ln(string.format("      confidence  : %.4f", e.conf or 0))
+                ln(string.format("      co-fires    : %d", e.coFired or 0))
+            end
+            ln("")
+        else
+            ln("── CDG Causal Edges ──")
+            ln("  No CDG edges recorded")
+            ln("")
+        end
+
+        -- Bedrock pair
+        if entry.bedrockPair then
+            local bp = entry.bedrockPair
+            ln("── Bedrock Pair ──")
+            ln(string.format("  Sink Remote     : %s", bp.sink or "?"))
+            ln(string.format("  Feedback Remote : %s", bp.feedback or "?"))
+            ln(string.format("  Origin          : %s", bp.origin or "?"))
+            ln(string.format("  Confidence      : %.1f%%", (bp.conf or 0)*100))
+            ln("")
+        else
+            ln("── Bedrock Pair ──")
+            ln("  Not part of a confirmed Bedrock pair")
+            ln("")
+        end
+
+        -- PR record
+        if entry.prRecord then
+            local p = entry.prRecord
+            ln("── PR Record ──")
+            ln(string.format("  Direction  : %s", p.direction or "?"))
+            ln(string.format("  FireCount  : %d", p.fireCount or 0))
+            if p.lastArgs then
+                ln(string.format("  Last Args  : %s", tostring(p.lastArgs):sub(1,80)))
+            end
+            ln("")
+        else
+            ln("── PR Record ──")
+            ln("  No PR record")
+            ln("")
+        end
+
+        ln("══ End of Report ══")
+        return table.concat(lines, "\n")
+    end
+
+    local function buildIntelAnalysisPane(entry)
+        for _, c in ipairs(vAnalysisPane:GetChildren()) do
+            if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+        end
+        local alo = 1
+        local function aSection(title, col)
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+                Text=title, TextColor3=col or C.MUTED, TextSize=10,
+                Size=UDim2.new(1,0,0,18), LayoutOrder=alo, ZIndex=20,
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=vAnalysisPane})
+            alo = alo + 1
+        end
+        local function aEntry(text, col)
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=text, TextColor3=col or C.MUTED, TextSize=9,
+                TextWrapped=true, Size=UDim2.new(1,0,0,0),
+                AutomaticSize=Enum.AutomaticSize.Y,
+                LayoutOrder=alo, ZIndex=20,
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=vAnalysisPane})
+            alo = alo + 1
+        end
+
+        -- Intel score bar
+        local score = entry.intelScore or 0
+        aSection("Intel Score", C.TEAL)
+        aEntry(string.format("  %.0f / 100", score * 100),
+            score >= 0.7 and C.GREEN or score >= 0.4 and C.AMBER or C.RED)
+
+        -- Class chip
+        aSection("Class", entry.className == "RemoteFunction" and C.CYAN or C.TEAL)
+        aEntry("  " .. entry.className,
+            entry.className == "RemoteFunction" and C.CYAN or C.TEAL)
+
+        -- RSM
+        if entry.rsmSig then
+            aSection("RSM", C.CYAN)
+            aEntry(string.format("  %d fires  %.0f%% success  %d args",
+                entry.rsmSig.fireCount or 0,
+                (entry.rsmSig.successRate or 0)*100,
+                entry.rsmSig.argCount or 0), C.TEXT)
+        end
+
+        -- SBI
+        if entry.sbiConf then
+            aSection("SBI", C.PURP)
+            local tier = entry.sbiConf >= 0.85 and "HIGH"
+                      or entry.sbiConf >= 0.60 and "MEDIUM"
+                      or entry.sbiConf >= 0.35 and "LOW" or "VERY LOW"
+            local tierCol = entry.sbiConf >= 0.85 and C.GREEN
+                         or entry.sbiConf >= 0.60 and C.TEAL
+                         or entry.sbiConf >= 0.35 and C.AMBER or C.RED
+            aEntry(string.format("  %.0f%%  %s", entry.sbiConf*100, tier), tierCol)
+        end
+
+        -- CDG
+        if entry.cdgEdges and #entry.cdgEdges > 0 then
+            aSection(string.format("CDG  (%d edges)", #entry.cdgEdges), C.AMBER)
+            for _, e in ipairs(entry.cdgEdges) do
+                aEntry(string.format("  %s  %.2f", (e.ante or "?"):sub(1,22), e.conf or 0), C.TEXT)
+            end
+        end
+
+        -- Bedrock
+        if entry.bedrockPair then
+            aSection("Bedrock Pair", C.GREEN)
+            aEntry("  " .. (entry.bedrockPair.sink or "?"), C.GREEN)
+            aEntry("  fb: " .. (entry.bedrockPair.feedback or "?"), C.MUTED)
+            aEntry("  " .. (entry.bedrockPair.origin or "?"), C.MUTED)
+        end
+
+        -- PR
+        if entry.prRecord then
+            aSection("PR Record", C.BLUE)
+            aEntry("  " .. (entry.prRecord.direction or "?"), C.TEXT)
+            aEntry(string.format("  %d fires", entry.prRecord.fireCount or 0), C.MUTED)
+        end
+
+        -- Path
+        aSection("Path", C.DIM)
+        aEntry("  " .. entry.path, C.MUTED)
+    end
+
+    local function triggerViewIntel(entry)
+        -- Build the intel text and render it in the source pane as plain text
+        local intelText = buildIntelText(entry)
+        _viewerCurrentSource = intelText
+
+        -- Clear source pane
+        for _, c in ipairs(vScroll:GetChildren()) do
+            if c:IsA("Frame") or c:IsA("TextLabel") then c:Destroy() end
+        end
+
+        vTitle.Text = entry.name .. "  —  Intel"
+        vMeta.Text = entry.className .. "  ·  " .. entry.service
+
+        -- Render intel text line by line (re-uses same line renderer)
+        local intelLines = {}
+        local idx2 = 1
+        while idx2 <= #intelText do
+            local nl = intelText:find("\n", idx2, true)
+            if nl then
+                table.insert(intelLines, intelText:sub(idx2, nl-1))
+                idx2 = nl + 1
+            else
+                table.insert(intelLines, intelText:sub(idx2))
+                break
+            end
+        end
+
+        -- Color logic for intel lines
+        local function intelLineColor(line)
+            if line:match("^══") then return C.TEAL end
+            if line:match("^──") then return C.PURP end
+            if line:match("BEDROCK") or line:match("Bedrock") then return C.GREEN end
+            if line:match("CDG") then return C.AMBER end
+            if line:match("SBI") then return C.PURP end
+            if line:match("RSM") then return C.CYAN end
+            if line:match("HIGH") then return C.GREEN end
+            if line:match("MEDIUM") then return C.AMBER end
+            if line:match("LOW") then return C.RED end
+            if line:match("^  ") then return C.TEXT end
+            return C.MUTED
+        end
+
+        for i, line in ipairs(intelLines) do
+            local row = mk("Frame", {
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Size=UDim2.new(1,0,0,13), LayoutOrder=i, ZIndex=20,
+                Parent=vScroll})
+            mk("UIListLayout", {
+                FillDirection=Enum.FillDirection.Horizontal,
+                VerticalAlignment=Enum.VerticalAlignment.Center,
+                Parent=row})
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=string.format("%4d", i),
+                TextColor3=C.DIM, TextSize=9,
+                Size=UDim2.new(0,34,1,0),
+                TextXAlignment=Enum.TextXAlignment.Right, ZIndex=20, Parent=row})
+            mk("TextLabel", {
+                BackgroundTransparency=1, Font=Enum.Font.Code,
+                Text=" " .. line:sub(1,120),
+                TextColor3=intelLineColor(line), TextSize=9,
+                Size=UDim2.new(1,-38,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, ZIndex=20, Parent=row})
+        end
+
+        -- Populate analysis pane with live stats
+        buildIntelAnalysisPane(entry)
+
+        viewerOverlay.Visible = true
+    end
+
 
     -- ══════════════════════════════════════════════════════════════════════════
     -- TOP BAR — title + scan button + status strip
@@ -1015,7 +1270,31 @@ do
                     TextColor3=C.GREEN, TextSize=9,
                     TextXAlignment=Enum.TextXAlignment.Left,
                     Size=UDim2.new(1,0,0,12), LayoutOrder=ilo, Parent=body})
+                ilo = ilo + 1
             end
+
+            -- View Intel button
+            local intelBtnRow = mk("Frame", {
+                BackgroundTransparency=1, BorderSizePixel=0,
+                Size=UDim2.new(1,0,0,28), LayoutOrder=ilo, Parent=body})
+            local intelBtn = mk("TextButton", {
+                AutoButtonColor=false,
+                BackgroundColor3=Color3.fromRGB(14,22,20), BorderSizePixel=0,
+                Font=Enum.Font.GothamMedium, Text="▷ View Intel",
+                TextColor3=C.TEAL, TextSize=10,
+                Size=UDim2.new(0,108,0,22), Parent=intelBtnRow})
+            addCorner(intelBtn, UDim.new(0,5))
+            addStroke(intelBtn, 1, 0.4)
+            if intelBtn:FindFirstChildOfClass("UIStroke") then
+                intelBtn:FindFirstChildOfClass("UIStroke").Color = C.TEAL
+            end
+
+            -- Capture entry for closure
+            local capturedEntry = entry
+            intelBtn.MouseButton1Click:Connect(function()
+                clickSound()
+                triggerViewIntel(capturedEntry)
+            end)
         end
     end
 
