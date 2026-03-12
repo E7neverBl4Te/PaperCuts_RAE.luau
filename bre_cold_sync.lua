@@ -239,12 +239,16 @@ local function buildColdnessMap()
     local RSM   = getRSM()
     local ASE   = getASE()
 
-    -- Build set of "hot" remotes from BRE probe log
+    -- Build set of "hot" remotes from BRE probe log.
+    -- If the probe log is genuinely empty (first run, or BRE was reset)
+    -- we still proceed — no remotes are hot by default.
     local hotRemotes = {}
+    local probeLogSize = 0
     if BRE and BRE.ProbeLog then
         for _, probe in ipairs(BRE.ProbeLog) do
             if probe.sinkRemote then
                 hotRemotes[probe.sinkRemote] = true
+                probeLogSize = probeLogSize + 1
             end
         end
     end
@@ -262,11 +266,69 @@ local function buildColdnessMap()
         end
     end
 
-    -- Collect all known remotes from STS
-    local candidates = {}
+    log("INFO", string.format(
+        "Hot remotes: %d  (probe log: %d entries)",
+        (function() local n=0 for _ in pairs(hotRemotes) do n=n+1 end return n end)(),
+        probeLogSize))
+
+    -- ── Remote source 1: STS remoteIndex ──────────────────────────────────
+    -- Preferred — has path, type, and fire count metadata.
+    local rawRemotes = {}   -- {name, remoteType, path}
 
     if STS and STS.Report and STS.Report.remoteIndex then
         for _, entry in ipairs(STS.Report.remoteIndex) do
+            if entry.name then
+                table.insert(rawRemotes, {
+                    name       = entry.name,
+                    remoteType = entry.class or entry.remoteType or "Unknown",
+                    path       = entry.path,
+                    src        = "STS",
+                })
+            end
+        end
+        log("INFO", string.format("STS remoteIndex: %d entries", #rawRemotes))
+    else
+        log("WARN", "STS remoteIndex unavailable — falling back to DataModel walk")
+    end
+
+    -- ── Remote source 2: DataModel walk (fallback / supplement) ───────────
+    -- Used when STS has no report yet, or as a supplement to catch remotes
+    -- that STS missed (e.g. remotes created after the topology scan).
+    local dmSeen = {}
+    for _, svcName in ipairs({
+        "ReplicatedStorage","ReplicatedFirst","Workspace","Players"
+    }) do
+        local ok, svc = pcall(function() return game:GetService(svcName) end)
+        if ok and svc then
+            local function walk(inst, depth)
+                if depth > 8 then return end
+                for _, child in ipairs(inst:GetChildren()) do
+                    if child:IsA("RemoteEvent") or
+                       child:IsA("RemoteFunction") then
+                        if not dmSeen[child.Name] then
+                            dmSeen[child.Name] = true
+                            table.insert(rawRemotes, {
+                                name       = child.Name,
+                                remoteType = child.ClassName,
+                                path       = nil,
+                                src        = "DM",
+                            })
+                        end
+                    end
+                    walk(child, depth + 1)
+                end
+            end
+            pcall(walk, svc, 0)
+        end
+    end
+
+    log("INFO", string.format(
+        "Total raw remotes after DM walk: %d", #rawRemotes))
+
+    -- ── Score and filter ───────────────────────────────────────────────────
+    local candidates = {}
+
+    for _, entry in ipairs(rawRemotes) do
             local name = entry.name
             if not name or hotRemotes[name] then continue end
 
@@ -325,7 +387,6 @@ local function buildColdnessMap()
                 })
             end
         end
-    end
 
     -- Sort coldest first (highest score = least touched)
     table.sort(candidates, function(a,b) return a.score > b.score end)
@@ -333,6 +394,28 @@ local function buildColdnessMap()
     log("INFO", string.format(
         "Coldness map: %d remotes scanned  %d candidates (score ≥ %.2f)",
         BCS.Stats.remotesScanned, #candidates, CFG.MinColdScore))
+
+    -- Fallback: if strict filter produced nothing, lower the bar and retry
+    -- using every remote that simply isn't the previous active sink.
+    -- This handles the case where BRE.ProbeLog was empty (first run) but all
+    -- remotes happen to score below MinColdScore due to RSM/SBI penalties.
+    if #candidates == 0 then
+        log("WARN", "No candidates at MinColdScore — running fallback pass (any untouched remote)")
+        for _, entry in ipairs(rawRemotes) do
+            local name = entry.name
+            -- Only exclude the previous active sink in fallback mode
+            if name and name ~= (prevSink or "") then
+                table.insert(candidates, {
+                    name  = name,
+                    score = 0.50,  -- neutral fallback score
+                    entry = entry,
+                })
+            end
+        end
+        table.sort(candidates, function(a,b) return a.score > b.score end)
+        log("INFO", string.format(
+            "Fallback pass: %d candidates", #candidates))
+    end
 
     return candidates
 end
