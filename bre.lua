@@ -76,6 +76,12 @@ local CFG = {
     -- Direct injection
     DirectFireTimeout    = 5.0,     -- timeout for naked RemoteEvent:FireServer calls
     DirectFireRetries    = 3,       -- retries per probe when direct fire fails
+    -- Latency Governor
+    LatencyCeiling       = 0.150,   -- 150ms hard abort — above this the watchdog reacts
+    LatencyHotThreshold  = 0.100,   -- 100ms — mark mutator HOT, apply jitter
+    LatencyHotCooldown   = 4,       -- wait multiplier when a HOT mutator fires
+    -- Payload cap
+    PayloadStrCap        = 8192,    -- 8KB hard ceiling on all string probe payloads
 }
 
 -- ── Probe catalog ─────────────────────────────────────────────────────────────
@@ -346,9 +352,11 @@ end
 
 local function generateProbe(categoryId, index)
     if categoryId == "STR_BOUNDARY" then
-        -- Escalating string sizes: 64B, 256B, 1KB, 4KB, 16KB, 64KB, 256KB, 1MB
-        local sizes = {64, 256, 1024, 4096, 16384, 65536, 262144, 1048576}
-        local sz = sizes[((index-1) % #sizes) + 1]
+        -- Escalating string sizes capped at PayloadStrCap (8KB).
+        -- Sizes ≥ 16KB caused allocation stalls on the server network heap,
+        -- pushing latency past the watchdog ceiling. Flinch, not collapse.
+        local sizes = {64, 256, 1024, 2048, 4096, 6144, 8192}
+        local sz = math.min(sizes[((index-1) % #sizes) + 1], CFG.PayloadStrCap)
         return { __bre_probe=categoryId, data=string.rep("A", sz), idx=index }
 
     elseif categoryId == "TABLE_DEPTH" then
@@ -524,6 +532,10 @@ function BRE.RunProbePhase()
 
     setState(BRE.STATE.PROBING)
     log("INFO", string.format("BRE Probe Phase started — sink: %s", sinkRemote))
+    -- Latency Governor: heat table shared across all category iterations.
+    -- HOT mutators accumulate heat; ceiling breaches add 2 heat, threshold 1.
+    -- Heat drives inter-probe jitter so the server heap can breathe.
+    local hotMutators = {}
 
     task.spawn(function()
         local ok, err = pcall(function()
@@ -539,6 +551,7 @@ function BRE.RunProbePhase()
 
                 log("INFO", string.format("Probing: %s — %s", cat.id, cat.label))
                 local catAnomalies = 0
+                hotMutators[cat.id] = hotMutators[cat.id] or 0
 
                 local probe_fireMode = "UNKNOWN"
                 for idx = 1, CFG.MaxProbesPerPhase do
@@ -567,6 +580,27 @@ function BRE.RunProbePhase()
                         probe_fireMode = "ASE"
                     end
                     latency = latency or (os.clock() - t0)
+
+                    -- ── Latency Governor ──────────────────────────────────────
+                    -- CEILING breach: watchdog territory. Abort this probe,
+                    -- add 2 heat to the mutator, apply full cooldown jitter,
+                    -- then continue to the next iteration without scoring.
+                    if latency >= CFG.LatencyCeiling then
+                        hotMutators[cat.id] = hotMutators[cat.id] + 2
+                        log("GOVERN", string.format(
+                            "[%s] CEILING %.0fms — abort + HOT(heat=%d)",
+                            cat.id, latency*1000, hotMutators[cat.id]))
+                        task.wait(CFG.ProbeInterval * CFG.LatencyHotCooldown)
+                        continue
+                    end
+                    -- HOT threshold: elevated but survivable. Add 1 heat,
+                    -- apply proportional jitter after scoring.
+                    if latency >= CFG.LatencyHotThreshold then
+                        hotMutators[cat.id] = hotMutators[cat.id] + 1
+                        log("GOVERN", string.format(
+                            "[%s] HOT %.0fms  heat=%d",
+                            cat.id, latency*1000, hotMutators[cat.id]))
+                    end
 
                     local result = fireOk and fireResult or nil
                     -- Score anomaly
@@ -620,7 +654,13 @@ function BRE.RunProbePhase()
                         end
                     end
 
-                    task.wait(CFG.ProbeInterval)
+                    -- Jitter: scale inter-probe wait by accumulated heat so
+                    -- the server heap finishes deallocating before next fire.
+                    local heat = hotMutators[cat.id] or 0
+                    local jitter = heat > 0
+                        and CFG.ProbeInterval * math.min(1 + heat * 0.5, CFG.LatencyHotCooldown)
+                        or  CFG.ProbeInterval
+                    task.wait(jitter)
 
                     -- Early exit per category if we found strong anomalies
                     if catAnomalies >= 6 then
