@@ -469,29 +469,56 @@ function BCS.TunnelReSync()
             continue
         end
 
-        -- Attempt ASE Bedrock handshake
+        -- Attempt ASE Bedrock handshake.
+        -- PursueBedrock is async — it pushes a goal and returns immediately.
+        -- The nonce listen window is 8s. We fire ONCE then poll for the full
+        -- window duration. Firing multiple times piles up goals and causes
+        -- interference before any single attempt can resolve.
         local handshakeOk = false
-        for attempt = 1, CFG.HandshakeRetries do
-            local goal = {
-                type   = ASE.GOAL and ASE.GOAL.BEDROCK or "BEDROCK",
-                remote = name,
-            }
-            local hOk = pcall(function()
+        local NONCE_WINDOW  = 8.0   -- matches ASE_CFG.NonceListenTimeout
+        local POLL_INTERVAL = 0.25
+        local POLL_TIMEOUT  = NONCE_WINDOW + 2.0  -- margin past nonce window
+
+        pcall(function()
+            if ASE.PursueBedrock then
+                ASE.PursueBedrock(name, { __bcs_handshake=true })
+            end
+        end)
+
+        local t0 = os.clock()
+        while (os.clock() - t0) < POLL_TIMEOUT do
+            task.wait(POLL_INTERVAL)
+            local stats = ASE.GetStats and ASE.GetStats()
+            if stats and stats.HeartbeatAlive then
+                -- Accept if ActiveSink matches this candidate, or if bedrock
+                -- was already confirmed by a concurrent goal on another pass.
+                if stats.ActiveSink == name or
+                   (BCS.ColdRemote == nil and stats.ActiveSink ~= nil) then
+                    handshakeOk = true
+                    name = stats.ActiveSink or name
+                    break
+                end
+            end
+        end
+
+        -- One retry with a fresh fire if still not confirmed
+        if not handshakeOk then
+            pcall(function()
                 if ASE.PursueBedrock then
-                    ASE.PursueBedrock(name, { __bcs_handshake=true })
+                    ASE.PursueBedrock(name, { __bcs_handshake=true, __retry=true })
                 end
             end)
-
-            task.wait(1.5)
-
-            local stats = ASE.GetStats and ASE.GetStats()
-            if stats and stats.HeartbeatAlive and
-               stats.ActiveSink == name then
-                handshakeOk = true
-                break
+            local t1 = os.clock()
+            while (os.clock() - t1) < POLL_TIMEOUT do
+                task.wait(POLL_INTERVAL)
+                local stats = ASE.GetStats and ASE.GetStats()
+                if stats and stats.HeartbeatAlive and
+                   (stats.ActiveSink == name or stats.ActiveSink ~= nil) then
+                    handshakeOk = true
+                    name = stats.ActiveSink or name
+                    break
+                end
             end
-
-            task.wait(0.5 * attempt)
         end
 
         if handshakeOk then

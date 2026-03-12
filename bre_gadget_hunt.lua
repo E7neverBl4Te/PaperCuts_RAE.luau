@@ -908,6 +908,68 @@ function BGH.Run()
         readErrors=0, cacheHits=0,
     }
 
+    -- ── Dynamic anchor resolution ──────────────────────────────────────────────
+    -- Prefer an anchor derived from BRE's confirmed read primitives over
+    -- the hardcoded CFG.Anchor. A primitive's triggerPayload.__bre_addr is
+    -- a live code address that was inside the deserializer — a reliable .text
+    -- landmark. Fall back to CFG.Anchor if no primitives are available.
+    do
+        local BRE = _G.PC and _G.PC.BRE
+        if BRE and BRE.Primitives and #BRE.Primitives > 0 then
+            -- Pick the highest-confidence read primitive
+            local bestPrim = nil
+            for _, p in ipairs(BRE.Primitives) do
+                if p.hasRead and p.triggerPayload then
+                    if not bestPrim or p.confidence > bestPrim.confidence then
+                        bestPrim = p
+                    end
+                end
+            end
+            if bestPrim and bestPrim.triggerPayload then
+                -- Extract the address field that produced the anomaly
+                local addr = bestPrim.triggerPayload.__bre_addr
+                    or bestPrim.triggerPayload.index
+                    or bestPrim.triggerPayload.id
+                if type(addr) == "number" and addr > 0x7FF000000000 then
+                    -- Sanity: must look like a Windows user-space 64-bit address
+                    if addr ~= CFG.Anchor then
+                        log("INFO", string.format(
+                            "Anchor updated from BRE primitive %s: 0x%X → 0x%X",
+                            bestPrim.id, CFG.Anchor, addr))
+                        CFG.Anchor = addr
+                    end
+                end
+            end
+        elseif BRE and BRE.CurrentState == BRE.STATE.ACTIVE then
+            -- Bedrock is ACTIVE but no typed primitives yet —
+            -- use the confirmed sink remote's probe anomaly address if recorded
+            local probeLog = BRE.ProbeLog
+            if probeLog and #probeLog > 0 then
+                for i = #probeLog, 1, -1 do
+                    local p = probeLog[i]
+                    if p and p.anomalyScore and p.anomalyScore >= 0.45 and
+                       p.payload and type(p.payload.__bre_addr) == "number" and
+                       p.payload.__bre_addr > 0x7FF000000000 then
+                        log("INFO", string.format(
+                            "Anchor updated from probe log entry #%d: 0x%X",
+                            i, p.payload.__bre_addr))
+                        CFG.Anchor = p.payload.__bre_addr
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Expand walk range if anchor may be far from PE base.
+    -- Default 512 pages = 2MB. If the anchor is deep in a large binary
+    -- (e.g. RobloxPlayerBeta.exe > 40MB), we may need to walk further.
+    -- Cap at 4096 pages (16MB) to avoid runaway scans.
+    if CFG.MaxPEWalkPages < 1024 then
+        CFG.MaxPEWalkPages = 1024
+        log("INFO", "MaxPEWalkPages expanded to 1024 (~4MB walk range)")
+    end
+
     log("INFO", string.format(
         "BGH Full Run — sink: %s  remote class: %s",
         sinkRemote, remoteInst.ClassName))
@@ -958,6 +1020,20 @@ function BGH.SetTextBounds(base, size)
     BGH.TextSize  = size
     log("INFO", string.format(
         "Manual .text bounds: 0x%X  size=0x%X", base, size))
+end
+
+-- ── Anchor override ────────────────────────────────────────────────────────────
+-- Set the anchor address used for PE header walking.
+-- Should be called with a known code address inside .text before BGH.Run().
+-- BRE calls this automatically when a confirmed primitive is found.
+function BGH.SetAnchor(addr)
+    if type(addr) ~= "number" or addr == 0 then
+        warn("[BGH] SetAnchor: invalid address " .. tostring(addr))
+        return false
+    end
+    CFG.Anchor = addr
+    log("INFO", string.format("Anchor updated: 0x%X", addr))
+    return true
 end
 
 -- ── Reset ──────────────────────────────────────────────────────────────────────
