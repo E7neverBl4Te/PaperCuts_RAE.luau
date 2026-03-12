@@ -463,7 +463,7 @@ local function buildNumericProbe(rsmRec, value)
     local slot = findNumericArgSlot(rsmRec)
     local args = {}
     -- Fill other slots with benign defaults from RSM success values
-    for i, s in ipairs(rsmRec.ArgSig or {}) do
+    for i, s in ipairs(rsmRec and rsmRec.ArgSig or {}) do
         if i == slot then
             args[i] = value
         elseif s.DominantType == "string" and #s.SuccessStrings > 0 then
@@ -618,7 +618,7 @@ end
 local function buildStringProbe(rsmRec, str)
     local slot = findStringArgSlot(rsmRec)
     local args = {}
-    for i, s in ipairs(rsmRec.ArgSig or {}) do
+    for i, s in ipairs(rsmRec and rsmRec.ArgSig or {}) do
         if i == slot then
             args[i] = str
         elseif s.DominantType == "string" and #s.SuccessStrings > 0 then
