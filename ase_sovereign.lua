@@ -74,7 +74,7 @@ local SCFG = {
 
     -- Phase 2 timing
     ProbeInterval       = 0.15,   -- seconds between tier fires
-    ProbeTimeout        = 5.0,    -- max seconds per probe fire
+    ProbeTimeout        = 2.0,    -- max seconds per probe fire (InvokeServer timeout)
     ProbeRetries        = 2,      -- retries per tier
 
     -- Phase 2 scoring
@@ -182,20 +182,46 @@ end
 -- Handles both RemoteEvent and RemoteFunction
 local function fireRemote(inst, args, timeout)
     timeout = timeout or SCFG.ProbeTimeout
-    local byte, result, latency
-    local t0 = os.clock()
 
-    local ok, res = pcall(function()
-        if inst:IsA("RemoteFunction") then
-            return inst:InvokeServer(table.unpack(args))
-        else
+    -- FireServer (RemoteEvent) never hangs — call directly
+    if not inst:IsA("RemoteFunction") then
+        local t0 = os.clock()
+        local ok, err = pcall(function()
             inst:FireServer(table.unpack(args))
-            return nil
-        end
-    end)
-    latency = os.clock() - t0
+        end)
+        return ok, ok and nil or tostring(err), os.clock() - t0
+    end
 
-    return ok, (ok and res or tostring(res)), latency
+    -- InvokeServer (RemoteFunction) can hang indefinitely if server never
+    -- responds. Spawn it in a separate thread and poll with a timeout.
+    local done   = false
+    local ok     = false
+    local res    = nil
+    local t0     = os.clock()
+
+    task.spawn(function()
+        local callOk, callRes = pcall(function()
+            return inst:InvokeServer(table.unpack(args))
+        end)
+        if not done then
+            ok  = callOk
+            res = callRes
+        end
+        done = true
+    end)
+
+    -- Poll until result arrives or timeout expires
+    while not done and (os.clock() - t0) < timeout do
+        task.wait(0.05)
+    end
+    done = true  -- signal spawned thread to discard late result
+
+    local latency = os.clock() - t0
+    if not ok and res == nil then
+        -- Timed out
+        return false, "TIMEOUT", latency
+    end
+    return ok, ok and res or tostring(res), latency
 end
 
 -- Check if a string contains any of the given signals
