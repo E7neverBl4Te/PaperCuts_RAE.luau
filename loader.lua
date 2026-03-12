@@ -31,6 +31,8 @@ local chunks = {
     "csk.lua",             -- CSK: Cross-Session Knowledge engine
     "csk_ui.lua",          -- CSK: dashboard UI
     "ase.lua",             -- ASE: Autonomous Strategy Engine
+    "ase_sovereign.lua",
+    "ase_sovereign_ui.lua",
     "aacg.lua",            -- AACG: Autonomous Action Card Generator
     "ase_ui.lua",
     "shadow_binder.lua",          -- ASE: Script Execution Panel
