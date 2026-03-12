@@ -266,7 +266,9 @@ local function scoreRequirePrior(name, rsmRec, sbiRec, cskNode)
     if TSR and TSR.Registry then
         local bound = false
         for _, intent in pairs(TSR.Registry) do
-            if intent.BoundRemote == name then bound = true; break end
+            if type(intent) == "table" and intent.BoundRemote == name then
+                bound = true; break
+            end
         end
         if not bound then
             score = score + 0.10
