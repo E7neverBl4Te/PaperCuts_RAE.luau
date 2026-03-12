@@ -42,6 +42,8 @@ local chunks = {
     "sts_ui.lua",          -- STS: Topology Scanner UI (self-registering)
     "bre.lua",             -- BRE: BedRock Execution Engine (final stage)
     "bre_ui.lua",          -- BRE: Execution console UI (self-registering)
+    "bre_gadget_hunt.lua",  -- BGH: Binary .text gadget scanner (Layer 4 BRCE)
+    "bre_gadget_hunt_ui.lua", -- BGH: Gadget Hunt interface (self-registering)
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
