@@ -45,9 +45,9 @@ BCS.CurrentState = BCS.STATE.IDLE
 -- ── Configuration ─────────────────────────────────────────────────────────────
 local CFG = {
     -- Latency watchdog
-    LatencyCeiling      = 0.150,    -- 150ms hard cap per fire
-    LatencyWarmupSamples= 5,        -- samples to establish fresh baseline
-    LatencyMargin       = 1.6,      -- spike multiplier to trigger abort
+    LatencyCeiling      = 0.300,    -- 300ms hard cap (RemoteFunction round-trips)
+    LatencyWarmupSamples= 8,        -- more samples for a stable baseline
+    LatencyMargin       = 3.0,      -- spike must be 3× baseline to abort
 
     -- Tunnel re-sync
     MinColdScore        = 0.70,     -- minimum "coldness" score for remote candidate
@@ -835,6 +835,45 @@ function BCS.RunOverlayProbes()
     BCS.OverlayLog = {}
     BCS.Anomalies  = {}
 
+    -- ── Persistent S2C listener ─────────────────────────────────────────────
+    -- The feedback remote fires on the server's own schedule, not as a direct
+    -- echo per-fire. A per-fire 250ms window misses most events. Instead, open
+    -- one persistent listener for the full probe session. Timestamp every
+    -- arrival and correlate by timing to the nearest fire afterward.
+    local s2cRing    = {}   -- {args, arrivedAt} ring buffer
+    local S2C_WINDOW = 30   -- keep last N arrivals
+    local s2cConn    = nil
+
+    if fbInst then
+        pcall(function()
+            s2cConn = fbInst.OnClientEvent:Connect(function(...)
+                local entry = { args = {...}, arrivedAt = os.clock() }
+                table.insert(s2cRing, entry)
+                if #s2cRing > S2C_WINDOW then
+                    table.remove(s2cRing, 1)
+                end
+            end)
+        end)
+        if s2cConn then
+            log("INFO", string.format(
+                "Persistent S2C listener open on %s", BCS.FeedbackRemote))
+        end
+    end
+
+    -- Returns the S2C event closest to time t within window seconds
+    local function nearestS2C(t, window)
+        window = window or 0.5
+        local best, bestDelta = nil, math.huge
+        for _, entry in ipairs(s2cRing) do
+            local delta = math.abs(entry.arrivedAt - t)
+            if delta <= window and delta < bestDelta then
+                best      = entry.args
+                bestDelta = delta
+            end
+        end
+        return best
+    end
+
     for _, mutType in ipairs(MUTATION_TYPES) do
         if BCS.CurrentState ~= BCS.STATE.OVERLAY_PROBE then break end
 
@@ -845,33 +884,11 @@ function BCS.RunOverlayProbes()
         for idx = 1, CFG.MaxOverlayPerMutation do
             if BCS.CurrentState ~= BCS.STATE.OVERLAY_PROBE then break end
 
-            local payload = generateOverlayProbe(mutType, idx, inst)
-
-            -- If we have a feedback remote, open the S2C listener BEFORE
-            -- firing so we don't miss a fast echo.
-            local s2cCapture = nil
-            local s2cConn    = nil
-            if fbInst then
-                pcall(function()
-                    s2cConn = fbInst.OnClientEvent:Connect(function(...)
-                        if not s2cCapture then
-                            s2cCapture = {...}
-                        end
-                    end)
-                end)
-            end
+            local payload  = generateOverlayProbe(mutType, idx, inst)
+            local fireTime = os.clock()
 
             local ok, result, latency, aborted =
                 boundedFire(inst, payload, baseline.ceiling)
-
-            -- Wait briefly for S2C echo if no immediate capture
-            if fbInst and not s2cCapture and not aborted then
-                local t0 = os.clock()
-                while not s2cCapture and (os.clock() - t0) < 0.25 do
-                    task.wait(0.02)
-                end
-            end
-            if s2cConn then pcall(function() s2cConn:Disconnect() end) end
 
             if aborted then
                 mutAborts = mutAborts + 1
@@ -884,10 +901,15 @@ function BCS.RunOverlayProbes()
                 continue
             end
 
+            -- Brief yield to let any in-flight S2C reply land in the ring
+            if fbInst then task.wait(0.05) end
+
             BCS.Stats.overlayFires = BCS.Stats.overlayFires + 1
 
-            local errStr = not ok and tostring(result) or nil
-            local res    = ok and result or nil
+            local errStr     = not ok and tostring(result) or nil
+            local res        = ok and result or nil
+            -- Look for an S2C event that arrived within 500ms of our fire
+            local s2cCapture = nearestS2C(fireTime + latency, 0.5)
 
             local aScore, aReason = scoreOverlayAnomaly(
                 baseline, res, errStr, latency, s2cCapture)
@@ -902,7 +924,7 @@ function BCS.RunOverlayProbes()
                 s2cArgs   = s2cCapture,
                 aScore    = aScore,
                 aReason   = aReason,
-                firedAt   = os.clock(),
+                firedAt   = fireTime,
             }
 
             table.insert(BCS.OverlayLog, probe)
@@ -934,10 +956,13 @@ function BCS.RunOverlayProbes()
         end
     end
 
+    -- Tear down persistent listener
+    if s2cConn then pcall(function() s2cConn:Disconnect() end) end
+
     log("INFO", string.format(
-        "Overlay probing complete — %d fires  %d anomalies  %d aborts",
+        "Overlay probing complete — %d fires  %d anomalies  %d aborts  s2c_ring=%d",
         BCS.Stats.overlayFires, BCS.Stats.overlayAnomalies,
-        BCS.Stats.latencyAborts))
+        BCS.Stats.latencyAborts, #s2cRing))
 
     return true, nil
 end
