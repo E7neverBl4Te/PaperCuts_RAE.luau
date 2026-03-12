@@ -1102,6 +1102,7 @@ do
         -- ── Main executor panel ───────────────────────────────────────────────────
         local mainPanel = mk("Frame", {
             BackgroundColor3=CA.BG, BorderSizePixel=0,
+            Active=true,
             Size=UDim2.new(1,0,1,0), Visible=false, Parent=pg})
 
         -- ═══════════════════════════════════════════════════════════════════════════
@@ -1163,6 +1164,7 @@ do
         -- ═══════════════════════════════════════════════════════════════════════════
         local targetBar = mk("Frame", {
             BackgroundColor3=CA.CARD, BorderSizePixel=0,
+            Active=true,
             Position=UDim2.new(0,0,0,36), Size=UDim2.new(1,0,0,30),
             Parent=mainPanel})
         addStroke(targetBar, 1, 0.55)
@@ -1185,6 +1187,7 @@ do
             PlaceholderText="RetrieveCommands",
             PlaceholderColor3=CA.MUTED,
             Text="", TextColor3=CA.TEAL, TextSize=10,
+            Active=true, Selectable=true,
             Size=UDim2.new(0,180,1,0), Parent=targetBar})
         addCorner(targetBox, UDim.new(0,4))
         addStroke(targetBox, 1, 0.4)
@@ -1201,6 +1204,7 @@ do
             PlaceholderText="1281234852",
             PlaceholderColor3=CA.MUTED,
             Text="1281234852", TextColor3=CA.GOLD, TextSize=10,
+            Active=true, Selectable=true,
             Size=UDim2.new(0,120,1,0), Parent=targetBar})
         addCorner(assetBox, UDim.new(0,4))
         addStroke(assetBox, 1, 0.4)
@@ -1308,6 +1312,7 @@ do
             TextXAlignment=Enum.TextXAlignment.Left,
             TextYAlignment=Enum.TextYAlignment.Top,
             MultiLine=true, TextWrapped=false,
+            Active=true, Selectable=true,
             Size=UDim2.new(1,-8,0,0),
             AutomaticSize=Enum.AutomaticSize.Y,
             Parent=editorScroll})
