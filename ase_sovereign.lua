@@ -326,28 +326,60 @@ function ASE_Sovereign.RunScan()
     local RSM = getRSM()
     local SBI = getSBI()
     local CSK = getCSK()
+    local PR  = getPR()
 
-    if not RSM then
-        slog("ERROR", "RSM not available — scan aborted")
-        return false, "RSM not available"
+    -- Build the universe of remotes to score.
+    -- Primary source: RSM (has arg signatures). Fallback: PR_Registry
+    -- (when RSM has < 4 records it hasn't seen enough traffic yet).
+    local remoteNames = {}
+    local seen        = {}
+
+    if RSM then
+        for _, rec in ipairs(RSM.GetAll()) do
+            if not seen[rec.Name] then
+                seen[rec.Name] = true
+                table.insert(remoteNames, rec.Name)
+            end
+        end
     end
 
-    local allRecs = RSM.GetAll()
+    -- Supplement with PR_Registry entries not already in RSM
+    if PR then
+        for name, _ in pairs(PR) do
+            if not seen[name] then
+                seen[name] = true
+                table.insert(remoteNames, name)
+            end
+        end
+    end
+
+    -- Always include the active Bedrock sink if known
+    local ASE = _G.PC and _G.PC.ASE
+    if ASE then
+        local panel = ASE.Panel
+        if panel and panel.ActiveSink and not seen[panel.ActiveSink] then
+            seen[panel.ActiveSink] = true
+            table.insert(remoteNames, panel.ActiveSink)
+        end
+    end
+
     ASE_Sovereign.Candidates = {}
-    ASE_Sovereign.Stats.candidatesScanned = #allRecs
+    ASE_Sovereign.Stats.candidatesScanned = #remoteNames
 
-    slog("INFO", string.format("Scanning %d known remotes for sovereign surface", #allRecs))
+    slog("INFO", string.format(
+        "Scanning %d known remotes for sovereign surface", #remoteNames))
 
-    for _, rsmRec in ipairs(allRecs) do
-        local name    = rsmRec.Name
+    -- Active sink name for forced inclusion
+    local activeSink = ASE and ASE.Panel and ASE.Panel.ActiveSink
+
+    for _, name in ipairs(remoteNames) do
+        local rsmRec  = RSM  and RSM.Get(name)
         local sbiRec  = SBI  and SBI.Get(name)
         local cskNode = CSK  and CSK.GetKnowledgeNode(name)
 
-        -- Score both tracks
         local reqScore,  reqReasons  = scoreRequirePrior(name, rsmRec, sbiRec, cskNode)
         local loadScore, loadReasons = scoreLoadstringPrior(name, rsmRec, sbiRec, cskNode)
 
-        -- Determine best track
         local bestScore, bestTrack, bestReasons
         if reqScore >= loadScore then
             bestScore   = reqScore
@@ -359,9 +391,20 @@ function ASE_Sovereign.RunScan()
             bestReasons = loadReasons
         end
 
-        -- Also check if both tracks are viable (dual-track candidate)
         local dualTrack = (reqScore >= SCFG.PriorThreshold and
                            loadScore >= SCFG.PriorThreshold)
+
+        -- Force-include the active Bedrock sink regardless of prior score.
+        -- It's a confirmed live channel — always worth probing both tracks.
+        local forced = (name == activeSink)
+        if forced and bestScore < SCFG.PriorThreshold then
+            bestScore   = SCFG.PriorThreshold  -- lift to threshold floor
+            dualTrack   = true                  -- probe both tracks
+            bestReasons = (bestReasons ~= "" and bestReasons .. "; " or "") ..
+                          "forced:active_sink"
+            slog("INFO", string.format(
+                "Force-including active sink: %s", name))
+        end
 
         if bestScore >= SCFG.PriorThreshold then
             local candidate = {
@@ -388,7 +431,6 @@ function ASE_Sovereign.RunScan()
         end
     end
 
-    -- Sort by prior score, take top N
     table.sort(ASE_Sovereign.Candidates, function(a,b)
         return a.priorScore > b.priorScore
     end)
