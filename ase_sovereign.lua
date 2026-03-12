@@ -63,7 +63,7 @@ ASE_Sovereign.CONF = {
     LOW     = 0.25,
     MEDIUM  = 0.50,
     HIGH    = 0.70,
-    CERTAIN = 0.90,
+    CERTAIN = 0.70,
 }
 
 -- ── Configuration ──────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ local SCFG = {
     ProbeRetries        = 2,      -- retries per tier
 
     -- Phase 2 scoring
-    ConfirmThreshold    = 0.70,   -- min confidence to proceed to Phase 3
+    ConfirmThreshold    = 0.35,   -- min confidence to proceed to Phase 3
     TierScore           = 0.25,   -- score per REQUIRE tier passed
 
     -- Phase 3
