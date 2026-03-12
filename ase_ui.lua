@@ -171,65 +171,16 @@ do
         -- Forward declare so mode-button closures can close over it
         local doRefreshOverview
 
-        -- Mode selector
-        local _, sModeRow = makeSection(pg, "Execution Mode")
-        sModeRow.BackgroundColor3 = COL.CARD; addStroke(sModeRow, 1, 0.5)
-        local modeRow = mk("Frame", {BackgroundTransparency=1,
-            Size=UDim2.new(1,0,0,36), Parent=sModeRow})
-        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
-            Padding=UDim.new(0,8), VerticalAlignment=Enum.VerticalAlignment.Center,
-            Parent=modeRow})
-
-        local MODE_BTNS = {
-            { label="⬛ Compiled", mode="COMPILED", col=COL.BLUE  },
-            { label="⚙ Raw",      mode="RAW",      col=COL.ORANGE },
-            { label="⚡ Mastery", mode="MASTERY",  col=COL.PURP  },
-        }
-        local modeButtons = {}
-        for _, mb in ipairs(MODE_BTNS) do
-            local btn = mk("TextButton", {AutoButtonColor=false,
-                BackgroundColor3=Color3.fromRGB(225,220,212), BorderSizePixel=0,
-                Font=Enum.Font.GothamMedium, Text=mb.label,
-                TextColor3=Color3.fromRGB(90,80,70), TextSize=11,
-                Size=UDim2.new(0,110,0,30), Parent=modeRow})
-            addCorner(btn, UDim.new(0,8)); addStroke(btn, 1, 0.4)
-            local bmode = mb.mode; local bcol = mb.col
-            modeButtons[bmode] = { btn=btn, col=bcol }
-            btn.MouseButton1Click:Connect(function()
-                clickSound()
-                local ASE = _G.PC.ASE
-                if not ASE then return end
-                if bmode == "MASTERY" and not ASE.IsMasteryUnlocked() then
-                    -- Show mastery gate overlay (built below)
-                    _G._ASE_ShowMasteryGate = true
-                    return
-                end
-                -- Already in this mode — just refresh visuals, no error
-                if ASE.GetMode() == bmode then
-                    if doRefreshOverview then doRefreshOverview() end
-                    return
-                end
-                local ok, err = ASE.SetMode(bmode)
-                if ok then
-                    sendNotification("Mode: " .. bmode, "Success")
-                    if doRefreshOverview then doRefreshOverview() end
-                else
-                    sendNotification(tostring(err), "Warning")
-                end
-            end)
-        end
 
         doRefreshOverview = function()
             local ASE = _G.PC.ASE
             if not ASE then statsLabel.Text = "ASE not loaded."; return end
             local stats = ASE.GetStats()
             statsLabel.Text = string.format(
-                "Mode: %-12s  Mastery: %s\n"..
                 "Panel: %-10s  Heartbeat: %s\n"..
                 "Active Sink: %s\n"..
                 "Feedback:    %s\n"..
                 "Goals: %d active / %d total   Directives: %d",
-                stats.Mode, tostring(stats.MasteryUnlocked),
                 tostring(stats.PanelVisible), tostring(stats.HeartbeatAlive),
                 stats.ActiveSink or "none",
                 stats.ActiveFeedback or "none",
@@ -242,15 +193,7 @@ do
             riskFill.BackgroundColor3 = rb.pct < 0.5 and COL.GREEN
                 or rb.pct < 0.8 and COL.AMBER or COL.RED
 
-            -- Highlight active mode button
-            local mode = stats.Mode
-            for bmode, mb in pairs(modeButtons) do
-                local active = (bmode == mode)
-                tween(mb.btn, TweenInfo.new(0.1), {
-                    BackgroundColor3 = active and mb.col or Color3.fromRGB(225,220,212),
-                    TextColor3       = active and Color3.fromRGB(255,255,255) or COL.MUTED,
-                })
-            end
+
         end
 
         local btnRow = mk("Frame", {BackgroundTransparency=1,
@@ -1203,14 +1146,7 @@ do
         addCorner(originChip, UDim.new(0,4))
         addStroke(originChip, 1, 0.4)
 
-        local modeChip = mk("TextLabel", {
-            BackgroundColor3=CA.CARD, BorderSizePixel=0,
-            Font=Enum.Font.GothamBold, Text="COMPILED",
-            TextColor3=CA.BLUE, TextSize=9,
-            Size=UDim2.new(0,70,0,20),
-            TextXAlignment=Enum.TextXAlignment.Center, Parent=statusBar})
-        addCorner(modeChip, UDim.new(0,4))
-        addStroke(modeChip, 1, 0.4)
+
 
         -- Conf bar (right side)
         local confBg = mk("Frame", {
@@ -1792,11 +1728,7 @@ do
                     originChip.TextColor3 = oColor
                 end
 
-                local modeCol = stats.Mode=="COMPILED" and CA.BLUE
-                             or stats.Mode=="RAW"      and CA.ORANGE
-                             or                            CA.PURP
-                modeChip.Text = stats.Mode or "—"
-                modeChip.TextColor3 = modeCol
+
 
                 local confPct = stats.BedrockConf or 0
                 tween(confFill, TweenInfo.new(0.4), {
