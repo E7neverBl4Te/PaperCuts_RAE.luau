@@ -1192,6 +1192,11 @@ do
         addCorner(targetBox, UDim.new(0,4))
         addStroke(targetBox, 1, 0.4)
         mk("UIPadding", {PaddingLeft=UDim.new(0,6), Parent=targetBox})
+        -- ScrollingFrame eats input — overlay button captures focus on click
+        local _tbOverlay = mk("TextButton", {BackgroundTransparency=1,
+            BorderSizePixel=0, Text="", Size=UDim2.new(1,0,1,0),
+            ZIndex=10, Parent=targetBox})
+        _tbOverlay.MouseButton1Click:Connect(function() targetBox:CaptureFocus() end)
 
         mk("TextLabel", {BackgroundTransparency=1, Font=Enum.Font.Code,
             Text="ASSET ID:", TextColor3=CA.MUTED, TextSize=9,
@@ -1209,6 +1214,10 @@ do
         addCorner(assetBox, UDim.new(0,4))
         addStroke(assetBox, 1, 0.4)
         mk("UIPadding", {PaddingLeft=UDim.new(0,6), Parent=assetBox})
+        local _abOverlay = mk("TextButton", {BackgroundTransparency=1,
+            BorderSizePixel=0, Text="", Size=UDim2.new(1,0,1,0),
+            ZIndex=10, Parent=assetBox})
+        _abOverlay.MouseButton1Click:Connect(function() assetBox:CaptureFocus() end)
 
         -- Quick-target buttons for confirmed sovereign surfaces
         local function makeTargetBtn(parent, label, col)
@@ -1319,6 +1328,10 @@ do
         mk("UIPadding", {
             PaddingLeft=UDim.new(0,10), PaddingTop=UDim.new(0,8),
             PaddingRight=UDim.new(0,4), Parent=editorBox})
+        local _ebOverlay = mk("TextButton", {BackgroundTransparency=1,
+            BorderSizePixel=0, Text="", Size=UDim2.new(1,0,1,0),
+            ZIndex=10, Parent=editorBox})
+        _ebOverlay.MouseButton1Click:Connect(function() editorBox:CaptureFocus() end)
 
         -- Tab switching
         local function switchScriptTab(idx)
