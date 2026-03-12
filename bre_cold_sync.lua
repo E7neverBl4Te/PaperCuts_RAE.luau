@@ -481,37 +481,137 @@ function BCS.TunnelReSync()
             continue
         end
 
-        -- Attempt ASE Bedrock handshake
-        local handshakeOk = false
-        for attempt = 1, CFG.HandshakeRetries do
-            local goal = {
-                type   = ASE.GOAL and ASE.GOAL.BEDROCK or "BEDROCK",
-                remote = name,
-            }
-            local hOk = pcall(function()
-                if ASE.PursueBedrock then
-                    ASE.PursueBedrock(name, { __bcs_handshake=true })
-                end
-            end)
+        -- ── PATH A: ASE nonce handshake (full confidence) ─────────────────────
+        -- PursueBedrock fires a nonce-tagged envelope and waits for the server
+        -- to echo it back via S2C OnClientEvent. Only works for remotes with
+        -- an echo path. Fire once, poll for the full nonce window. Do NOT
+        -- retry — stacked goals interfere before any one resolves.
+        local handshakeOk   = false
+        local handshakeConf = 0.0
 
-            task.wait(1.5)
+        local NONCE_WINDOW  = 8.0
+        local POLL_INTERVAL = 0.25
+        local POLL_TIMEOUT  = NONCE_WINDOW + 1.0
 
+        pcall(function()
+            if ASE.PursueBedrock then
+                ASE.PursueBedrock(name, { __bcs_handshake=true })
+            end
+        end)
+
+        local t0 = os.clock()
+        while (os.clock() - t0) < POLL_TIMEOUT do
+            task.wait(POLL_INTERVAL)
             local stats = ASE.GetStats and ASE.GetStats()
-            if stats and stats.HeartbeatAlive and
-               stats.ActiveSink == name then
-                handshakeOk = true
-                break
+            if stats and stats.HeartbeatAlive then
+                if stats.ActiveSink == name or
+                   (BCS.ColdRemote == nil and stats.ActiveSink ~= nil) then
+                    handshakeOk   = true
+                    handshakeConf = 1.0
+                    name = stats.ActiveSink or name
+                    log("INFO", string.format(
+                        "%s — nonce echo confirmed (PATH A)", name))
+                    break
+                end
+            end
+        end
+
+        -- ── PATH B: Behavioral confirmation (reduced confidence) ───────────────
+        -- Most game remotes are fire-and-forget sinks — the server will never
+        -- echo a nonce back through OnClientEvent. Instead we confirm the
+        -- tunnel behaviorally:
+        --   1. Take the fresh latency baseline already recorded.
+        --   2. Fire 3 lightweight probe payloads.
+        --   3. Accept if >= 2 fires succeeded without exceeding ceiling AND
+        --      error strings are consistent (deterministic handler).
+        -- Confidence = 0.70 base, nudged up by latency stability.
+        -- On acceptance, manually lock ASE.Panel so downstream modules
+        -- (Step 2, Step 3, BGH) see a live sink.
+        if not handshakeOk then
+            log("INFO", string.format(
+                "%s — nonce path silent, trying behavioral confirmation (PATH B)", name))
+
+            local bBaseline = recordBaseline(inst)
+
+            local probePayload = {
+                __bcs_probe = true,
+                index       = 1,
+                value       = math.huge,  -- mild float confusion
+                n           = 0,
+            }
+
+            local PROBE_N   = 3
+            local probeOks  = 0
+            local probeLats = {}
+            local probeErrs = {}
+
+            for _ = 1, PROBE_N do
+                local pOk, pResult, pLat, pAbort =
+                    boundedFire(inst, probePayload, bBaseline.ceiling)
+                if not pAbort then
+                    probeOks = probeOks + 1
+                    table.insert(probeLats, pLat)
+                    table.insert(probeErrs,
+                        (not pOk) and tostring(pResult):sub(1,48) or "")
+                end
+                task.wait(CFG.OverlayInterval)
             end
 
-            task.wait(0.5 * attempt)
+            -- Consistency: error strings must be identical across fires
+            -- (deterministic server handler)
+            local consistent = true
+            for i = 2, #probeErrs do
+                if probeErrs[i] ~= probeErrs[1] then
+                    consistent = false; break
+                end
+            end
+
+            -- Latency stability: stddev < 10ms
+            local latStable = true
+            if #probeLats > 1 then
+                local mean = 0
+                for _, l in ipairs(probeLats) do mean = mean + l end
+                mean = mean / #probeLats
+                local variance = 0
+                for _, l in ipairs(probeLats) do
+                    variance = variance + (l - mean)^2
+                end
+                latStable = math.sqrt(variance / #probeLats) < 0.010
+            end
+
+            if probeOks >= 2 and consistent then
+                handshakeConf = 0.70
+                    + (latStable     and 0.10 or 0)
+                    + (probeOks == PROBE_N and 0.05 or 0)
+
+                -- Lock ASE Panel manually — no nonce echo occurred but
+                -- we have behavioral evidence of a live, deterministic sink
+                local asePanel = ASE.Panel
+                if asePanel then
+                    asePanel.ActiveSink     = name
+                    asePanel.HeartbeatAlive = true
+                    asePanel.BedrockConf    = handshakeConf
+                    asePanel.ActiveFeedback = nil
+                end
+
+                handshakeOk = true
+                log("INFO", string.format(
+                    "%s — PATH B confirmed  conf=%.0f%%  consistent=%s  latStable=%s",
+                    name, handshakeConf * 100,
+                    tostring(consistent), tostring(latStable)))
+            else
+                log("INFO", string.format(
+                    "%s — PATH B failed  probeOks=%d/%d  consistent=%s",
+                    name, probeOks, PROBE_N, tostring(consistent)))
+            end
         end
 
         if handshakeOk then
             BCS.ColdRemote     = name
             BCS.ColdRemoteInst = inst
             log("INFO", string.format(
-                "Cold tunnel established on %s  (coldScore=%.2f)",
-                name, score))
+                "Cold tunnel established on %s  (coldScore=%.2f  conf=%.0f%%)",
+                name, score, handshakeConf * 100))
 
             if BCS.OnTunnelFound then
                 pcall(BCS.OnTunnelFound, name, score)
@@ -519,8 +619,7 @@ function BCS.TunnelReSync()
             return true, nil
         else
             log("INFO", string.format(
-                "%s — handshake failed (%d attempts)",
-                name, CFG.HandshakeRetries))
+                "%s — both PATH A and PATH B failed, skipping", name))
         end
     end
 
