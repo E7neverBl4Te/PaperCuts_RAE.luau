@@ -62,6 +62,7 @@ local ASE_CFG = {
         RECOMPILE = 0.15,
         DISCOVER  = 0.05,
         RAW_FIRE  = 0.08,
+        SOVEREIGN = 0.20,
     },
     -- Drift threshold: SBI conf drop > this triggers RECOMPILE
     DriftThreshold      = 0.12,
@@ -77,7 +78,7 @@ local ASE_CFG = {
 -- ── Goal constants ─────────────────────────────────────────────
 ASE.GOAL   = { BEDROCK="BEDROCK", FINALIZE="FINALIZE",
                RECOMPILE="RECOMPILE", DISCOVER="DISCOVER",
-               VERIFY="VERIFY" }
+               VERIFY="VERIFY", SOVEREIGN="SOVEREIGN" }
 ASE.STATUS = { PENDING="PENDING", RUNNING="RUNNING",
                COMPLETE="COMPLETE", FAILED="FAILED", ABORTED="ABORTED" }
 ASE.MODE   = { COMPILED="COMPILED", RAW="RAW", MASTERY="MASTERY" }
@@ -197,6 +198,13 @@ function ASE_GoalEngine.Run(goal)
         ok, err = pcall(ASE_ForgeEngine.Discover, goal)
     elseif goal.goalType == ASE.GOAL.VERIFY then
         ok, err = pcall(ASE_VerifyCircuit.Run, goal)
+    elseif goal.goalType == ASE.GOAL.SOVEREIGN then
+        local SOV = _G.PC and _G.PC.Sovereign
+        if SOV then
+            ok, err = pcall(SOV.GoalRun, goal)
+        else
+            ok, err = false, "Sovereign module not loaded"
+        end
     end
 
     goal.endT = os.clock()
@@ -2712,7 +2720,14 @@ function ASE.Discover(remoteName)
     return ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=remoteName })
 end
 
--- Directive execution
+-- Push a SOVEREIGN goal. phase: nil=full run, "SOVEREIGN_SCAN",
+-- "SOVEREIGN_PROBE", or "SOVEREIGN_EXECUTE". candidateName: for EXECUTE
+-- phase, targets a specific confirmed surface by name.
+function ASE.PursueSovereign(phase, candidateName)
+    return ASE_GoalEngine.Push(ASE.GOAL.SOVEREIGN, {
+        phase=phase, candidateName=candidateName,
+    })
+end
 function ASE.Execute(intentName, args)
     return ASE_DirectiveCompiler.Execute(intentName, args)
 end
