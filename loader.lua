@@ -44,6 +44,8 @@ local chunks = {
     "bre_ui.lua",          -- BRE: Execution console UI (self-registering)
     "bre_gadget_hunt.lua",  -- BGH: Binary .text gadget scanner (Layer 4 BRCE)
     "bre_gadget_hunt_ui.lua", -- BGH: Gadget Hunt interface (self-registering)
+    "bre_cold_sync.lua",    -- BCS: Cold-Boot Re-Sync engine (guard page recovery)
+    "bre_cold_sync_ui.lua", -- BCS: Re-Sync interface (self-registering)
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
