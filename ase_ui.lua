@@ -1235,15 +1235,42 @@ do
             return b
         end
 
-        local btnRetrieve = makeTargetBtn(targetBar, "RetrieveCommands", CA.GOLD)
-        btnRetrieve.MouseButton1Click:Connect(function()
-            clickSound(); targetBox.Text = "RetrieveCommands"
-        end)
+        -- Sovereign surface buttons — rebuilt dynamically in update loop
+        local sovBtnHolder = mk("Frame", {BackgroundTransparency=1,
+            BorderSizePixel=0, Size=UDim2.new(0,0,1,0),
+            AutomaticSize=Enum.AutomaticSize.X, Parent=targetBar})
+        mk("UIListLayout", {FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,4), Parent=sovBtnHolder})
 
-        local btnFetch = makeTargetBtn(targetBar, "fetchMutators", CA.TEAL)
-        btnFetch.MouseButton1Click:Connect(function()
-            clickSound(); targetBox.Text = "fetchMutators"
-        end)
+        local renderedSovBtns = {}
+        local function rebuildSovButtons()
+            for _, b in ipairs(renderedSovBtns) do b:Destroy() end
+            renderedSovBtns = {}
+            local SOV = _G.PC and _G.PC.Sovereign
+            if not SOV then return end
+            for name, rec in pairs(SOV.GetPairs()) do
+                local isReq = rec.track == "REQUIRE_PROBE"
+                local col   = isReq and CA.GOLD or CA.TEAL
+                local b = makeTargetBtn(sovBtnHolder, name, col)
+                local rname = name
+                -- Use the asset ID that confirmed ACE if available
+                local confirmedId = nil
+                if rec.tiers and rec.tiers[3] then
+                    for _, r in ipairs(rec.tiers[3]) do
+                        if r.id then confirmedId = r.id; break end
+                    end
+                end
+                b.MouseButton1Click:Connect(function()
+                    clickSound()
+                    targetBox.Text = rname
+                    if confirmedId and assetBox.Text == "" then
+                        assetBox.Text = tostring(confirmedId)
+                    end
+                end)
+                table.insert(renderedSovBtns, b)
+            end
+        end
 
         -- ═══════════════════════════════════════════════════════════════════════════
         -- MAIN CONTENT — editor left, output right
@@ -1491,8 +1518,21 @@ do
         mk("Frame", {BackgroundColor3=CA.DIM, BorderSizePixel=0,
             Size=UDim2.new(0,1,0,28), Parent=bottomBar})
 
-        -- Quick snippets
-        local function quickBtn(label, snippet, col)
+        -- Module preset library — known useful public ModuleScript asset IDs
+        -- plus auto-populated sovereign confirmed IDs
+        local MODULE_PRESETS = {
+            -- Recon
+            { label="PlaceId",      id=nil,         snippet="return game.PlaceId",                                                                       col=CA.BLUE  },
+            { label="Players",      id=nil,         snippet='local p={} for _,v in ipairs(game:GetService("Players"):GetPlayers()) do table.insert(p,v.Name) end return p', col=CA.TEAL  },
+            { label="Workspace",    id=nil,         snippet='return {name=workspace.Name, time=workspace.DistributedGameTime}',                          col=CA.PURP  },
+            { label="DataStore",    id=nil,         snippet='return game:GetService("DataStoreService"):GetDataStore("PlayerData"):GetAsync("test")',     col=CA.GOLD  },
+            -- Known public modules (id = fire directly via require, no snippet needed)
+            { label="ProfileSvc",   id=1281234852,  snippet=nil,  col=CA.AMBER },
+            { label="DataStore2",   id=3606536339,  snippet=nil,  col=CA.AMBER },
+            { label="Knit",         id=4474981950,  snippet=nil,  col=CA.AMBER },
+        }
+
+        local function quickBtn(label, id, snippet, col)
             local b = mk("TextButton", {AutoButtonColor=false,
                 BackgroundColor3=CA.CARD, BorderSizePixel=0,
                 Font=Enum.Font.Code, Text=label,
@@ -1505,24 +1545,56 @@ do
                 Parent=b})
             b.MouseButton1Click:Connect(function()
                 clickSound()
-                scriptContents[activeScriptTab] = snippet
-                editorBox.Text = snippet
+                if id then
+                    -- Set asset ID and clear snippet — fire the module directly
+                    assetBox.Text = tostring(id)
+                end
+                if snippet then
+                    scriptContents[activeScriptTab] = snippet
+                    editorBox.Text = snippet
+                end
             end)
             return b
         end
 
-        quickBtn("PlaceId",
-            "return game.PlaceId",
-            CA.BLUE)
-        quickBtn("Players",
-            'local Players = game:GetService("Players")\nlocal names = {}\nfor _, p in ipairs(Players:GetPlayers()) do\n    table.insert(names, p.Name)\nend\nreturn names',
-            CA.TEAL)
-        quickBtn("DataStores",
-            'local DS = game:GetService("DataStoreService")\nreturn DS:GetDataStore("PlayerData"):GetAsync("test_key")',
-            CA.GOLD)
-        quickBtn("Workspace",
-            'return game:GetService("Workspace").Name .. " @ " .. tostring(workspace.DistributedGameTime)',
-            CA.PURP)
+        -- Static presets
+        for _, p in ipairs(MODULE_PRESETS) do
+            quickBtn(p.label, p.id, p.snippet, p.col)
+        end
+
+        -- Dynamic sovereign preset buttons — rebuilt when confirmed surfaces update
+        local sovPresetBtns = {}
+        local function rebuildSovPresets()
+            for _, b in ipairs(sovPresetBtns) do b:Destroy() end
+            sovPresetBtns = {}
+            local SOV = _G.PC and _G.PC.Sovereign
+            if not SOV then return end
+            for name, rec in pairs(SOV.GetPairs()) do
+                -- Find the asset ID that confirmed ACE
+                local confirmedId = nil
+                if rec.tiers and rec.tiers[3] then
+                    for _, r in ipairs(rec.tiers[3]) do
+                        if r.id then confirmedId = r.id; break end
+                    end
+                end
+                -- Also check delivery result
+                if not confirmedId and rec.deliveryResult then
+                    confirmedId = rec.deliveryResult.assetId
+                end
+                local rname = name
+                local b = quickBtn(
+                    name:sub(1,14),  -- truncate label
+                    confirmedId,
+                    nil,
+                    CA.GREEN)
+                -- Override: also set target remote on click
+                local origConn = b.MouseButton1Click
+                b.MouseButton1Click:Connect(function()
+                    targetBox.Text = rname
+                end)
+                table.insert(sovPresetBtns, b)
+            end
+        end
 
         -- ── Execution logic ────────────────────────────────────────────────────────
         local function resolveTarget()
@@ -1723,6 +1795,10 @@ do
                         end
                     end
                 end
+
+                -- Rebuild sovereign surface buttons and presets when pairs change
+                pcall(rebuildSovButtons)
+                pcall(rebuildSovPresets)
 
                 -- Status bar
                 if stats.ActiveSink then
