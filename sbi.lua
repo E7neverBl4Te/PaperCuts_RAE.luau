@@ -624,7 +624,7 @@ function SBI_SemanticProber.RecordLoadstringEcho(rec, probeExpr, response)
         { expr="return 1+1",    expect="2"    },
         { expr="return 2*3",    expect="6"    },
         { expr="return 42",     expect="42"   },
-        { expr="return "ok"", expect="ok"   },
+        { expr='return "ok"',  expect='ok'   },
     }
     for _, id in ipairs(IDENTITIES) do
         if probeExpr and probeExpr:lower():find(id.expr:lower(), 1, true) then
