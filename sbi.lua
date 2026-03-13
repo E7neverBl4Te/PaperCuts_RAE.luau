@@ -84,14 +84,18 @@ local SBI_SIG_RANK = {
 
 -- ── Server logic constants ────────────────────────────────────
 SBI.LOGIC = {
-    ECONOMY_GRANT    = "ECONOMY_GRANT",
-    INVENTORY_MUTATE = "INVENTORY_MUTATE",
-    SESSION_CONTROL  = "SESSION_CONTROL",
-    PHYSICS_OVERRIDE = "PHYSICS_OVERRIDE",
-    DIAGNOSTIC       = "DIAGNOSTIC",
-    HEARTBEAT        = "HEARTBEAT",
-    ANTICHEAT        = "ANTICHEAT",
-    UNKNOWN          = "UNKNOWN",
+    ECONOMY_GRANT        = "ECONOMY_GRANT",
+    INVENTORY_MUTATE     = "INVENTORY_MUTATE",
+    SESSION_CONTROL      = "SESSION_CONTROL",
+    PHYSICS_OVERRIDE     = "PHYSICS_OVERRIDE",
+    DIAGNOSTIC           = "DIAGNOSTIC",
+    HEARTBEAT            = "HEARTBEAT",
+    ANTICHEAT            = "ANTICHEAT",
+    UNKNOWN              = "UNKNOWN",
+    -- Semantic ACE targets
+    EXECUTION_CANDIDATE  = "EXECUTION_CANDIDATE",  -- require()/loadstring() surface
+    REPLICATION_SINK     = "REPLICATION_SINK",     -- state mutation visible to all clients
+    STATE_MUTATION       = "STATE_MUTATION",       -- unauthorized state write (economy/inventory)
 }
 
 SBI.VALIDATION = {
@@ -164,6 +168,14 @@ local function SBI_NewRecord(name)
 
         -- Side effects
         SideEffects       = {},   -- [remoteName] = {confidence, delayMs}
+
+        -- Semantic ACE probe data
+        YieldLatencies    = {},  -- latencies observed when probing with asset IDs
+        YieldBaseline     = nil, -- baseline latency (non-asset probes)
+        YieldDivergence   = 0.0, -- mean(yield) - baseline; >100ms → EXECUTION_CANDIDATE
+        ReplicationEvents = 0,   -- S2C events fired to others within probe window
+        DifferentialDeltas= {},  -- SR domain → delta count from differential probes
+        LoadstringSignals = 0,   -- identity expression echo count
 
         -- Meta
         ProbeCount        = 0,
@@ -571,6 +583,78 @@ function SBI_ACDetector.Classify(rec)
 end
 
 -- ═════════════════════════════════════════════════════════════
+-- MODULE 4b — SEMANTIC PROBE CLASSIFIER
+-- Records evidence from three probe strategies:
+--   1. Asset Loader: numeric arg → yield latency divergence
+--   2. Evaluator:    string arg → identity expression echo
+--   3. State Mutation: differential SR delta from firing
+--
+-- Called from SBI.OnSemanticProbe (wired from ASE differential
+-- probe results via the SR→ASE feedback wire).
+-- ═════════════════════════════════════════════════════════════
+local SBI_SemanticProber = {}
+
+-- Record a yield latency observation (Asset Loader probe)
+-- latency = seconds the InvokeServer took; isAssetProbe = true if we sent an assetId
+function SBI_SemanticProber.RecordYield(rec, latency, isAssetProbe)
+    if isAssetProbe then
+        table.insert(rec.YieldLatencies, latency)
+        if #rec.YieldLatencies > 32 then table.remove(rec.YieldLatencies, 1) end
+    else
+        -- Non-asset probe: use as baseline
+        rec.YieldBaseline = rec.YieldBaseline and
+            (rec.YieldBaseline * 0.8 + latency * 0.2) or latency
+    end
+    -- Recompute divergence
+    if #rec.YieldLatencies > 0 and rec.YieldBaseline then
+        local sum = 0
+        for _, v in ipairs(rec.YieldLatencies) do sum = sum + v end
+        local mean = sum / #rec.YieldLatencies
+        rec.YieldDivergence = (mean - rec.YieldBaseline) * 1000  -- convert to ms
+    end
+end
+
+-- Record an identity expression echo (Evaluator probe)
+-- If we sent "return 1+1" and got back "2", increment signal
+function SBI_SemanticProber.RecordLoadstringEcho(rec, probeExpr, response)
+    if not response then return end
+    local res = tostring(response):lower()
+    -- Check for known identity results
+    local IDENTITIES = {
+        { expr="return 1+1",    expect="2"    },
+        { expr="return 2*3",    expect="6"    },
+        { expr="return 42",     expect="42"   },
+        { expr="return "ok"", expect="ok"   },
+    }
+    for _, id in ipairs(IDENTITIES) do
+        if probeExpr and probeExpr:lower():find(id.expr:lower(), 1, true) then
+            if res:find(id.expect, 1, true) then
+                rec.LoadstringSignals = rec.LoadstringSignals + 1
+            end
+        end
+    end
+end
+
+-- Record SR differential probe results
+-- result = SR.DifferentialWatch return value
+function SBI_SemanticProber.RecordDifferential(rec, result)
+    if not result then return end
+    for _, ch in ipairs(result.changes) do
+        local d = ch.domain or "UNKNOWN"
+        rec.DifferentialDeltas[d] = (rec.DifferentialDeltas[d] or 0) + 1
+    end
+    -- Count S2C replication events: NETWORK domain changes = possible replication
+    if result.dominated == "NETWORK" then
+        rec.ReplicationEvents = rec.ReplicationEvents + 1
+    end
+    -- Any ECONOMY or INVENTORY delta = state mutation candidate
+    if (rec.DifferentialDeltas["ECONOMY"] or 0) > 0 or
+       (rec.DifferentialDeltas["INVENTORY"] or 0) > 0 then
+        rec.FindingCount = rec.FindingCount + 1
+    end
+end
+
+-- ═════════════════════════════════════════════════════════════
 -- MODULE 5 — SERVER LOGIC CLASSIFIER
 -- Decision table combining all signals.
 -- ═════════════════════════════════════════════════════════════
@@ -596,6 +680,61 @@ function SBI_LogicClassifier.Classify(rec)
     local val = rec.ValidationPattern
     local ac  = rec.ACPattern
     local dir = rec.Direction
+
+    -- ── Semantic ACE targets (highest priority) ───────────────
+
+    -- EXECUTION_CANDIDATE: yield latency divergence > 80ms
+    -- Server is fetching an asset from Roblox's CDN — require() surface.
+    -- Also triggered by RSM ArgSig with high numeric variance (asset ID range).
+    if rec.YieldDivergence >= 80 then
+        rec.ServerLogic = SBI.LOGIC.EXECUTION_CANDIDATE; return
+    end
+    -- Fallback: RSM numeric arg sig in asset ID range (1e8 – 1e13)
+    local RSM = _G.PC.RSM
+    local rsmRec = RSM and RSM.Get(rec.Name)
+    if rsmRec then
+        for _, argSig in ipairs(rsmRec.ArgSig or {}) do
+            if argSig.type == "number" and argSig.mean and
+               argSig.mean >= 1e7 and argSig.mean <= 1e13 and
+               (argSig.std or 0) > 1e5 then
+                rec.ServerLogic = SBI.LOGIC.EXECUTION_CANDIDATE; return
+            end
+        end
+    end
+
+    -- REPLICATION_SINK: differential probe showed NETWORK domain deltas
+    -- or firing causes S2C events to other clients (SideEffects present).
+    local replEvents = rec.ReplicationEvents or 0
+    local netDeltas  = (rec.DifferentialDeltas or {})["NETWORK"] or 0
+    if replEvents >= 1 or netDeltas >= 2 then
+        rec.ServerLogic = SBI.LOGIC.REPLICATION_SINK; return
+    end
+    -- Fallback: multiple outgoing SideEffects to S2C remotes
+    local s2cCount = 0
+    for tgt, se in pairs(rec.SideEffects) do
+        local tgtRec = RSM and RSM.Get(tgt)
+        if tgtRec and tgtRec.Direction == "S2C" and se.confidence > 0.4 then
+            s2cCount = s2cCount + 1
+        end
+    end
+    if s2cCount >= 2 then
+        rec.ServerLogic = SBI.LOGIC.REPLICATION_SINK; return
+    end
+
+    -- STATE_MUTATION: differential probe showed ECONOMY or INVENTORY deltas
+    -- without triggering full ECONOMY_GRANT classification (no validation pattern yet).
+    local econDeltas = (rec.DifferentialDeltas or {})["ECONOMY"] or 0
+    local invDeltas  = (rec.DifferentialDeltas or {})["INVENTORY"] or 0
+    if (econDeltas + invDeltas) >= 1 and
+       val == SBI.VALIDATION.NONE and
+       rec.ServerLogic ~= SBI.LOGIC.ECONOMY_GRANT then
+        rec.ServerLogic = SBI.LOGIC.STATE_MUTATION; return
+    end
+
+    -- LOADSTRING evaluator: identity expression echoes
+    if (rec.LoadstringSignals or 0) >= 1 then
+        rec.ServerLogic = SBI.LOGIC.EXECUTION_CANDIDATE; return
+    end
 
     -- ANTICHEAT: periodic + no state changes + corrects
     if (ac == SBI.AC.CORRECTS or ac == SBI.AC.CORRECTS_FAST) and
@@ -917,6 +1056,69 @@ end
 -- Called by Operator.ExecuteProbe (pre-probe hook)
 function SBI.OnPreProbe(probeID)
     pcall(SBI_Causal.PreSnapshot, probeID)
+end
+
+-- ═════════════════════════════════════════════════════════════
+-- SEMANTIC PROBE ENTRY POINTS
+-- Called by ASE differential probe pipeline via SR feedback wire.
+-- ═════════════════════════════════════════════════════════════
+
+-- Called when ASE fires an Asset Loader probe
+-- latency is seconds; isAssetProbe true if a numeric assetId was sent
+function SBI.OnAssetProbe(remoteName, latency, isAssetProbe)
+    local rec = SBI_GetOrCreate(remoteName)
+    SBI_SemanticProber.RecordYield(rec, latency, isAssetProbe)
+    SBI_LogicClassifier.Classify(rec)
+    rec.Confidence  = SBI_ComputeConfidence(rec)
+    rec.LastUpdated = os.clock()
+end
+
+-- Called when ASE fires a Loadstring/Evaluator probe
+function SBI.OnEvaluatorProbe(remoteName, probeExpr, response)
+    local rec = SBI_GetOrCreate(remoteName)
+    SBI_SemanticProber.RecordLoadstringEcho(rec, probeExpr, response)
+    SBI_LogicClassifier.Classify(rec)
+    rec.Confidence  = SBI_ComputeConfidence(rec)
+    rec.LastUpdated = os.clock()
+end
+
+-- Called when ASE completes a differential SR watch on a remote
+-- result = SR.DifferentialWatch return value
+function SBI.OnDifferentialProbe(remoteName, result)
+    local rec = SBI_GetOrCreate(remoteName)
+    SBI_SemanticProber.RecordDifferential(rec, result)
+    SBI_LogicClassifier.Classify(rec)
+    rec.Confidence  = SBI_ComputeConfidence(rec)
+    rec.LastUpdated = os.clock()
+    -- Emit finding if a new semantic class was assigned
+    local logic = rec.ServerLogic
+    if logic == SBI.LOGIC.EXECUTION_CANDIDATE or
+       logic == SBI.LOGIC.REPLICATION_SINK    or
+       logic == SBI.LOGIC.STATE_MUTATION then
+        if SBI.OnSemanticFinding then
+            pcall(SBI.OnSemanticFinding, {
+                remoteName = remoteName,
+                logic      = logic,
+                record     = SBI.Get(remoteName),
+            })
+        end
+    end
+end
+
+-- Callback: wire ASE here to receive semantic findings
+-- SBI.OnSemanticFinding = function(finding) ... end
+SBI.OnSemanticFinding = nil
+
+-- Get all remotes classified as a specific semantic ACE type
+function SBI.GetSemanticTargets(logicType)
+    local out = {}
+    for _, rec in pairs(SBI_Map) do
+        if rec.ServerLogic == logicType then
+            table.insert(out, SBI.Get(rec.Name))
+        end
+    end
+    table.sort(out, function(a, b) return a.Confidence > b.Confidence end)
+    return out
 end
 
 -- ═════════════════════════════════════════════════════════════

@@ -89,6 +89,30 @@ local SR_Snapshots    = {}
 local SR_SnapshotPtr  = 0
 local SR_SnapshotCount= 0
 
+-- ── Delta event bus ───────────────────────────────────────────
+-- Callbacks fire whenever a StateVar value changes.
+-- [i] = {fn, remoteName or nil}  (remoteName=nil = watch all)
+local SR_DeltaListeners = {}
+
+local function SR_EmitDelta(sv, prevVal, source)
+    if #SR_DeltaListeners == 0 then return end
+    local event = {
+        domain        = sv.domain,
+        varName       = sv.name,
+        prevValue     = prevVal,
+        newValue      = sv.value,
+        delta         = sv.delta,
+        remoteBinding = sv.remoteBinding,
+        source        = source,
+        t             = os.clock(),
+    }
+    for _, listener in ipairs(SR_DeltaListeners) do
+        if listener.remoteName == nil or listener.remoteName == sv.remoteBinding then
+            task.spawn(listener.fn, event)
+        end
+    end
+end
+
 -- ── Path → domain + varName classifier ────────────────────────
 -- Priority-ordered rules. First match wins.
 local SR_PATH_RULES = {
@@ -316,6 +340,11 @@ local function SR_Apply(sv, newValue, confidence, source)
     sv.source      = source
     sv.updateCount = sv.updateCount + 1
     SR_PushHistory(sv, sv.value, source, delta)
+
+    -- Emit delta event if value actually changed
+    if sv.value ~= prevVal then
+        pcall(SR_EmitDelta, sv, prevVal, source)
+    end
 end
 
 -- ═════════════════════════════════════════════════════════════
@@ -851,6 +880,110 @@ end
 -- Probe result hook (called alongside RSM's OnTranslatorReport)
 function SR.OnTranslatorReport(report)
     pcall(SR_Ingester.TranslatorReport, report)
+end
+
+-- ── Delta subscription API ───────────────────────────────────
+-- SR.Subscribe(fn, remoteName?)
+--   fn(event) fires on every StateVar change.
+--   If remoteName is given, only fires for changes attributed
+--   to that remote (via remoteBinding).
+--   Returns a handle to pass to SR.Unsubscribe.
+function SR.Subscribe(fn, remoteName)
+    local handle = { fn=fn, remoteName=remoteName }
+    table.insert(SR_DeltaListeners, handle)
+    return handle
+end
+
+function SR.Unsubscribe(handle)
+    for i, l in ipairs(SR_DeltaListeners) do
+        if l == handle then
+            table.remove(SR_DeltaListeners, i)
+            return true
+        end
+    end
+    return false
+end
+
+-- SR.DifferentialWatch(fireFunc, windowSecs, remoteName?)
+--   1. Takes a pre-fire snapshot.
+--   2. Calls fireFunc() (should fire a remote).
+--   3. Waits up to windowSecs, collecting all delta events.
+--   4. Returns {changes, elapsed} where changes is the diff.
+--
+--   Also returns a structured summary:
+--   {
+--     changes    — list of {domain, varName, prevValue, newValue, delta, remoteBinding}
+--     elapsed    — wall time
+--     anyChange  — bool
+--     dominated  — domain with most changes
+--   }
+function SR.DifferentialWatch(fireFunc, windowSecs, remoteName)
+    windowSecs = windowSecs or 2.0
+    local collected = {}
+    local done      = false
+
+    -- Subscribe to all deltas (or just from this remote)
+    local handle = SR.Subscribe(function(event)
+        if not done then
+            table.insert(collected, event)
+        end
+    end, remoteName)  -- nil = catch all
+
+    -- Pre-snapshot
+    local snapBefore = SR.TakeSnapshot()
+    local t0         = os.clock()
+
+    -- Fire
+    pcall(fireFunc)
+
+    -- Wait window
+    task.wait(windowSecs)
+    done = true
+    SR.Unsubscribe(handle)
+
+    -- Post-snapshot diff
+    local snapAfter = SR.TakeSnapshot()
+    local diffChanges = SR.Diff(snapBefore, snapAfter)
+
+    -- Merge: prefer snapshot diff (more reliable), augment with live events
+    local seen = {}
+    for _, ch in ipairs(diffChanges) do
+        seen[ch.domain .. "." .. ch.varName] = true
+    end
+    for _, ev in ipairs(collected) do
+        local key = ev.domain .. "." .. ev.varName
+        if not seen[key] then
+            table.insert(diffChanges, {
+                domain        = ev.domain,
+                varName       = ev.varName,
+                prevValue     = ev.prevValue,
+                newValue      = ev.newValue,
+                delta         = ev.delta,
+                confidence    = 0.5,
+                source        = ev.source,
+                remoteBinding = ev.remoteBinding,
+            })
+            seen[key] = true
+        end
+    end
+
+    -- Domain tallying
+    local domainCounts = {}
+    for _, ch in ipairs(diffChanges) do
+        domainCounts[ch.domain] = (domainCounts[ch.domain] or 0) + 1
+    end
+    local dominated, domMax = "UNKNOWN", 0
+    for d, n in pairs(domainCounts) do
+        if n > domMax then dominated = d; domMax = n end
+    end
+
+    return {
+        changes   = diffChanges,
+        elapsed   = os.clock() - t0,
+        anyChange = #diffChanges > 0,
+        dominated = dominated,
+        rawEvents = collected,
+    }
 end
 
 -- ═════════════════════════════════════════════════════════════

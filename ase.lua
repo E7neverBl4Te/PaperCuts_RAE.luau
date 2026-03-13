@@ -56,13 +56,17 @@ local ASE_CFG = {
     SessionRiskBudget   = 1.0,
     -- Risk cost per operation type
     RiskCost = {
-        BEDROCK   = 0.25,
-        VERIFY    = 0.08,
-        FINALIZE  = 0.10,
-        RECOMPILE = 0.15,
-        DISCOVER  = 0.05,
-        RAW_FIRE  = 0.08,
-        SOVEREIGN = 0.20,
+        BEDROCK        = 0.25,
+        VERIFY         = 0.08,
+        FINALIZE       = 0.10,
+        RECOMPILE      = 0.15,
+        DISCOVER       = 0.05,
+        RAW_FIRE       = 0.08,
+        -- Semantic ACE probe goals
+        ASSET_PROBE    = 0.06,
+        EVAL_PROBE     = 0.06,
+        DIFF_PROBE     = 0.04,
+        SEMANTIC_SWEEP = 0.15,
     },
     -- Drift threshold: SBI conf drop > this triggers RECOMPILE
     DriftThreshold      = 0.12,
@@ -78,7 +82,13 @@ local ASE_CFG = {
 -- ── Goal constants ─────────────────────────────────────────────
 ASE.GOAL   = { BEDROCK="BEDROCK", FINALIZE="FINALIZE",
                RECOMPILE="RECOMPILE", DISCOVER="DISCOVER",
-               VERIFY="VERIFY", SOVEREIGN="SOVEREIGN" }
+               VERIFY="VERIFY",
+               -- Semantic ACE probe goals
+               ASSET_PROBE    = "ASSET_PROBE",    -- yield latency probe (require() hunt)
+               EVAL_PROBE     = "EVAL_PROBE",      -- identity expression echo (loadstring hunt)
+               DIFF_PROBE     = "DIFF_PROBE",      -- SR differential watch (state mutation hunt)
+               SEMANTIC_SWEEP = "SEMANTIC_SWEEP",  -- run all three on every candidate
+             }
 ASE.STATUS = { PENDING="PENDING", RUNNING="RUNNING",
                COMPLETE="COMPLETE", FAILED="FAILED", ABORTED="ABORTED" }
 ASE.MODE   = { COMPILED="COMPILED", RAW="RAW", MASTERY="MASTERY" }
@@ -153,6 +163,232 @@ end
 -- ═════════════════════════════════════════════════════════════
 -- MODULE 1 — GOAL ENGINE
 -- ═════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════
+-- SEMANTIC PROBE ENGINE
+-- Three probe strategies wired through SR.DifferentialWatch
+-- and reporting back to SBI via SBI.OnAssetProbe etc.
+-- ═══════════════════════════════════════════════════════════════
+local ASE_SemanticProbes = {}
+
+-- Helper: resolve a remote instance from name
+local function ASE_GetRemoteInst(name)
+    local PR = _G.PC.PR_Registry
+    return PR and PR[name] and PR[name].Remote or nil
+end
+
+-- Helper: fire a remote with a timeout, return ok, result, latency
+local function ASE_TimedFire(inst, args, timeout)
+    timeout = timeout or 3.0
+    if not inst then return false, "no_instance", 0 end
+    local t0   = os.clock()
+    local done, ok, res = false, false, nil
+    task.spawn(function()
+        local callOk, callRes = pcall(function()
+            if inst:IsA("RemoteFunction") then
+                return inst:InvokeServer(table.unpack(args))
+            else
+                inst:FireServer(table.unpack(args))
+            end
+        end)
+        if not done then ok = callOk; res = callRes end
+        done = true
+    end)
+    while not done and (os.clock() - t0) < timeout do task.wait(0.05) end
+    done = true
+    return ok, ok and res or tostring(res), os.clock() - t0
+end
+
+-- ── STRATEGY 1: Asset Loader Probe ────────────────────────────
+-- Fires the remote with a known harmless asset ID and a baseline
+-- non-asset arg. Measures latency divergence.
+-- If yield latency >> baseline → server is fetching from CDN →
+-- EXECUTION_CANDIDATE.
+local ASSET_PROBE_IDS = {
+    1281234852,   -- ProfileService (well-known public module)
+    3606536339,   -- DataStore2
+    4474981950,   -- Knit
+    9223372036,   -- nonexistent but valid range ID
+}
+local BASELINE_ARGS = { 0, -1, "probe" }
+
+function ASE_SemanticProbes.RunAssetProbe(goal)
+    local remoteName = goal.params and goal.params.remoteName
+    if not remoteName then return end
+    local inst = ASE_GetRemoteInst(remoteName)
+    if not inst then return end
+
+    local SBI = _G.PC.SBI
+
+    -- Baseline: fire with non-asset args, measure latency
+    for _, arg in ipairs(BASELINE_ARGS) do
+        local ok, res, lat = ASE_TimedFire(inst, {arg}, 2.0)
+        if SBI then SBI.OnAssetProbe(remoteName, lat, false) end
+        task.wait(0.3)
+    end
+
+    -- Asset probes: fire with each candidate asset ID
+    for _, assetId in ipairs(ASSET_PROBE_IDS) do
+        local ok, res, lat = ASE_TimedFire(inst, {assetId}, 4.0)
+        if SBI then SBI.OnAssetProbe(remoteName, lat, true) end
+        -- Log to output
+        local rec = SBI and SBI.Get(remoteName)
+        if rec and rec.YieldDivergence >= 80 then
+            print(string.format("[ASE][ASSET_PROBE] %s: divergence=%.0fms → EXECUTION_CANDIDATE",
+                remoteName, rec.YieldDivergence))
+        end
+        task.wait(0.5)
+    end
+end
+
+-- ── STRATEGY 2: Evaluator Probe (loadstring / Lua-in-Lua VM) ──
+-- Sends identity expressions as string arguments.
+-- If the server echoes back the computed result → loadstring surface.
+local EVAL_EXPRESSIONS = {
+    "return 42",
+    "return 1+1",
+    "return 2*3",
+    "return tostring(42)",
+    "print(42)",          -- no return but may log
+    "[[return 42]]",      -- long string variant
+}
+
+function ASE_SemanticProbes.RunEvalProbe(goal)
+    local remoteName = goal.params and goal.params.remoteName
+    if not remoteName then return end
+    local inst = ASE_GetRemoteInst(remoteName)
+    if not inst then return end
+
+    local SBI = _G.PC.SBI
+
+    for _, expr in ipairs(EVAL_EXPRESSIONS) do
+        local ok, res, lat = ASE_TimedFire(inst, {expr}, 2.5)
+        if SBI then SBI.OnEvaluatorProbe(remoteName, expr, ok and res or nil) end
+        local rec = SBI and SBI.Get(remoteName)
+        if rec and (rec.LoadstringSignals or 0) >= 1 then
+            print(string.format("[ASE][EVAL_PROBE] %s: echo confirmed → EXECUTION_CANDIDATE",
+                remoteName))
+        end
+        task.wait(0.4)
+    end
+end
+
+-- ── STRATEGY 3: Differential SR Watch (State Mutation) ────────
+-- Uses SR.DifferentialWatch to detect any state change the server
+-- makes when this remote fires — including changes only visible
+-- to other clients (replication).
+-- Fires with +1 delta on numeric args, or a crafted small table.
+function ASE_SemanticProbes.RunDiffProbe(goal)
+    local remoteName = goal.params and goal.params.remoteName
+    if not remoteName then return end
+    local inst = ASE_GetRemoteInst(remoteName)
+    if not inst then return end
+
+    local SR  = _G.PC.SR
+    local SBI = _G.PC.SBI
+    if not SR then return end
+
+    -- Probe args: try common small mutations
+    local DIFF_ARGS = {
+        {1},
+        {1, 1},
+        {"buy", 1},
+        {"add", 1},
+        {true},
+        {},
+    }
+
+    for _, args in ipairs(DIFF_ARGS) do
+        local result = SR.DifferentialWatch(function()
+            pcall(function()
+                if inst:IsA("RemoteFunction") then
+                    inst:InvokeServer(table.unpack(args))
+                else
+                    inst:FireServer(table.unpack(args))
+                end
+            end)
+        end, 1.5, nil)   -- watch ALL domains, 1.5s window
+
+        if SBI then SBI.OnDifferentialProbe(remoteName, result) end
+
+        if result.anyChange then
+            print(string.format(
+                "[ASE][DIFF_PROBE] %s: %d state changes detected, dominated=%s",
+                remoteName, #result.changes, result.dominated))
+            for _, ch in ipairs(result.changes) do
+                print(string.format("  [%s.%s] %s → %s (Δ%s)",
+                    ch.domain, ch.varName,
+                    tostring(ch.prevValue), tostring(ch.newValue),
+                    tostring(ch.delta)))
+            end
+        end
+        task.wait(0.6)
+    end
+end
+
+-- ── Full Semantic Sweep: runs all 3 strategies on one remote ──
+function ASE_SemanticProbes.RunSweep(goal)
+    local remoteName = goal.params and goal.params.remoteName
+    if not remoteName then return end
+
+    print(string.format("[ASE][SWEEP] Starting semantic sweep on %s", remoteName))
+
+    -- Run all three in sequence
+    pcall(ASE_SemanticProbes.RunAssetProbe,  { params={ remoteName=remoteName } })
+    pcall(ASE_SemanticProbes.RunEvalProbe,   { params={ remoteName=remoteName } })
+    pcall(ASE_SemanticProbes.RunDiffProbe,   { params={ remoteName=remoteName } })
+
+    -- Final classification
+    local SBI = _G.PC.SBI
+    local rec = SBI and SBI.Get(remoteName)
+    if rec then
+        print(string.format("[ASE][SWEEP] %s → ServerLogic=%s conf=%.2f",
+            remoteName, rec.ServerLogic, rec.Confidence))
+    end
+end
+
+-- Public: kick off a sweep on all PR_Registry remotes above a priority threshold
+function ASE.SemanticSweepAll(minRSMConf)
+    minRSMConf = minRSMConf or 0.20
+    local PR  = _G.PC.PR_Registry
+    local RSM = _G.PC.RSM
+    if not PR then return end
+    local targets = {}
+    for name, rec in pairs(PR) do
+        local rsmRec = RSM and RSM.Get(name)
+        local conf = rsmRec and rsmRec.Confidence or 0
+        if conf >= minRSMConf or rec.Direction == "C2S" then
+            table.insert(targets, name)
+        end
+    end
+    print(string.format("[ASE] SemanticSweepAll: %d targets queued", #targets))
+    for _, name in ipairs(targets) do
+        ASE_GoalEngine.Push(ASE.GOAL.SEMANTIC_SWEEP, { remoteName=name })
+        task.wait(0.1)
+    end
+end
+
+-- Wire SBI.OnSemanticFinding → ASE log
+task.defer(function()
+    local SBI = _G.PC.SBI
+    if SBI then
+        SBI.OnSemanticFinding = function(finding)
+            print(string.format(
+                "[ASE][SEMANTIC FINDING] %s classified as %s (conf=%.2f)",
+                finding.remoteName, finding.logic, finding.record and finding.record.Confidence or 0))
+            -- Auto-promote: if EXECUTION_CANDIDATE, kick off asset probe with confirmed sovereign IDs
+            if finding.logic == "EXECUTION_CANDIDATE" then
+                local SOV = _G.PC.Sovereign
+                if SOV then
+                    for id, _ in pairs(SOV.GetPairs()) do
+                        print(string.format("[ASE] Auto-promoting %s → asset probe with sovereign ID %s",
+                            finding.remoteName, tostring(id)))
+                    end
+                end
+            end
+        end
+    end
+end)
+
 local ASE_GoalEngine = {}
 
 local function ASE_NewGoal(goalType, params)
@@ -198,13 +434,14 @@ function ASE_GoalEngine.Run(goal)
         ok, err = pcall(ASE_ForgeEngine.Discover, goal)
     elseif goal.goalType == ASE.GOAL.VERIFY then
         ok, err = pcall(ASE_VerifyCircuit.Run, goal)
-    elseif goal.goalType == ASE.GOAL.SOVEREIGN then
-        local SOV = _G.PC and _G.PC.Sovereign
-        if SOV then
-            ok, err = pcall(SOV.GoalRun, goal)
-        else
-            ok, err = false, "Sovereign module not loaded"
-        end
+    elseif goal.goalType == ASE.GOAL.ASSET_PROBE then
+        ok, err = pcall(ASE_SemanticProbes.RunAssetProbe, goal)
+    elseif goal.goalType == ASE.GOAL.EVAL_PROBE then
+        ok, err = pcall(ASE_SemanticProbes.RunEvalProbe, goal)
+    elseif goal.goalType == ASE.GOAL.DIFF_PROBE then
+        ok, err = pcall(ASE_SemanticProbes.RunDiffProbe, goal)
+    elseif goal.goalType == ASE.GOAL.SEMANTIC_SWEEP then
+        ok, err = pcall(ASE_SemanticProbes.RunSweep, goal)
     end
 
     goal.endT = os.clock()
@@ -2720,14 +2957,7 @@ function ASE.Discover(remoteName)
     return ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=remoteName })
 end
 
--- Push a SOVEREIGN goal. phase: nil=full run, "SOVEREIGN_SCAN",
--- "SOVEREIGN_PROBE", or "SOVEREIGN_EXECUTE". candidateName: for EXECUTE
--- phase, targets a specific confirmed surface by name.
-function ASE.PursueSovereign(phase, candidateName)
-    return ASE_GoalEngine.Push(ASE.GOAL.SOVEREIGN, {
-        phase=phase, candidateName=candidateName,
-    })
-end
+-- Directive execution
 function ASE.Execute(intentName, args)
     return ASE_DirectiveCompiler.Execute(intentName, args)
 end
