@@ -1276,10 +1276,11 @@ do
         -- MAIN CONTENT — editor left, output right
         -- ═══════════════════════════════════════════════════════════════════════════
         local CONTENT_TOP = 66
+        local BOTTOM_BAR_H = 88   -- hunt bar (40) + execute bar (48)
         local contentArea = mk("Frame", {
             BackgroundTransparency=1, BorderSizePixel=0,
             Position=UDim2.new(0,0,0,CONTENT_TOP),
-            Size=UDim2.new(1,0,1,-(CONTENT_TOP+44)), -- leave 44px for bottom bar
+            Size=UDim2.new(1,0,1,-(CONTENT_TOP+BOTTOM_BAR_H)),
             Parent=mainPanel})
 
         local EDITOR_W = 0.62
@@ -1473,12 +1474,204 @@ do
         end)
 
         -- ═══════════════════════════════════════════════════════════════════════════
-        -- BOTTOM ACTION BAR
         -- ═══════════════════════════════════════════════════════════════════════════
+        -- HUNT CONTROL PANEL — two-row bar above execute
+        -- Row 1: Hunt pipeline buttons  (Chain Sweep, Injection Hunt, Full Hunt)
+        -- Row 2: Execute / Fire Raw / Clear + module presets
+        -- ═══════════════════════════════════════════════════════════════════════════
+        local BOTTOM_H = 88  -- two rows
+
+        -- Hunt bar (top row of bottom section)
+        local huntBar = mk("Frame", {
+            BackgroundColor3=Color3.fromRGB(12,10,18), BorderSizePixel=0,
+            Position=UDim2.new(0,0,1,-(BOTTOM_H)),
+            Size=UDim2.new(1,0,0,40), Parent=mainPanel})
+        addStroke(huntBar, 1, 0.55)
+        mk("UIPadding", {
+            PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
+            PaddingTop=UDim.new(0,6), PaddingBottom=UDim.new(0,6), Parent=huntBar})
+        mk("UIListLayout", {
+            FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,6), Parent=huntBar})
+
+        -- Hunt status chip
+        local huntStatusChip = mk("TextLabel", {
+            BackgroundColor3=CA.CARD, BorderSizePixel=0,
+            Font=Enum.Font.Code, Text="HUNT: IDLE",
+            TextColor3=CA.MUTED, TextSize=9,
+            Size=UDim2.new(0,100,0,24),
+            TextXAlignment=Enum.TextXAlignment.Center, Parent=huntBar})
+        addCorner(huntStatusChip, UDim.new(0,4))
+        addStroke(huntStatusChip, 1, 0.4)
+
+        local function setHuntStatus(text, col)
+            huntStatusChip.Text = "HUNT: " .. text
+            huntStatusChip.TextColor3 = col or CA.MUTED
+        end
+
+        local function huntBtn(parent, label, col, fn)
+            local b = mk("TextButton", {AutoButtonColor=false,
+                BackgroundColor3=CA.CARD, BorderSizePixel=0,
+                Font=Enum.Font.GothamMedium, Text=label,
+                TextColor3=col, TextSize=10,
+                Size=UDim2.new(0,0,0,28), AutomaticSize=Enum.AutomaticSize.X,
+                Parent=parent})
+            addCorner(b, UDim.new(0,6))
+            addStroke(b, 1, 0.3)
+            mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), Parent=b})
+            b.MouseButton1Click:Connect(function()
+                clickSound(); pulseClick(b)
+                task.spawn(fn)
+            end)
+            return b
+        end
+
+        -- Chain Sweep
+        huntBtn(huntBar, "⛓ Chain Sweep", CA.PURP, function()
+            setHuntStatus("CHAIN SWEEP", CA.PURP)
+            addOutputSep()
+            addOutputLine("Starting Chain Sweep on all C2S remotes...", CA.MUTED)
+            local ASE2 = _G.PC and _G.PC.ASE
+            if ASE2 and ASE2.ChainSweep then
+                ASE2.ChainSweep()
+                addOutputLine("Chain Sweep running — watch console for ghost deltas.", CA.PURP)
+            else
+                addOutputLine("ASE.ChainSweep not available.", CA.RED, "✗ ")
+            end
+            setHuntStatus("IDLE", CA.MUTED)
+        end)
+
+        -- Semantic Sweep
+        huntBtn(huntBar, "⚡ Sem. Sweep", CA.AMBER, function()
+            setHuntStatus("SEMANTIC SWEEP", CA.AMBER)
+            addOutputSep()
+            addOutputLine("Starting Semantic Sweep (Asset+Eval+Diff probes)...", CA.MUTED)
+            local ASE2 = _G.PC and _G.PC.ASE
+            if ASE2 and ASE2.SemanticSweepAll then
+                ASE2.SemanticSweepAll(0.15)
+                addOutputLine("Semantic Sweep running — watching for EXECUTION_CANDIDATE.", CA.AMBER)
+            else
+                addOutputLine("ASE.SemanticSweepAll not available.", CA.RED, "✗ ")
+            end
+            setHuntStatus("IDLE", CA.MUTED)
+        end)
+
+        -- Classify (SBI_EXEC)
+        huntBtn(huntBar, "🔍 Classify", CA.BLUE, function()
+            setHuntStatus("CLASSIFYING", CA.BLUE)
+            addOutputSep()
+            addOutputLine("Running SBI execution potential classifier...", CA.MUTED)
+            local SBI_Exec = _G.PC and _G.PC.SBI_Exec
+            if not SBI_Exec then
+                addOutputLine("SBI_Exec not loaded.", CA.RED, "✗ "); return
+            end
+            local groups, all = SBI_Exec.GetActionableTargets(0.60)
+            addOutputLine(string.format("Classified %d actionable targets:", #all), CA.BLUE, "✓ ")
+            for _, r in ipairs(all) do
+                local col = r.Type == "ASSET_SINK"       and CA.GOLD
+                         or r.Type == "EVAL_SINK"        and CA.PURP
+                         or r.Type == "REPLICATION_SINK" and CA.TEAL
+                         or CA.MUTED
+                addOutputLine(string.format("[%s] %s  conf=%.0f%%",
+                    r.Type, r.Remote, r.Confidence*100), col)
+                for _, ev in ipairs(r.Evidence or {}) do
+                    addOutputLine("  " .. ev, CA.MUTED)
+                end
+            end
+            setHuntStatus("IDLE", CA.MUTED)
+        end)
+
+        -- Injection Hunt
+        huntBtn(huntBar, "💉 Inject Hunt", CA.GREEN, function()
+            local assetId = tonumber(assetBox.Text)
+            if not assetId then
+                addOutputLine("Set ASSET ID to your C2 module ID first.", CA.AMBER, "⚠ ")
+                return
+            end
+            setHuntStatus("INJECTING", CA.GREEN)
+            addOutputSep()
+            addOutputLine(string.format("Injection Hunt → moduleId=%d", assetId), CA.GREEN)
+            local Hunt = _G.PC and _G.PC.ASE_Hunt
+            if not Hunt then
+                addOutputLine("ASE_Hunt not loaded.", CA.RED, "✗ "); return
+            end
+            local result = Hunt.Begin(assetId, { threshold=0.60, stopOnFirst=true })
+            if type(result) == "table" and result.remote then
+                addOutputLine("SOVEREIGN ACE CONFIRMED: " .. result.remote, CA.GREEN, "✓ ")
+                if result.injection then
+                    addOutputLine(string.format("  %d state changes, dominated=%s",
+                        #(result.injection.changes or {}),
+                        result.injection.dominated or "?"), CA.TEXT)
+                end
+            else
+                addOutputLine("No ACE confirmed this sweep.", CA.MUTED)
+            end
+            setHuntStatus("IDLE", CA.MUTED)
+        end)
+
+        -- Full Hunt (all three in sequence)
+        local fullHuntRunning = false
+        huntBtn(huntBar, "☠ FULL HUNT", CA.RED, function()
+            if fullHuntRunning then
+                addOutputLine("Full Hunt already running.", CA.AMBER, "⚠ "); return
+            end
+            local assetId = tonumber(assetBox.Text)
+            if not assetId then
+                addOutputLine("Set ASSET ID to your C2 module ID first.", CA.AMBER, "⚠ ")
+                return
+            end
+            fullHuntRunning = true
+            setHuntStatus("FULL HUNT", CA.RED)
+            addOutputSep()
+            addOutputLine("=== FULL HUNT INITIATED ===", CA.RED)
+            addOutputLine(string.format("Target module: %d", assetId), CA.MUTED)
+
+            -- Step 1: Classify
+            addOutputLine("[1/3] Classifying execution candidates...", CA.BLUE)
+            local SBI_Exec = _G.PC and _G.PC.SBI_Exec
+            local candidates = SBI_Exec and SBI_Exec.GetActionableTargets(0.55) or {}
+            addOutputLine(string.format("  Found %d actionable targets", #(candidates[2] or candidates)), CA.BLUE)
+
+            -- Step 2: Chain Sweep on top candidates
+            addOutputLine("[2/3] Chain sweep on top candidates...", CA.PURP)
+            local ASE2 = _G.PC and _G.PC.ASE
+            if ASE2 and ASE2.ChainSweep then
+                local topNames = {}
+                local all = (type(candidates) == "table" and candidates[2]) and candidates[2] or candidates
+                for i, r in ipairs(all) do
+                    if i > 8 then break end
+                    table.insert(topNames, r.Remote)
+                end
+                if #topNames > 0 then
+                    ASE2.ChainSweep(topNames)
+                    task.wait(#topNames * 1.2)
+                end
+            end
+
+            -- Step 3: Injection Hunt
+            addOutputLine("[3/3] Injection Hunt with module ID...", CA.GREEN)
+            local Hunt = _G.PC and _G.PC.ASE_Hunt
+            if Hunt then
+                local result = Hunt.Begin(assetId, { threshold=0.55, stopOnFirst=true })
+                if type(result) == "table" and result.remote then
+                    addOutputLine("=== SOVEREIGN ACE CONFIRMED ===", CA.GREEN, "✓ ")
+                    addOutputLine("Remote: " .. result.remote, CA.GREEN)
+                    targetBox.Text = result.remote
+                else
+                    addOutputLine("=== Hunt complete — no ACE this pass ===", CA.MUTED)
+                end
+            end
+
+            fullHuntRunning = false
+            setHuntStatus("IDLE", CA.MUTED)
+        end)
+
+        -- ── Bottom execute bar ──────────────────────────────────────────────────────
         local bottomBar = mk("Frame", {
             BackgroundColor3=CA.SURFACE, BorderSizePixel=0,
-            Position=UDim2.new(0,0,1,-44),
-            Size=UDim2.new(1,0,0,44), Parent=mainPanel})
+            Position=UDim2.new(0,0,1,-(BOTTOM_H-40)),
+            Size=UDim2.new(1,0,0,48), Parent=mainPanel})
         addStroke(bottomBar, 1, 0.5)
         mk("UIPadding", {
             PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10),
@@ -1496,7 +1689,7 @@ do
             Size=UDim2.new(0,120,0,32), Parent=bottomBar})
         addCorner(execBtn, UDim.new(0,8))
 
-        -- Fire Raw button (fires args directly, no asset ID wrapper)
+        -- Fire Raw button
         local fireRawBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=CA.CARD, BorderSizePixel=0,
             Font=Enum.Font.GothamBold, Text="Fire Raw",
@@ -1505,7 +1698,7 @@ do
         addCorner(fireRawBtn, UDim.new(0,8))
         addStroke(fireRawBtn, 1, 0.3)
 
-        -- Clear editor button
+        -- Clear editor
         local clearEdBtn = mk("TextButton", {AutoButtonColor=false,
             BackgroundColor3=CA.CARD, BorderSizePixel=0,
             Font=Enum.Font.GothamMedium, Text="Clear",
@@ -1514,22 +1707,17 @@ do
         addCorner(clearEdBtn, UDim.new(0,8))
         addStroke(clearEdBtn, 1, 0.4)
 
-        -- Separator
         mk("Frame", {BackgroundColor3=CA.DIM, BorderSizePixel=0,
             Size=UDim2.new(0,1,0,28), Parent=bottomBar})
 
-        -- Module preset library — known useful public ModuleScript asset IDs
-        -- plus auto-populated sovereign confirmed IDs
+        -- Module preset library
         local MODULE_PRESETS = {
-            -- Recon
-            { label="PlaceId",      id=nil,         snippet="return game.PlaceId",                                                                       col=CA.BLUE  },
-            { label="Players",      id=nil,         snippet='local p={} for _,v in ipairs(game:GetService("Players"):GetPlayers()) do table.insert(p,v.Name) end return p', col=CA.TEAL  },
-            { label="Workspace",    id=nil,         snippet='return {name=workspace.Name, time=workspace.DistributedGameTime}',                          col=CA.PURP  },
-            { label="DataStore",    id=nil,         snippet='return game:GetService("DataStoreService"):GetDataStore("PlayerData"):GetAsync("test")',     col=CA.GOLD  },
-            -- Known public modules (id = fire directly via require, no snippet needed)
-            { label="ProfileSvc",   id=1281234852,  snippet=nil,  col=CA.AMBER },
-            { label="DataStore2",   id=3606536339,  snippet=nil,  col=CA.AMBER },
-            { label="Knit",         id=4474981950,  snippet=nil,  col=CA.AMBER },
+            { label="PlaceId",    id=nil,        snippet="return game.PlaceId", col=CA.BLUE  },
+            { label="Players",    id=nil,        snippet='local p={} for _,v in ipairs(game:GetService("Players"):GetPlayers()) do table.insert(p,v.Name) end return p', col=CA.TEAL },
+            { label="Workspace",  id=nil,        snippet='return {name=workspace.Name, time=workspace.DistributedGameTime}', col=CA.PURP },
+            { label="DataStore",  id=nil,        snippet='return game:GetService("DataStoreService"):GetDataStore("PlayerData"):GetAsync("test")', col=CA.GOLD },
+            { label="Globals",    id=nil,        snippet='local g={} for k,v in pairs(_G) do g[tostring(k)]=type(v) end return g', col=CA.AMBER },
+            { label="ProfileSvc", id=1281234852, snippet=nil, col=CA.MUTED },
         }
 
         local function quickBtn(label, id, snippet, col)
@@ -1541,14 +1729,10 @@ do
                 Parent=bottomBar})
             addCorner(b, UDim.new(0,6))
             addStroke(b, 1, 0.4)
-            mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8),
-                Parent=b})
+            mk("UIPadding", {PaddingLeft=UDim.new(0,8), PaddingRight=UDim.new(0,8), Parent=b})
             b.MouseButton1Click:Connect(function()
                 clickSound()
-                if id then
-                    -- Set asset ID and clear snippet — fire the module directly
-                    assetBox.Text = tostring(id)
-                end
+                if id then assetBox.Text = tostring(id) end
                 if snippet then
                     scriptContents[activeScriptTab] = snippet
                     editorBox.Text = snippet
@@ -1557,12 +1741,8 @@ do
             return b
         end
 
-        -- Static presets
-        for _, p in ipairs(MODULE_PRESETS) do
-            quickBtn(p.label, p.id, p.snippet, p.col)
-        end
+        for _, p in ipairs(MODULE_PRESETS) do quickBtn(p.label, p.id, p.snippet, p.col) end
 
-        -- Dynamic sovereign preset buttons — rebuilt when confirmed surfaces update
         local sovPresetBtns = {}
         local function rebuildSovPresets()
             for _, b in ipairs(sovPresetBtns) do b:Destroy() end
@@ -1570,28 +1750,18 @@ do
             local SOV = _G.PC and _G.PC.Sovereign
             if not SOV then return end
             for name, rec in pairs(SOV.GetPairs()) do
-                -- Find the asset ID that confirmed ACE
                 local confirmedId = nil
                 if rec.tiers and rec.tiers[3] then
                     for _, r in ipairs(rec.tiers[3]) do
                         if r.id then confirmedId = r.id; break end
                     end
                 end
-                -- Also check delivery result
                 if not confirmedId and rec.deliveryResult then
                     confirmedId = rec.deliveryResult.assetId
                 end
                 local rname = name
-                local b = quickBtn(
-                    name:sub(1,14),  -- truncate label
-                    confirmedId,
-                    nil,
-                    CA.GREEN)
-                -- Override: also set target remote on click
-                local origConn = b.MouseButton1Click
-                b.MouseButton1Click:Connect(function()
-                    targetBox.Text = rname
-                end)
+                local b = quickBtn(name:sub(1,12), confirmedId, nil, CA.GREEN)
+                b.MouseButton1Click:Connect(function() targetBox.Text = rname end)
                 table.insert(sovPresetBtns, b)
             end
         end
@@ -1799,6 +1969,37 @@ do
                 -- Rebuild sovereign surface buttons and presets when pairs change
                 pcall(rebuildSovButtons)
                 pcall(rebuildSovPresets)
+
+                -- Surface new semantic findings in output console
+                local execCandidates  = _G.PC and _G.PC._ExecCandidates
+                local chainCandidates = _G.PC and _G.PC._ChainCandidates
+                if execCandidates then
+                    for name, rec in pairs(execCandidates) do
+                        if not rec._surfaced then
+                            rec._surfaced = true
+                            addOutputLine(string.format(
+                                "EXECUTION_CANDIDATE: %s (conf=%.0f%%)",
+                                name, rec.confidence*100), CA.GOLD, "⚡ ")
+                        end
+                    end
+                end
+                if chainCandidates then
+                    for name, rec in pairs(chainCandidates) do
+                        if not rec._surfaced then
+                            rec._surfaced = true
+                            addOutputLine(string.format(
+                                "INTERNAL_BUS_CANDIDATE: %s — trust boundary crossed",
+                                name), CA.PURP, "⛓ ")
+                            if rec.echo and rec.echo.foundPaths then
+                                for _, fp in ipairs(rec.echo.foundPaths) do
+                                    addOutputLine(string.format(
+                                        "  echo tag in [%s.%s]",
+                                        fp.domain, fp.varName), CA.MUTED)
+                                end
+                            end
+                        end
+                    end
+                end
 
                 -- Status bar
                 if stats.ActiveSink then

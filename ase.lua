@@ -925,18 +925,54 @@ task.defer(function()
     local SBI = _G.PC.SBI
     if SBI then
         SBI.OnSemanticFinding = function(finding)
+            local rec = finding.record
             print(string.format(
-                "[ASE][SEMANTIC FINDING] %s classified as %s (conf=%.2f)",
-                finding.remoteName, finding.logic, finding.record and finding.record.Confidence or 0))
-            -- Auto-promote: if EXECUTION_CANDIDATE, kick off asset probe with confirmed sovereign IDs
+                "[ASE][SEMANTIC FINDING] %s → %s (conf=%.0f%%)",
+                finding.remoteName, finding.logic,
+                (rec and rec.Confidence or 0)*100))
+
             if finding.logic == "EXECUTION_CANDIDATE" then
-                local SOV = _G.PC.Sovereign
-                if SOV then
-                    for id, _ in pairs(SOV.GetPairs()) do
-                        print(string.format("[ASE] Auto-promoting %s → asset probe with sovereign ID %s",
-                            finding.remoteName, tostring(id)))
+                -- Auto-promote: add to hunt queue
+                print(string.format("[ASE] EXECUTION_CANDIDATE confirmed: %s — ready for injection",
+                    finding.remoteName))
+                -- Store in a shared table for the Panel to surface
+                if not _G.PC._ExecCandidates then _G.PC._ExecCandidates = {} end
+                _G.PC._ExecCandidates[finding.remoteName] = {
+                    logic      = finding.logic,
+                    confidence = rec and rec.Confidence or 0,
+                    foundAt    = os.clock(),
+                }
+
+            elseif finding.logic == "INTERNAL_BUS_CANDIDATE" then
+                print(string.format(
+                    "[ASE] INTERNAL_BUS_CANDIDATE: %s — ghost deltas detected, trust boundary crossed",
+                    finding.remoteName))
+                -- Print ghost deltas if available
+                for _, gd in ipairs(finding.ghostDeltas or {}) do
+                    print(string.format("  ghost: [%s.%s] %s→%s",
+                        gd.domain or "?", gd.varName or "?",
+                        tostring(gd.prevValue), tostring(gd.newValue)))
+                end
+                if finding.echoResult and finding.echoResult.foundPaths then
+                    for _, fp in ipairs(finding.echoResult.foundPaths) do
+                        print(string.format("  echo tag in [%s.%s] = %s",
+                            fp.domain, fp.varName, fp.value))
                     end
                 end
+                -- Store for Panel
+                if not _G.PC._ChainCandidates then _G.PC._ChainCandidates = {} end
+                _G.PC._ChainCandidates[finding.remoteName] = {
+                    logic      = finding.logic,
+                    confidence = rec and rec.Confidence or 0,
+                    foundAt    = os.clock(),
+                    ghosts     = finding.ghostDeltas,
+                    echo       = finding.echoResult,
+                }
+
+            elseif finding.logic == "REPLICATION_SINK" then
+                print(string.format(
+                    "[ASE] REPLICATION_SINK: %s — firing this changes state for ALL clients",
+                    finding.remoteName))
             end
         end
     end
