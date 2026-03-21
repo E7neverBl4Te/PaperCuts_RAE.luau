@@ -55,11 +55,17 @@ local pageSR         = _U.pageSR
 local pageSBI        = _U.pageSBI
 local pageCSK        = _U.pageCSK
 local pageASE        = _U.pageASE
-local pageSR         = _U.pageSR
 local pageSARP       = _U.pageSARP
 local pagePR         = _U.pagePR
 local pageAVD        = _U.pageAVD
 local pageTSR        = _U.pageTSR
+local pageBRE        = _U.pageBRE
+local pageBGH        = _U.pageBGH
+local pageBCS        = _U.pageBCS
+local pageSTS        = _U.pageSTS
+local pageAPE        = _U.pageAPE
+local pageSovereign  = _U.pageSovereign
+
 local SARP           = _G.PC.SARP
 
 
@@ -89,6 +95,12 @@ local TAB_DEFS = {
     { Name="ASE",        Page=pageASE,       Icon="⚡" },
 
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
+    { Name="APE",        Page=pageAPE,       Icon="🔭" },
+    { Name="STS",        Page=pageSTS,       Icon="📶" },
+    { Name="BRE",        Page=pageBRE,       Icon="🧪" },
+    { Name="BGH",        Page=pageBGH,       Icon="🎯" },
+    { Name="BCS",        Page=pageBCS,       Icon="❄" },
+    { Name="Sovereign",  Page=pageSovereign, Icon="👁" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
 local activeTab=nil
