@@ -107,6 +107,7 @@ local activeTab=nil
 
 local function switchTab(tabDef)
     if activeTab == tabDef then return end
+    if not tabDef.Page then return end  -- guard: page not created yet
     for _, page in ipairs(pagesFolder:GetChildren()) do page.Visible=false end
     tabDef.Page.Visible=true
     panelTitle.Text=tabDef.Name

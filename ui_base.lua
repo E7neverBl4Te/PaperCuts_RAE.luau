@@ -245,11 +245,16 @@ local pageSR        = makePage("SR")
 local pageSBI       = makePage("SBI")
 local pageCSK       = makePage("CSK")
 local pageASE       = makePage("ASE")
-local pageSR        = makePage("SR")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
 local pageAVD       = makePage("AVD")
 local pageTSR       = makePage("TSR")
+local pageBRE       = makePage("BRE")
+local pageBGH       = makePage("BGH")
+local pageBCS       = makePage("BCS")
+local pageSTS       = makePage("STS")
+local pageAPE       = makePage("APE")
+local pageSovereign = makePage("Sovereign")
 
 -- ============================================================
 -- ── ui_base exports ─────────────────────────────────────────────────────────
@@ -273,4 +278,5 @@ _G.PCU = {
     pageRecursive=pageRecursive, pageBridge=pageBridge, pageAnalytics=pageAnalytics,
     pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
     pageForge=pageForge, pageRSM=pageRSM, pageSR=pageSR, pageSBI=pageSBI, pageCSK=pageCSK, pageASE=pageASE, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
+    pageBRE=pageBRE, pageBGH=pageBGH, pageBCS=pageBCS, pageSTS=pageSTS, pageAPE=pageAPE, pageSovereign=pageSovereign,
 }
