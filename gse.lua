@@ -496,7 +496,7 @@ local function GSE_RebuildProductList()
         mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),Parent=row})
         local idBadge = mk("TextLabel",{
             BackgroundColor3=C.CHIP, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text=id, TextColor3=C.TEXT, TextSize=10,
+            Font=Enum.Font.RobotoMono, Text=id, TextColor3=C.TEXT, TextSize=10,
             AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,18), Parent=row,
         })
         addCorner(idBadge, UDim.new(0,4))
@@ -841,7 +841,7 @@ local function GSE_AddLogRow(entry)
     mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,
         VerticalAlignment=Enum.VerticalAlignment.Top,
         Padding=UDim.new(0,5), Parent=row})
-    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.RobotoMono,
         Text=string.format("[%.1f]", entry.time), TextColor3=C.SUBTEXT, TextSize=9,
         Size=UDim2.new(0,46,0,16), TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
     local tagColor = TAG_COLORS[entry.tag] or C.SUBTEXT

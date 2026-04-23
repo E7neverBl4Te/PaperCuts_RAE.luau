@@ -391,7 +391,7 @@ local function MSE_RebuildTopicList()
 
         local badge = mk("TextLabel",{
             BackgroundColor3=C.MSE_TOPIC, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text='"' .. topic .. '"',
+            Font=Enum.Font.RobotoMono, Text='"' .. topic .. '"',
             TextColor3=C.TEXT, TextSize=10,
             AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,18),
             Parent=row,
@@ -683,7 +683,7 @@ local function MSE_AddMessageRow(entry)
         Padding=UDim.new(0,6), Parent=row})
 
     -- Time
-    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.RobotoMono,
         Text=string.format("[%.1f]", entry.time),
         TextColor3=Color3.fromRGB(100,100,130), TextSize=9,
         Size=UDim2.new(0,46,0,16),
@@ -720,7 +720,7 @@ local function MSE_AddMessageRow(entry)
     -- Payload
     local payloadStr = DSE_Serialise and
         DSE_Serialise(entry.payload, 0) or tostring(entry.payload)
-    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.RobotoMono,
         Text=payloadStr:sub(1, 120),
         TextColor3=Color3.fromRGB(160,220,255), TextSize=9,
         AutomaticSize=Enum.AutomaticSize.XY, Size=UDim2.new(0,0,0,0),

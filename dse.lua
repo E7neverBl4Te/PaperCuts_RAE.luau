@@ -440,7 +440,7 @@ local function DSE_RebuildStoreList()
 
         local nameBadge = mk("TextLabel",{
             BackgroundColor3=C.DSE_STORE, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text='"' .. name .. '"',
+            Font=Enum.Font.RobotoMono, Text='"' .. name .. '"',
             TextColor3=C.TEXT, TextSize=10,
             AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,18),
             Parent=row,
@@ -495,7 +495,7 @@ local function DSE_RebuildKeyList()
 
         local keyBadge = mk("TextLabel",{
             BackgroundColor3=C.DSE_KEY, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text='"' .. entry.pattern .. '"',
+            Font=Enum.Font.RobotoMono, Text='"' .. entry.pattern .. '"',
             TextColor3=C.TEXT, TextSize=10,
             AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,18),
             Parent=row,
@@ -722,7 +722,7 @@ local function DSE_RebuildEditFrame()
 
         -- Key label
         mk("TextLabel",{BackgroundTransparency=1,
-            Font=Enum.Font.GothamMono, Text=key,
+            Font=Enum.Font.RobotoMono, Text=key,
             TextColor3=C.TEXT, TextSize=10,
             Size=UDim2.new(0,120,0,24),
             TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
@@ -730,7 +730,7 @@ local function DSE_RebuildEditFrame()
         -- Value edit box
         local box = mk("TextBox",{
             BackgroundColor3=C.DSE_EDIT, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text=entry.displayValue,
+            Font=Enum.Font.RobotoMono, Text=entry.displayValue,
             TextColor3=Color3.fromRGB(40,80,120), TextSize=10,
             Size=UDim2.new(1,-136,0,24),
             TextXAlignment=Enum.TextXAlignment.Left,
@@ -765,7 +765,7 @@ gseLabel(sDSEWrite, "Or add a manual key/value pair:", 11, false, C.SUBTEXT)
 local manualRow = gseRow(sDSEWrite)
 local manualKeyInput = mk("TextBox",{
     BackgroundColor3=C.DSE_EDIT, BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="key",
+    Font=Enum.Font.RobotoMono, PlaceholderText="key",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT,
     TextSize=11, Size=UDim2.new(0,100,0,26),
     TextXAlignment=Enum.TextXAlignment.Left,
@@ -776,7 +776,7 @@ mk("UIPadding",{PaddingLeft=UDim.new(0,6),Parent=manualKeyInput})
 
 local manualValInput = mk("TextBox",{
     BackgroundColor3=C.DSE_EDIT, BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="value",
+    Font=Enum.Font.RobotoMono, PlaceholderText="value",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT,
     TextSize=11, Size=UDim2.new(0,120,0,26),
     TextXAlignment=Enum.TextXAlignment.Left,

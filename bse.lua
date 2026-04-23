@@ -307,7 +307,7 @@ local function BSE_RebuildBadgeList()
         -- ID badge
         local idBadge = mk("TextLabel",{
             BackgroundColor3=C.BADGECHIP, BorderSizePixel=0,
-            Font=Enum.Font.GothamMono, Text=id, TextColor3=C.TEXT,
+            Font=Enum.Font.RobotoMono, Text=id, TextColor3=C.TEXT,
             TextSize=10, AutomaticSize=Enum.AutomaticSize.X,
             Size=UDim2.new(0,0,0,18), Parent=row,
         })

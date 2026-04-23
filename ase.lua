@@ -360,7 +360,7 @@ local cloakRow = gseRow(sASEMode)
 gseLabel(cloakRow, "Auto-cloak economy gains above:", 11, false, C.SUBTEXT)
 local cloakInput = mk("TextBox",{
     BackgroundColor3=C.INPUT, BorderSizePixel=0,
-    Font=Enum.Font.GothamMono,
+    Font=Enum.Font.RobotoMono,
     PlaceholderText="0 = disabled",
     PlaceholderColor3=C.SUBTEXT,
     Text=ASE.CloakThreshold > 0 and tostring(ASE.CloakThreshold) or "",
@@ -420,7 +420,7 @@ local function ASE_RebuildSupRules()
 
         local function badge(text, bg)
             local b = mk("TextLabel",{BackgroundColor3=bg,BorderSizePixel=0,
-                Font=Enum.Font.GothamMono, Text=text, TextColor3=C.TEXT,
+                Font=Enum.Font.RobotoMono, Text=text, TextColor3=C.TEXT,
                 TextSize=9, AutomaticSize=Enum.AutomaticSize.X,
                 Size=UDim2.new(0,0,0,18), Parent=row})
             addCorner(b, UDim.new(0,4))
@@ -471,7 +471,7 @@ btnSupMethod.MouseButton1Click:Connect(function()
 end)
 
 local supFieldInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="arg#",
+    Font=Enum.Font.RobotoMono, PlaceholderText="arg#",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
     Size=UDim2.new(0,46,0,26), TextXAlignment=Enum.TextXAlignment.Left,
     ClearTextOnFocus=false, Parent=supAddRow,
@@ -480,7 +480,7 @@ addCorner(supFieldInput, UDim.new(0,6)); addStroke(supFieldInput, 1, 0.45)
 mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=supFieldInput})
 
 local supPatternInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="pattern",
+    Font=Enum.Font.RobotoMono, PlaceholderText="pattern",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
     Size=UDim2.new(0,100,0,26), TextXAlignment=Enum.TextXAlignment.Left,
     ClearTextOnFocus=false, Parent=supAddRow,
@@ -546,7 +546,7 @@ local function ASE_RebuildModRules()
 
         local function badge(text, bg)
             local b = mk("TextLabel",{BackgroundColor3=bg,BorderSizePixel=0,
-                Font=Enum.Font.GothamMono, Text=text, TextColor3=C.TEXT,
+                Font=Enum.Font.RobotoMono, Text=text, TextColor3=C.TEXT,
                 TextSize=9, AutomaticSize=Enum.AutomaticSize.X,
                 Size=UDim2.new(0,0,0,18), Parent=row})
             addCorner(b, UDim.new(0,4))
@@ -598,7 +598,7 @@ btnModMethod.MouseButton1Click:Connect(function()
 end)
 
 local modFieldInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="arg#",
+    Font=Enum.Font.RobotoMono, PlaceholderText="arg#",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
     Size=UDim2.new(0,40,0,26), TextXAlignment=Enum.TextXAlignment.Left,
     ClearTextOnFocus=false, Parent=modAddRow,
@@ -607,7 +607,7 @@ addCorner(modFieldInput, UDim.new(0,6)); addStroke(modFieldInput, 1, 0.45)
 mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=modFieldInput})
 
 local modPatternInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="match",
+    Font=Enum.Font.RobotoMono, PlaceholderText="match",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
     Size=UDim2.new(0,80,0,26), TextXAlignment=Enum.TextXAlignment.Left,
     ClearTextOnFocus=false, Parent=modAddRow,
@@ -616,7 +616,7 @@ addCorner(modPatternInput, UDim.new(0,6)); addStroke(modPatternInput, 1, 0.45)
 mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=modPatternInput})
 
 local modReplInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
-    Font=Enum.Font.GothamMono, PlaceholderText="replace",
+    Font=Enum.Font.RobotoMono, PlaceholderText="replace",
     PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
     Size=UDim2.new(0,80,0,26), TextXAlignment=Enum.TextXAlignment.Left,
     ClearTextOnFocus=false, Parent=modAddRow,
@@ -723,7 +723,7 @@ local function ASE_UpdateLedgerRow(sku, rec)
 
         local function cell(text, w, color, mono)
             return mk("TextLabel",{BackgroundTransparency=1,
-                Font=mono and Enum.Font.GothamMono or Enum.Font.Gotham,
+                Font=mono and Enum.Font.RobotoMono or Enum.Font.Gotham,
                 Text=text, TextColor3=color or C.TEXT, TextSize=10,
                 Size=UDim2.new(0,w,1,0),
                 TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
@@ -819,7 +819,7 @@ local function ASE_AddEventRow(entry)
         Padding=UDim.new(0,5), Parent=row})
 
     -- Time
-    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.RobotoMono,
         Text=string.format("[%.1f]", entry.time),
         TextColor3=Color3.fromRGB(90,90,90), TextSize=9,
         Size=UDim2.new(0,46,0,16),
@@ -847,7 +847,7 @@ local function ASE_AddEventRow(entry)
         :gsub("Fire",""):gsub("Event",""):sub(1,10)
     local methodBadge = mk("TextLabel",{
         BackgroundColor3=Color3.fromRGB(50,45,40), BorderSizePixel=0,
-        Font=Enum.Font.GothamMono, Text=methodShort,
+        Font=Enum.Font.RobotoMono, Text=methodShort,
         TextColor3=Color3.fromRGB(200,190,170), TextSize=8,
         AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,14),
         TextXAlignment=Enum.TextXAlignment.Center, Parent=row,
@@ -864,7 +864,7 @@ local function ASE_AddEventRow(entry)
         end
         if #argStrs >= 4 then argStrs[#argStrs+1] = "..."; break end
     end
-    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.RobotoMono,
         Text=table.concat(argStrs, "  |  "),
         TextColor3=Color3.fromRGB(170,200,170), TextSize=9,
         AutomaticSize=Enum.AutomaticSize.XY, Size=UDim2.new(0,0,0,0),
