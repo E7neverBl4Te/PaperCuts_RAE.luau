@@ -12,7 +12,10 @@ local makeButton     = _U.makeButton
 local makeSection    = _U.makeSection
 local makeToggle     = _U.makeToggle
 local sendNotification = _U.sendNotification
-local pageTSR        = _U.pageTSR
+local makePage       = _C.makePage
+local pageTSR        = _U.pageTSR or makePage("TSR")
+_G.PCU.pageTSR       = pageTSR
+_G.PC.pageTSR        = pageTSR
 
 -- ============================================================
 -- PAGE: TSR — The Sovereign Runtime

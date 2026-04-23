@@ -12,7 +12,10 @@ local makeButton     = _U.makeButton
 local makeSection    = _U.makeSection
 local makeToggle     = _U.makeToggle
 local sendNotification = _U.sendNotification
-local pageAVD        = _U.pageAVD
+local makePage       = _C.makePage
+local pageAVD        = _U.pageAVD or makePage("AVD")
+_G.PCU.pageAVD       = pageAVD
+_G.PC.pageAVD        = pageAVD
 
 -- ============================================================
 -- PAGE: AVD — Autonomous Vulnerability Debugger

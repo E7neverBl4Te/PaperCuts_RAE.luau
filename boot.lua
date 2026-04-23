@@ -36,6 +36,8 @@ local pageDiscovery                  = PC.pageDiscovery
 local pageForge                      = PC.pageForge
 local pageOverview                   = PC.pageOverview
 local pageGSE                        = PC.pageGSE
+local pageAVD                        = PC.pageAVD
+local pageTSR                        = PC.pageTSR
 local pagePR                         = PC.pagePR
 local pagePlayer                     = PC.pagePlayer
 local pageRAE                        = PC.pageRAE
@@ -68,6 +70,8 @@ local TAB_DEFS = {
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
     { Name="PR",         Page=pagePR,        Icon="📡" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
+    (pageAVD and { Name="AVD", Page=pageAVD, Icon="🛡" } or nil),
+    (pageTSR and { Name="TSR", Page=pageTSR, Icon="⚔" } or nil),
     (pageGSE and { Name="GSE", Page=pageGSE, Icon="🛒" } or nil),
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
