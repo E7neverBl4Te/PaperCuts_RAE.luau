@@ -263,3 +263,4 @@ PC.screenGui                      = screenGui
 PC.sendNotification               = sendNotification
 PC.topbar                         = topbar
 PC.window                         = window
+print("[PaperCuts] ui_base.lua exports complete — sendNotification=" .. tostring(type(PC.sendNotification)))

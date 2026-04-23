@@ -68,7 +68,7 @@ local TAB_DEFS = {
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
     { Name="PR",         Page=pagePR,        Icon="📡" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
-    { Name="GSE",        Page=pageGSE,         Icon="🛒" },
+    (pageGSE and { Name="GSE", Page=pageGSE, Icon="🛒" } or nil),
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
 local activeTab=nil
@@ -88,6 +88,8 @@ local function switchTab(tabDef)
     activeTab=tabDef
 end
 
+-- Filter nil entries (conditional tabs like GSE when not loaded)
+do local filtered={} for _,t in ipairs(TAB_DEFS) do if t then filtered[#filtered+1]=t end end TAB_DEFS=filtered end
 for _, tabDef in ipairs(TAB_DEFS) do
     local btn=mk("TextButton",{
         AutoButtonColor=false, BackgroundColor3=Color3.fromRGB(245,239,231),
