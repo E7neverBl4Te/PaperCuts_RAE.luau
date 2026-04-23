@@ -24,7 +24,11 @@ local chunks = {
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
     "tsr_ui.lua",         -- TSR: dashboard
-    "gse.lua",       -- Game Service Edit tab (MarketplaceService)
+    "gse.lua",       -- GSE core: MarketplaceService + shared helpers
+    "bse.lua",       -- BadgeService
+    "dse.lua",       -- DataStoreService
+    "mse.lua",       -- MessagingService
+    "ase.lua",       -- AnalyticsService
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 
