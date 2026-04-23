@@ -261,3 +261,7 @@ PC.screenGui                      = screenGui
 PC.sendNotification               = sendNotification
 PC.topbar                         = topbar
 PC.window                         = window
+
+-- Backward-compatibility alias — files using _G.PCU get the same table
+_G.PCU = PC
+print("[PaperCuts] ui_base.lua OK — PC and PCU ready")

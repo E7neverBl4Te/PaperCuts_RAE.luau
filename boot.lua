@@ -152,16 +152,20 @@ end
 -- MINIMIZE / CLOSE
 -- ============================================================
 local isMinimized=false
-btnMin.MouseButton1Click:Connect(function()
-    clickSound(); pulseClick(btnMin)
-    isMinimized=not isMinimized
-    tween(body, TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {Size=isMinimized and UDim2.new(1,0,0,0) or UDim2.new(1,0,1,-56)})
-end)
-btnClose.MouseButton1Click:Connect(function()
-    clickSound(); pulseClick(btnClose)
-    tween(window, TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.In), {BackgroundTransparency=1,Size=window.Size+UDim2.fromOffset(0,-20)})
-    task.delay(0.25, function() screenGui:Destroy() end)
-end)
+if btnMin then
+    btnMin.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(btnMin)
+        isMinimized=not isMinimized
+        tween(body, TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {Size=isMinimized and UDim2.new(1,0,0,0) or UDim2.new(1,0,1,-56)})
+    end)
+end
+if btnClose then
+    btnClose.MouseButton1Click:Connect(function()
+        clickSound(); pulseClick(btnClose)
+        tween(window, TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.In), {BackgroundTransparency=1,Size=window.Size+UDim2.fromOffset(0,-20)})
+        task.delay(0.25, function() screenGui:Destroy() end)
+    end)
+end
 
 -- ============================================================
 -- INTRO ANIMATION
