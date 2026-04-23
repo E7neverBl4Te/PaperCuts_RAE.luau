@@ -192,7 +192,7 @@ local sidebar=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,239,231),BorderSiz
 addCorner(sidebar,UDim.new(0,16)); addStroke(sidebar,1,0.32)
 mk("UIPadding",{PaddingTop=UDim.new(0,14),PaddingLeft=UDim.new(0,14),PaddingRight=UDim.new(0,14),PaddingBottom=UDim.new(0,14),Parent=sidebar})
 mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Tabs",TextColor3=Color3.fromRGB(64,58,52),TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sidebar})
-local navHolder=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,28),Parent=sidebar})
+local navHolder=mk("ScrollingFrame",{BackgroundTransparency=1,BorderSizePixel=0,Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,28),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,ScrollBarImageTransparency=0.6,ScrollingDirection=Enum.ScrollingDirection.Y,Parent=sidebar})
 mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8),Parent=navHolder})
 local contentCard=mk("Frame",{BackgroundColor3=Color3.fromRGB(250,247,242),BorderSizePixel=0,Size=UDim2.new(1,-214,1,0),Parent=bodyRow})
 addCorner(contentCard,UDim.new(0,16)); addStroke(contentCard,1,0.25); addShadow(contentCard,10)
