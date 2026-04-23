@@ -10,7 +10,8 @@ local gseInput        = PC.gseInput
 local gseRow          = PC.gseRow
 local gseHScroll      = PC.gseHScroll
 local gseChip         = PC.gseChip
-local pageGSE         = PC.pageGSE
+local bsePage = (PC.GSE_SubPages and PC.GSE_SubPages["Badge"])
+if not bsePage then warn("[BSE] sub-page not found"); return end
 local mk              = PC.mk
 local addCorner       = PC.addCorner
 local addStroke       = PC.addStroke
@@ -252,7 +253,7 @@ C.BADGESEL = Color3.fromRGB(255,235,160)   -- selected badge chip
 -- ============================================================
 -- UI — SECTION: Badge Scanner
 -- ============================================================
-local _, sBadgeScan = makeSection(pageGSE,
+local _, sBadgeScan = makeSection(bsePage,
     "🏅  BadgeService — Scanner")
 
 gseLabel(sBadgeScan,
@@ -390,7 +391,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Badge Actions
 -- ============================================================
-local _, sBadgeAct = makeSection(pageGSE, "🎖  Badge — Check & Award")
+local _, sBadgeAct = makeSection(bsePage, "🎖  Badge — Check & Award")
 
 gseLabel(sBadgeAct,
     "Check whether the local player owns a badge, fetch its info," ..
@@ -491,7 +492,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Badge Award Remote Selector
 -- ============================================================
-local _, sBadgeRemote = makeSection(pageGSE, "📡  Badge Award Remote")
+local _, sBadgeRemote = makeSection(bsePage, "📡  Badge Award Remote")
 
 gseLabel(sBadgeRemote,
     "Select the remote the game uses to trigger badge awards server-side.\n" ..

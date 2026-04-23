@@ -10,7 +10,8 @@ local gseInput        = PC.gseInput
 local gseRow          = PC.gseRow
 local gseHScroll      = PC.gseHScroll
 local gseChip         = PC.gseChip
-local pageGSE         = PC.pageGSE
+local asePage = (PC.GSE_SubPages and PC.GSE_SubPages["Analytics"])
+if not asePage then warn("[ASE] sub-page not found"); return end
 local mk              = PC.mk
 local addCorner       = PC.addCorner
 local addStroke       = PC.addStroke
@@ -292,7 +293,7 @@ C.ASE_LOG     = Color3.fromRGB(30,28,24)      -- dark log bg
 -- ============================================================
 -- UI — SECTION: Hook Mode Control
 -- ============================================================
-local _, sASEMode = makeSection(pageGSE, "📊  AnalyticsService — Hook Control")
+local _, sASEMode = makeSection(asePage, "📊  AnalyticsService — Hook Control")
 
 gseLabel(sASEMode,
     "Intercepts all AnalyticsService Fire* calls. Choose how to handle them:\n" ..
@@ -384,7 +385,7 @@ gseLabel(cloakRow, "(suppresses FireEconomyEvent source calls silently)", 10, fa
 -- ============================================================
 -- UI — SECTION: Suppression Rules
 -- ============================================================
-local _, sASESup = makeSection(pageGSE, "🚫  Suppression Rules")
+local _, sASESup = makeSection(asePage, "🚫  Suppression Rules")
 
 gseLabel(sASESup,
     "Drop specific analytics calls before they reach the service.\n" ..
@@ -511,7 +512,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Modification Rules
 -- ============================================================
-local _, sASEMod = makeSection(pageGSE, "✏️  Modification Rules")
+local _, sASEMod = makeSection(asePage, "✏️  Modification Rules")
 
 gseLabel(sASEMod,
     "Rewrite specific argument values before the call fires.\n" ..
@@ -651,7 +652,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Economy Ledger
 -- ============================================================
-local _, sASELedger = makeSection(pageGSE, "💰  Economy Ledger")
+local _, sASELedger = makeSection(asePage, "💰  Economy Ledger")
 
 gseLabel(sASELedger,
     "Built automatically from FireEconomyEvent calls. Shows every item SKU the\n" ..
@@ -781,7 +782,7 @@ end
 -- ============================================================
 -- UI — SECTION: Analytics Event Log
 -- ============================================================
-local _, sASELog = makeSection(pageGSE, "📋  Analytics Event Log")
+local _, sASELog = makeSection(asePage, "📋  Analytics Event Log")
 
 gseLabel(sASELog,
     "Every intercepted Fire* call. Colour-coded by disposition:\n" ..

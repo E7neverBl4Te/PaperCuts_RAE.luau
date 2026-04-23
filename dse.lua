@@ -10,7 +10,8 @@ local gseInput        = PC.gseInput
 local gseRow          = PC.gseRow
 local gseHScroll      = PC.gseHScroll
 local gseChip         = PC.gseChip
-local pageGSE         = PC.pageGSE
+local dsePage = (PC.GSE_SubPages and PC.GSE_SubPages["Data"])
+if not dsePage then warn("[DSE] sub-page not found"); return end
 local mk              = PC.mk
 local addCorner       = PC.addCorner
 local addStroke       = PC.addStroke
@@ -394,7 +395,7 @@ C.DSE_EDIT   = Color3.fromRGB(248,252,255)
 -- ============================================================
 -- UI — SECTION: DataStore Scanner
 -- ============================================================
-local _, sDSEScan = makeSection(pageGSE, "🗄  DataStoreService — Scanner")
+local _, sDSEScan = makeSection(dsePage, "🗄  DataStoreService — Scanner")
 
 gseLabel(sDSEScan,
     "Discovers DataStore names and key patterns via namecall hook and script scan.\n" ..
@@ -549,7 +550,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Data Inspector (Load + Read)
 -- ============================================================
-local _, sDSERead = makeSection(pageGSE, "🔎  Data Inspector — Load & Read")
+local _, sDSERead = makeSection(dsePage, "🔎  Data Inspector — Load & Read")
 
 gseLabel(sDSERead,
     "Select the game's data load remote from PR Bridge, fire it, and inspect" ..
@@ -648,7 +649,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Write Relay (Edit & Save)
 -- ============================================================
-local _, sDSEWrite = makeSection(pageGSE, "✏️  Write Relay — Edit & Save")
+local _, sDSEWrite = makeSection(dsePage, "✏️  Write Relay — Edit & Save")
 
 gseLabel(sDSEWrite,
     "Edit top-level keys from the last load result and fire them back through" ..

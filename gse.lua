@@ -42,6 +42,150 @@ local pageGSE = makePage("GameServiceEdit")
 PC.pageGSE    = pageGSE
 
 -- ============================================================
+-- SUB-TAB SYSTEM
+-- ============================================================
+-- Creates a tab bar + five sub-pages inside pageGSE.
+-- Each service's sections parent to its sub-page.
+-- Sub-pages are exported via PC for bse/dse/mse/ase to use.
+-- ============================================================
+
+-- ── Tab bar ───────────────────────────────────────────────────
+-- Sits at top of pageGSE (not inside the scroll canvas).
+-- We create it as a child of the pagesFolder's parent (contentCard)
+-- so it's outside the scrolling canvas — but since pageGSE IS the
+-- scroller, we embed a non-auto-size bar at the very top instead
+-- and let the sub-pages do their own scrolling.
+
+local GSE_TAB_DEFS = {
+    { key="Market",    label="🛒  Market",    icon="🛒" },
+    { key="Badge",     label="🏅  Badge",     icon="🏅" },
+    { key="Data",      label="🗄  Data",      icon="🗄" },
+    { key="Messaging", label="📨  Messaging", icon="📨" },
+    { key="Analytics", label="📊  Analytics", icon="📊" },
+}
+
+-- Tab bar frame — fixed height at top of pageGSE canvas
+local gseTabBar = mk("Frame", {
+    BackgroundColor3 = Color3.fromRGB(244, 238, 228),
+    BorderSizePixel  = 0,
+    Size             = UDim2.new(1, 0, 0, 38),
+    LayoutOrder      = -9999,
+    Parent           = pageGSE,
+})
+addCorner(gseTabBar, UDim.new(0, 10))
+addStroke(gseTabBar, 1, 0.3)
+mk("UIListLayout", {
+    FillDirection       = Enum.FillDirection.Horizontal,
+    VerticalAlignment   = Enum.VerticalAlignment.Center,
+    HorizontalAlignment = Enum.HorizontalAlignment.Left,
+    Padding             = UDim.new(0, 4),
+    Parent              = gseTabBar,
+})
+mk("UIPadding", {
+    PaddingLeft   = UDim.new(0, 6),
+    PaddingRight  = UDim.new(0, 6),
+    PaddingTop    = UDim.new(0, 4),
+    PaddingBottom = UDim.new(0, 4),
+    Parent        = gseTabBar,
+})
+
+-- Sub-pages — one ScrollingFrame per service
+local GSE_SubPages  = {}
+local GSE_TabBtns   = {}
+local GSE_ActiveTab = nil
+
+local TAB_ACTIVE_BG   = Color3.fromRGB(210, 170, 120)
+local TAB_INACTIVE_BG = Color3.fromRGB(236, 229, 219)
+local TAB_ACTIVE_TC   = Color3.fromRGB(255, 252, 245)
+local TAB_INACTIVE_TC = Color3.fromRGB(70, 62, 52)
+
+for i, tabDef in ipairs(GSE_TAB_DEFS) do
+    -- Sub-page scroller
+    local subPage = mk("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel        = 0,
+        Size                   = UDim2.new(1, 0, 0, 2000),
+        CanvasSize             = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize    = Enum.AutomaticSize.Y,
+        ScrollBarThickness     = 6,
+        ScrollingDirection     = Enum.ScrollingDirection.Y,
+        Visible                = (i == 1),
+        LayoutOrder            = i,
+        Parent                 = pageGSE,
+    })
+    mk("UIListLayout", {
+        FillDirection       = Enum.FillDirection.Vertical,
+        HorizontalAlignment = Enum.HorizontalAlignment.Left,
+        SortOrder           = Enum.SortOrder.LayoutOrder,
+        Padding             = UDim.new(0, 14),
+        Parent              = subPage,
+    })
+    mk("UIPadding", {
+        PaddingTop    = UDim.new(0, 10),
+        PaddingBottom = UDim.new(0, 10),
+        Parent        = subPage,
+    })
+
+    GSE_SubPages[tabDef.key] = subPage
+
+    -- Tab button
+    local btn = mk("TextButton", {
+        AutoButtonColor  = false,
+        BackgroundColor3 = (i == 1) and TAB_ACTIVE_BG or TAB_INACTIVE_BG,
+        BorderSizePixel  = 0,
+        Font             = Enum.Font.GothamSemibold,
+        Text             = tabDef.label,
+        TextColor3       = (i == 1) and TAB_ACTIVE_TC or TAB_INACTIVE_TC,
+        TextSize         = 11,
+        AutomaticSize    = Enum.AutomaticSize.X,
+        Size             = UDim2.new(0, 0, 1, 0),
+        Parent           = gseTabBar,
+    })
+    addCorner(btn, UDim.new(0, 7))
+    mk("UIPadding", {
+        PaddingLeft  = UDim.new(0, 10),
+        PaddingRight = UDim.new(0, 10),
+        Parent       = btn,
+    })
+
+    GSE_TabBtns[tabDef.key] = btn
+
+    local key = tabDef.key
+    btn.MouseButton1Click:Connect(function()
+        clickSound()
+        -- Hide all sub-pages, deactivate all buttons
+        for _, td in ipairs(GSE_TAB_DEFS) do
+            if GSE_SubPages[td.key] then
+                GSE_SubPages[td.key].Visible = false
+            end
+            if GSE_TabBtns[td.key] then
+                tween(GSE_TabBtns[td.key], TweenInfo.new(0.12), {
+                    BackgroundColor3 = TAB_INACTIVE_BG,
+                    TextColor3       = TAB_INACTIVE_TC,
+                })
+            end
+        end
+        -- Show selected sub-page, activate button
+        if GSE_SubPages[key] then
+            GSE_SubPages[key].Visible = true
+        end
+        tween(btn, TweenInfo.new(0.12), {
+            BackgroundColor3 = TAB_ACTIVE_BG,
+            TextColor3       = TAB_ACTIVE_TC,
+        })
+        GSE_ActiveTab = key
+    end)
+
+    if i == 1 then GSE_ActiveTab = key end
+end
+
+-- Export sub-pages for bse/dse/mse/ase
+PC.GSE_SubPages = GSE_SubPages
+
+-- Convenience: the Market sub-page (used by gse.lua itself below)
+local gseMarketPage = GSE_SubPages["Market"]
+
+-- ============================================================
 -- PERSIST
 -- ============================================================
 local GSE_PERSIST_KEY = "PaperClay_GSE_v1"
@@ -453,7 +597,7 @@ end
 -- ============================================================
 -- SECTION 1: Developer Products — Scanner
 -- ============================================================
-local _, sScan = makeSection(pageGSE, "⚙  Developer Products — Scanner")
+local _, sScan = makeSection(gseMarketPage, "⚙  Developer Products — Scanner")
 gseLabel(sScan,
     "Auto-detects product IDs via namecall hook, source scan, and purchase events.",
     11, false, C.SUBTEXT)
@@ -556,7 +700,7 @@ end)
 -- ============================================================
 -- SECTION 2: Product — Prompt & Signal
 -- ============================================================
-local _, sAct = makeSection(pageGSE, "🎯  Product — Prompt & Signal")
+local _, sAct = makeSection(gseMarketPage, "🎯  Product — Prompt & Signal")
 gseLabel(sAct, "Type a product ID or pick from the scanner, then prompt or signal a result.",
     11, false, C.SUBTEXT)
 
@@ -621,7 +765,7 @@ end)
 -- ============================================================
 -- SECTION 3: Signal Mode
 -- ============================================================
-local _, sMode = makeSection(pageGSE, "📡  Signal Mode")
+local _, sMode = makeSection(gseMarketPage, "📡  Signal Mode")
 gseLabel(sMode,
     "ProcessReceipt — calls the game's server receipt callback with a spoofed receipt.\n"
     .. "Remote Fire   — fires through a selected PR Bridge purchase remote.",
@@ -691,7 +835,7 @@ end)
 -- ============================================================
 -- SECTION 4: Game Passes
 -- ============================================================
-local _, sGP = makeSection(pageGSE, "🎫  Game Passes")
+local _, sGP = makeSection(gseMarketPage, "🎫  Game Passes")
 gseLabel(sGP, "Prompt, signal, or check ownership of game passes.", 11, false, C.SUBTEXT)
 
 local gpIdInput    = gseInput(sGP, "Game Pass ID (numeric)", 1)
@@ -776,7 +920,7 @@ end)
 -- ============================================================
 -- SECTION 5: Premium
 -- ============================================================
-local _, sPrem   = makeSection(pageGSE, "💎  Premium")
+local _, sPrem   = makeSection(gseMarketPage, "💎  Premium")
 local premStatus = gseLabel(sPrem, "Membership: checking...", 12, false, C.SUBTEXT)
 local premRow    = gseRow(sPrem)
 local btnPremPrompt = gseBtn(premRow, "💎 Prompt Premium", C.BTN, C.BTNHOV, 1)
@@ -813,7 +957,7 @@ end)
 -- ============================================================
 -- SECTION 6: Event Log
 -- ============================================================
-local _, sLog   = makeSection(pageGSE, "📋  Event Log")
+local _, sLog   = makeSection(gseMarketPage, "📋  Event Log")
 local logTopRow = gseRow(sLog)
 local btnClearLog = gseBtn(logTopRow, "🗑 Clear Log", C.BTN, C.BTNHOV, 1)
 btnClearLog.Size = UDim2.new(0,90,0,24)

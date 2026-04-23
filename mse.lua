@@ -10,7 +10,8 @@ local gseInput        = PC.gseInput
 local gseRow          = PC.gseRow
 local gseHScroll      = PC.gseHScroll
 local gseChip         = PC.gseChip
-local pageGSE         = PC.pageGSE
+local msePage = (PC.GSE_SubPages and PC.GSE_SubPages["Messaging"])
+if not msePage then warn("[MSE] sub-page not found"); return end
 local mk              = PC.mk
 local addCorner       = PC.addCorner
 local addStroke       = PC.addStroke
@@ -346,7 +347,7 @@ C.MSE_LOG    = Color3.fromRGB(38,34,52)       -- dark purple log background
 -- ============================================================
 -- UI — SECTION: MessagingService — Topic Scanner
 -- ============================================================
-local _, sMSEScan = makeSection(pageGSE, "📨  MessagingService — Topic Scanner")
+local _, sMSEScan = makeSection(msePage, "📨  MessagingService — Topic Scanner")
 
 gseLabel(sMSEScan,
     "Discovers cross-server topic names via namecall hook and script scan.\n" ..
@@ -445,7 +446,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Message Observer
 -- ============================================================
-local _, sMSEObs = makeSection(pageGSE, "👁  Message Observer")
+local _, sMSEObs = makeSection(msePage, "👁  Message Observer")
 
 gseLabel(sMSEObs,
     "Attach to server→client RemoteEvents that relay incoming cross-server\n" ..
@@ -525,7 +526,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Publish Relay
 -- ============================================================
-local _, sMSEPub = makeSection(pageGSE, "📡  Publish Relay")
+local _, sMSEPub = makeSection(msePage, "📡  Publish Relay")
 
 gseLabel(sMSEPub,
     "Fire a discovered publish remote to have the server call\n" ..
@@ -645,7 +646,7 @@ end)
 -- ============================================================
 -- UI — SECTION: Message Log
 -- ============================================================
-local _, sMSELog = makeSection(pageGSE, "📬  Cross-Server Message Log")
+local _, sMSELog = makeSection(msePage, "📬  Cross-Server Message Log")
 
 gseLabel(sMSELog,
     "Captures every cross-server message observed via attached RemoteEvent\n" ..
