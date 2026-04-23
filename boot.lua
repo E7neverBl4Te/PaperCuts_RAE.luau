@@ -38,6 +38,12 @@ local pageOverview                   = PC.pageOverview
 local pageGSE                        = PC.pageGSE
 local pageAVD                        = PC.pageAVD
 local pageTSR                        = PC.pageTSR
+local pageCSK                        = PC.pageCSK
+local pageSR                         = PC.pageSR
+local pageRSM                        = PC.pageRSM
+local pageSBI                        = PC.pageSBI
+local pageAPE                        = PC.pageAPE
+local pageASE                        = PC.pageASE
 local pagePR                         = PC.pagePR
 local pagePlayer                     = PC.pagePlayer
 local pageRAE                        = PC.pageRAE
@@ -70,6 +76,12 @@ local TAB_DEFS = {
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
     { Name="PR",         Page=pagePR,        Icon="📡" },
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
+    (pageCSK and { Name="CSK", Page=pageCSK, Icon="🧠" } or nil),
+    (pageSR  and { Name="SR",  Page=pageSR,  Icon="🔄" } or nil),
+    (pageRSM and { Name="RSM", Page=pageRSM, Icon="🗺" } or nil),
+    (pageSBI and { Name="SBI", Page=pageSBI, Icon="🔬" } or nil),
+    (pageAPE and { Name="APE", Page=pageAPE, Icon="🕵" } or nil),
+    (pageASE and { Name="ASE", Page=pageASE, Icon="⚡" } or nil),
     (pageAVD and { Name="AVD", Page=pageAVD, Icon="🛡" } or nil),
     (pageTSR and { Name="TSR", Page=pageTSR, Icon="⚔" } or nil),
     (pageGSE and { Name="GSE", Page=pageGSE, Icon="🛒" } or nil),
