@@ -1,77 +1,58 @@
-local _C = _G.PC
-local _U = _G.PCU
-local mk             = _C.mk
-local addCorner      = _C.addCorner
-local addStroke      = _C.addStroke
-local tween          = _C.tween
-local pulseClick     = _C.pulseClick
-local hookHover      = _C.hookHover
-local clickSound     = _C.clickSound
-local cleanTable     = _C.cleanTable
-local tryDecode      = _C.tryDecode
-local player         = _C.player
-local UserInputService = _C.UserInputService
-local RAE_State      = _C.RAE_State
-local RAE_Callbacks  = _C.RAE_Callbacks
-local RAE_Scan       = _C.RAE_Scan
-local RAE_Plan       = _C.RAE_Plan
-local RAE_Commit     = _C.RAE_Commit
-local SaveSession    = _C.SaveSession
-local LoadSession    = _C.LoadSession
-local CDG            = _C.CDG
-local ETM            = _C.ETM
-local LWM            = _C.LWM
-local Intel          = _C.Intel
-local StateSignature = _C.StateSignature
-local ComputeBrierScore = _C.ComputeBrierScore
-local sendNotification = _U.sendNotification
-local window         = _U.window
-local screenGui      = _U.screenGui
-local topbar         = _U.topbar
-local btnMin         = _U.btnMin
-local btnClose       = _U.btnClose
-local body           = _U.body
-local sidebar        = _U.sidebar
-local navHolder      = _U.navHolder
-local panelTitle     = _U.panelTitle
-local contentCard    = _U.contentCard
-local pagesFolder    = _U.pagesFolder
-local bodyRow        = _U.bodyRow
-local pageOverview   = _U.pageOverview
-local pagePlayer     = _U.pagePlayer
-local pageCamera     = _U.pageCamera
-local pageWorld      = _U.pageWorld
-local pageDiscovery  = _U.pageDiscovery
-local pageRAE        = _U.pageRAE
-local pageRecursive  = _U.pageRecursive
-local pageBridge     = _U.pageBridge
-local pageAnalytics  = _U.pageAnalytics
-local pageChain      = _U.pageChain
-local pageUtils      = _U.pageUtils
-local pageAbout      = _U.pageAbout
-local pageForge      = _U.pageForge
-local pageRSM        = _U.pageRSM
-local pageSR         = _U.pageSR
-local pageSBI        = _U.pageSBI
-local pageCSK        = _U.pageCSK
-local pageASE        = _U.pageASE
-local pageSARP       = _U.pageSARP
-local pagePR         = _U.pagePR
-local pageAVD        = _U.pageAVD
-local pageTSR        = _U.pageTSR
-local pageBRE        = _U.pageBRE
-local pageBGH        = _U.pageBGH
-local pageBCS        = _U.pageBCS
-local pageSTS        = _U.pageSTS
-local pageAPE        = _U.pageAPE
-local pageSovereign  = _U.pageSovereign
-
-local SARP           = _G.PC.SARP
-
-
 -- ============================================================
--- NAVIGATION SYSTEM
+-- chunk_5_boot.lua  —  TAB_DEFS + navigation + bootRAE
+-- Requires: _G.PC (set by prior chunks)
 -- ============================================================
+local PC = _G.PC
+local CDG                            = PC.CDG
+local ComputeBrierScore              = PC.ComputeBrierScore
+local ETM                            = PC.ETM
+local Intel                          = PC.Intel
+local LWM                            = PC.LWM
+local LoadSession                    = PC.LoadSession
+local RAE_Commit                     = PC.RAE_Commit
+local RAE_Plan                       = PC.RAE_Plan
+local RAE_Scan                       = PC.RAE_Scan
+local RAE_SilentMode                 = PC.RAE_SilentMode
+local RAE_State                      = PC.RAE_State
+local SARP                           = PC.SARP
+local SaveSession                    = PC.SaveSession
+local StateSignature                 = PC.StateSignature
+local UserInputService               = PC.UserInputService
+local addCorner                      = PC.addCorner
+local addStroke                      = PC.addStroke
+local body                           = PC.body
+local btnMin                         = PC.btnMin
+local cleanTable                     = PC.cleanTable
+local clickSound                     = PC.clickSound
+local hookHover                      = PC.hookHover
+local mk                             = PC.mk
+local navHolder                      = PC.navHolder
+local pageAbout                      = PC.pageAbout
+local pageAnalytics                  = PC.pageAnalytics
+local pageBridge                     = PC.pageBridge
+local pageCamera                     = PC.pageCamera
+local pageChain                      = PC.pageChain
+local pageDiscovery                  = PC.pageDiscovery
+local pageForge                      = PC.pageForge
+local pageOverview                   = PC.pageOverview
+local pageGSE                        = PC.pageGSE
+local pagePR                         = PC.pagePR
+local pagePlayer                     = PC.pagePlayer
+local pageRAE                        = PC.pageRAE
+local pageRecursive                  = PC.pageRecursive
+local pageSARP                       = PC.pageSARP
+local pageUtils                      = PC.pageUtils
+local pageWorld                      = PC.pageWorld
+local pagesFolder                    = PC.pagesFolder
+local panelTitle                     = PC.panelTitle
+local player                         = PC.player
+local pulseClick                     = PC.pulseClick
+local screenGui                      = PC.screenGui
+local sendNotification               = PC.sendNotification
+local topbar                         = PC.topbar
+local tryDecode                      = PC.tryDecode
+local tween                          = PC.tween
+local window                         = PC.window
 local TAB_DEFS = {
     { Name="Overview",   Page=pageOverview,  Icon="⊙" },
     { Name="Player",     Page=pagePlayer,    Icon="♟" },
@@ -86,28 +67,14 @@ local TAB_DEFS = {
     { Name="Utilities",  Page=pageUtils,     Icon="🔧" },
     { Name="Forge",      Page=pageForge,     Icon="⚙" },
     { Name="PR",         Page=pagePR,        Icon="📡" },
-    { Name="AVD",        Page=pageAVD,       Icon="🔬" },
-    { Name="TSR",        Page=pageTSR,       Icon="👑" },
-    { Name="RSM",        Page=pageRSM,       Icon="🗺" },
-    { Name="SR",         Page=pageSR,        Icon="🧠" },
-    { Name="SBI",        Page=pageSBI,       Icon="🕵" },
-    { Name="CSK",        Page=pageCSK,       Icon="🧬" },
-    { Name="ASE",        Page=pageASE,       Icon="⚡" },
-
     { Name="SARP",       Page=pageSARP,      Icon="🔥" },
-    { Name="APE",        Page=pageAPE,       Icon="🔭" },
-    { Name="STS",        Page=pageSTS,       Icon="📶" },
-    { Name="BRE",        Page=pageBRE,       Icon="🧪" },
-    { Name="BGH",        Page=pageBGH,       Icon="🎯" },
-    { Name="BCS",        Page=pageBCS,       Icon="❄" },
-    { Name="Sovereign",  Page=pageSovereign, Icon="👁" },
+    { Name="GSE",        Page=pageGSE,         Icon="🛒" },
     { Name="About",      Page=pageAbout,     Icon="ℹ" },
 }
 local activeTab=nil
 
 local function switchTab(tabDef)
     if activeTab == tabDef then return end
-    if not tabDef.Page then return end  -- guard: page not created yet
     for _, page in ipairs(pagesFolder:GetChildren()) do page.Visible=false end
     tabDef.Page.Visible=true
     panelTitle.Text=tabDef.Name
@@ -124,7 +91,7 @@ end
 for _, tabDef in ipairs(TAB_DEFS) do
     local btn=mk("TextButton",{
         AutoButtonColor=false, BackgroundColor3=Color3.fromRGB(245,239,231),
-        BorderSizePixel=0, Size=UDim2.new(1,0,0,30), Font=Enum.Font.GothamSemibold,
+        BorderSizePixel=0, Size=UDim2.new(1,0,0,34), Font=Enum.Font.GothamSemibold,
         Text=tabDef.Icon.."  "..tabDef.Name, TextColor3=Color3.fromRGB(52,47,42),
         TextSize=12, TextXAlignment=Enum.TextXAlignment.Left, Parent=navHolder,
     })
@@ -335,21 +302,23 @@ LoadSession()
 -- Boot scan: fires 3 seconds after character is available
 local function bootRAE()
     task.wait(3)
-    _C.rae.SilentMode=true
+    RAE_SilentMode=true
     if RAE_Scan() then
         task.wait(0.5)
         local plan=RAE_Plan()
         if plan and #plan>0 then
             task.wait(0.5)
             local log=RAE_Commit()
-            _C.rae.SilentMode=false
+            RAE_SilentMode=false
             if log then
                 local p=0; for _,r in ipairs(log) do if r.Success then p=p+1 end end
                 sendNotification(string.format("Boot complete — %d cards, %d/%d passed.",#RAE_State.Cards,p,#log),"Success")
             end
-        else _C.rae.SilentMode=false; sendNotification("Boot scan complete. No plan generated.","Info") end
-    else _C.rae.SilentMode=false; sendNotification("Boot scan — insufficient confidence.","Warning") end
+        else RAE_SilentMode=false; sendNotification("Boot scan complete. No plan generated.","Info") end
+    else RAE_SilentMode=false; sendNotification("Boot scan — insufficient confidence.","Warning") end
 end
 
 if player.Character then task.spawn(bootRAE)
 else player.CharacterAdded:Connect(function() task.spawn(bootRAE) end) end
+
+-- END OF SCRIPT

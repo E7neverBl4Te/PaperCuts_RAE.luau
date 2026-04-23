@@ -1,5 +1,5 @@
 -- ============================================================
---   PaperCuts RAE — Final Stack Loader
+--   Paper & Clay + RAE v2 + SARP v4 + PR v5 + GSE — Loader
 --   Fetches each chunk from the private repo and runs it.
 --   Each chunk has its own fresh register budget.
 -- ============================================================
@@ -20,34 +20,11 @@ local chunks = {
     "avd_strategist.lua", -- AVD: intelligence & generation
     "avd_operator.lua",   -- AVD: execution & lifecycle
     "avd_ui.lua",         -- AVD: dashboard UI
-    "rsm.lua",             -- RSM: Remote Signature Mapping engine
-    "rsm_ui.lua",          -- RSM: dashboard UI
-    "sr.lua",              -- SR: State Reconstruction engine
-    "sr_ui.lua",           -- SR: dashboard UI
-    "sbi.lua",             -- SBI: Server Behavior Inference engine
-    "sbi_ui.lua",          -- SBI: dashboard UI
-    "ape.lua",             -- APE: Active Probing Engine
-    "ape_ui.lua",          -- APE: dashboard UI
-    "csk.lua",             -- CSK: Cross-Session Knowledge engine
-    "csk_ui.lua",          -- CSK: dashboard UI
-    "ase.lua",             -- ASE: Autonomous Strategy Engine
-    "ase_sovereign.lua",
-    "ase_sovereign_ui.lua",
-    "aacg.lua",            -- AACG: Autonomous Action Card Generator
-    "ase_ui.lua",
-    "shadow_binder.lua",          -- ASE: Script Execution Panel
     "tsr_registry.lua",   -- TSR: 100-intent library + binding table
     "tsr_binder.lua",     -- TSR: verification + binding engine
     "tsr_runtime.lua",    -- TSR: transaction manager + sovereign API
     "tsr_ui.lua",         -- TSR: dashboard
-    "sts.lua",             -- STS: Server Topology Scanner engine
-    "sts_ui.lua",          -- STS: Topology Scanner UI (self-registering)
-    "bre.lua",             -- BRE: BedRock Execution Engine (final stage)
-    "bre_ui.lua",          -- BRE: Execution console UI (self-registering)
-    "bre_gadget_hunt.lua",  -- BGH: Binary .text gadget scanner (Layer 4 BRCE)
-    "bre_gadget_hunt_ui.lua", -- BGH: Gadget Hunt interface (self-registering)
-    "bre_cold_sync.lua",    -- BCS: Cold-Boot Re-Sync engine (guard page recovery)
-    "bre_cold_sync_ui.lua", -- BCS: Re-Sync interface (self-registering)
+    "gse.lua",       -- Game Service Edit tab (MarketplaceService)
     "boot.lua",      -- navigation, drag, global API, bootRAE
 }
 

@@ -1,26 +1,26 @@
--- ── Imports from core.lua ────────────────────────────────────────────────────
-local _C = _G.PC
-local mk = _C.mk
-local addCorner = _C.addCorner
-local addStroke = _C.addStroke
-local addShadow = _C.addShadow
-local pulseClick = _C.pulseClick
-local hookHover = _C.hookHover
-local tween = _C.tween
-local clickSound = _C.clickSound
-local uiClickSound = _C.uiClickSound
-local disassembleBytecode = _C.disassembleBytecode
-local tryDecode = _C.tryDecode
-local player = _C.player
-local playerGui = _C.playerGui
-local Lighting = _C.Lighting
-local UserInputService = _C.UserInputService
-local RAE_State = _C.RAE_State
-local RAE_Callbacks = _C.RAE_Callbacks
-local WorldState = _C.WorldState
--- RAE_SilentMode lives in _C.rae.SilentMode (table field — mutations shared)
--- UI ROOT / WINDOW
 -- ============================================================
+-- chunk_2_rae.lua  —  UI scaffold + RAE engine
+-- Requires: _G.PC (set by prior chunks)
+-- ============================================================
+local PC = _G.PC
+local Lighting                       = PC.Lighting
+local RAE_Callbacks                  = PC.RAE_Callbacks
+local RAE_SilentMode                 = PC.RAE_SilentMode
+local RAE_State                      = PC.RAE_State
+local UserInputService               = PC.UserInputService
+local WorldState                     = PC.WorldState
+local addCorner                      = PC.addCorner
+local addShadow                      = PC.addShadow
+local addStroke                      = PC.addStroke
+local clickSound                     = PC.clickSound
+local disassembleBytecode            = PC.disassembleBytecode
+local existing                       = PC.existing
+local hookHover                      = PC.hookHover
+local mk                             = PC.mk
+local player                         = PC.player
+local playerGui                      = PC.playerGui
+local pulseClick                     = PC.pulseClick
+local tween                          = PC.tween
 local screenGui = mk("ScreenGui", {
     Name="PaperClayUI", ResetOnSpawn=false, IgnoreGuiInset=true,
     ZIndexBehavior=Enum.ZIndexBehavior.Sibling, Parent=playerGui,
@@ -69,7 +69,7 @@ local function sendNotification(msg, nType)
 end
 
 RAE_Callbacks.OnPhase = function(phase)
-    if _C.rae.SilentMode then return end
+    if RAE_SilentMode then return end
     if phase=="SCANNING"  then sendNotification("RAE: Scanning WorldState...", "Info")
     elseif phase=="READY" then sendNotification("RAE: Ready ("..#RAE_State.Cards.." cards)", "Success")
     elseif phase=="EXECUTING" then sendNotification("RAE: Executing chain...", "Info") end
@@ -105,26 +105,6 @@ local function makeButton(parent, text, size, iconText)
     local label=mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamSemibold,Text=text or "Button",TextColor3=Color3.fromRGB(52,47,42),TextSize=14,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,-30,1,0),Parent=btn})
     hookHover(btn,btn.BackgroundColor3,Color3.fromRGB(252,249,244),0.25,0.1)
     return {Button=btn,Label=label,Icon=icon}
-end
--- makeChip: pill-shaped read-only badge label.
-local function makeChip(parent, text)
-    local chip = mk("Frame", {
-        BackgroundColor3 = Color3.fromRGB(240, 235, 228),
-        BorderSizePixel  = 0,
-        Size             = UDim2.new(0, 110, 0, 28),
-        Parent           = parent,
-    })
-    addCorner(chip, UDim.new(0, 999)); addStroke(chip, 1, 0.35)
-    mk("TextLabel", {
-        BackgroundTransparency = 1,
-        Font       = Enum.Font.GothamMedium,
-        Text       = text,
-        TextColor3 = Color3.fromRGB(78, 70, 62),
-        TextSize   = 12,
-        Size       = UDim2.new(1, 0, 1, 0),
-        Parent     = chip,
-    })
-    return chip
 end
 local function makeSection(parent, titleText)
     local card=mk("Frame",{BackgroundColor3=Color3.fromRGB(247,243,237),BorderSizePixel=0,Size=UDim2.new(1,0,0,10),AutomaticSize=Enum.AutomaticSize.Y,Parent=parent})
@@ -212,8 +192,8 @@ local sidebar=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,239,231),BorderSiz
 addCorner(sidebar,UDim.new(0,16)); addStroke(sidebar,1,0.32)
 mk("UIPadding",{PaddingTop=UDim.new(0,14),PaddingLeft=UDim.new(0,14),PaddingRight=UDim.new(0,14),PaddingBottom=UDim.new(0,14),Parent=sidebar})
 mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Tabs",TextColor3=Color3.fromRGB(64,58,52),TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sidebar})
-local navHolder=mk("ScrollingFrame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,28),Parent=sidebar,ScrollBarThickness=3,ScrollBarImageColor3=Color3.fromRGB(180,168,155),CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollingDirection=Enum.ScrollingDirection.Y,BorderSizePixel=0})
-mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,4),Parent=navHolder})
+local navHolder=mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,1,-30),Position=UDim2.new(0,0,0,28),Parent=sidebar})
+mk("UIListLayout",{FillDirection=Enum.FillDirection.Vertical,HorizontalAlignment=Enum.HorizontalAlignment.Center,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,8),Parent=navHolder})
 local contentCard=mk("Frame",{BackgroundColor3=Color3.fromRGB(250,247,242),BorderSizePixel=0,Size=UDim2.new(1,-214,1,0),Parent=bodyRow})
 addCorner(contentCard,UDim.new(0,16)); addStroke(contentCard,1,0.25); addShadow(contentCard,10)
 mk("UIPadding",{PaddingTop=UDim.new(0,16),PaddingLeft=UDim.new(0,16),PaddingRight=UDim.new(0,16),PaddingBottom=UDim.new(0,16),Parent=contentCard})
@@ -240,43 +220,46 @@ local pageChain     = makePage("Chain")
 local pageUtils     = makePage("Utilities")
 local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
-local pageRSM       = makePage("RSM")
-local pageSR        = makePage("SR")
-local pageSBI       = makePage("SBI")
-local pageCSK       = makePage("CSK")
-local pageASE       = makePage("ASE")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
-local pageAVD       = makePage("AVD")
-local pageTSR       = makePage("TSR")
-local pageBRE       = makePage("BRE")
-local pageBGH       = makePage("BGH")
-local pageBCS       = makePage("BCS")
-local pageSTS       = makePage("STS")
-local pageAPE       = makePage("APE")
-local pageSovereign = makePage("Sovereign")
+local pageGSE       = makePage("GameServiceEdit")
 
--- ============================================================
--- ── ui_base exports ─────────────────────────────────────────────────────────
-_G.PCU = {
-    sendNotification=sendNotification,
-    makeButton=makeButton, makeSection=makeSection, makePage=makePage,
-    makeChip=makeChip,
-    makeToggle=makeToggle, makeSlider=makeSlider,
-    displayDecompiledScript=displayDecompiledScript,
-    bytecodeViewer=bytecodeViewer, bcText=bcText,
-    getCharacter=getCharacter, getHumanoid=getHumanoid,
-    applyHumanoidSetting=applyHumanoidSetting,
-    persistent=persistent, blur=blur,
-    screenGui=screenGui, window=window, topbar=topbar, controls=controls,
-    btnMin=btnMin, btnClose=btnClose,
-    body=body, bodyRow=bodyRow, sidebar=sidebar,
-    navHolder=navHolder, contentCard=contentCard,
-    headerRow=headerRow, panelTitle=panelTitle, pagesFolder=pagesFolder,
-    pageOverview=pageOverview, pagePlayer=pagePlayer, pageCamera=pageCamera,
-    pageWorld=pageWorld, pageDiscovery=pageDiscovery, pageRAE=pageRAE,
-    pageRecursive=pageRecursive, pageBridge=pageBridge, pageAnalytics=pageAnalytics,
-    pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
-    pageForge=pageForge, pageRSM=pageRSM, pageSR=pageSR, pageSBI=pageSBI, pageCSK=pageCSK, pageASE=pageASE, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
-    pageBRE=pageBRE, pageBGH=pageBGH, pageBCS=pageBCS, pageSTS=pageSTS, pageAPE=pageAPE, pageSovereign=pageSovereign,
-}
+
+-- ── Export to _G.PC for subsequent chunks ──────────────────
+PC.applyHumanoidSetting           = applyHumanoidSetting
+PC.blur                           = blur
+PC.body                           = body
+PC.btnMin                         = btnMin
+PC.displayDecompiledScript        = displayDecompiledScript
+PC.getCharacter                   = getCharacter
+PC.getHumanoid                    = getHumanoid
+PC.makeButton                     = makeButton
+PC.makePage                       = makePage
+PC.makeSection                    = makeSection
+PC.makeSlider                     = makeSlider
+PC.makeToggle                     = makeToggle
+PC.navHolder                      = navHolder
+PC.pageAbout                      = pageAbout
+PC.pageAnalytics                  = pageAnalytics
+PC.pageBridge                     = pageBridge
+PC.pageCamera                     = pageCamera
+PC.pageChain                      = pageChain
+PC.pageDiscovery                  = pageDiscovery
+PC.pageForge                      = pageForge
+PC.pageOverview                   = pageOverview
+PC.pageGSE                        = pageGSE
+PC.pagePR                         = pagePR
+PC.pagePlayer                     = pagePlayer
+PC.pageRAE                        = pageRAE
+PC.pageRecursive                  = pageRecursive
+PC.pageSARP                       = pageSARP
+PC.pageUtils                      = pageUtils
+PC.pageWorld                      = pageWorld
+PC.pagesFolder                    = pagesFolder
+PC.panelTitle                     = panelTitle
+PC.persistent                     = persistent
+PC.root                           = root
+PC.screenGui                      = screenGui
+PC.sendNotification               = sendNotification
+PC.topbar                         = topbar
+PC.window                         = window
