@@ -222,7 +222,6 @@ local pageAbout     = makePage("About")
 local pageForge     = makePage("Forge")
 local pageSARP      = makePage("SARP")
 local pagePR        = makePage("PR")
-local pageGSE       = makePage("GameServiceEdit")
 
 
 -- ── Export to _G.PC for subsequent chunks ──────────────────
@@ -247,7 +246,6 @@ PC.pageChain                      = pageChain
 PC.pageDiscovery                  = pageDiscovery
 PC.pageForge                      = pageForge
 PC.pageOverview                   = pageOverview
-PC.pageGSE                        = pageGSE
 PC.pagePR                         = pagePR
 PC.pagePlayer                     = pagePlayer
 PC.pageRAE                        = pageRAE
@@ -263,4 +261,3 @@ PC.screenGui                      = screenGui
 PC.sendNotification               = sendNotification
 PC.topbar                         = topbar
 PC.window                         = window
-print("[PaperCuts] ui_base.lua exports complete — sendNotification=" .. tostring(type(PC.sendNotification)))

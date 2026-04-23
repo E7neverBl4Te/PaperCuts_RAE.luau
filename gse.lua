@@ -19,21 +19,27 @@
 --   "manual_prompt"  — user-triggered prompt button
 -- ============================================================
 
-local _C = _G.PC
-local _U = _G.PCU
+local PC = _G.PC
+if not PC or not PC.makeSection then
+    warn("[GSE] _G.PC.makeSection not found — ensure ui_base.lua loaded.")
+    return
+end
 
--- ── From _G.PC (backend helpers) ──────────────────────────────
-local mk          = _C.mk
-local addCorner   = _C.addCorner
-local addStroke   = _C.addStroke
-local tween       = _C.tween
-local pulseClick  = _C.pulseClick
-local hookHover   = _C.hookHover
-local clickSound  = _C.clickSound
+-- ── Imports from _G.PC ────────────────────────────────────────
+local mk          = PC.mk
+local addCorner   = PC.addCorner
+local addStroke   = PC.addStroke
+local tween       = PC.tween
+local pulseClick  = PC.pulseClick
+local hookHover   = PC.hookHover
+local clickSound  = PC.clickSound
+local makeSection = PC.makeSection
+local makePage    = PC.makePage
 
--- ── From _G.PCU (UI / pages) ──────────────────────────────────
-local makeSection = _U.makeSection
-local pageGSE     = _U.pageGSE
+-- Create our own page — ui_base.lua is at its local limit
+-- so we create pageGSE here and export it for boot.lua
+local pageGSE = makePage("GameServiceEdit")
+PC.pageGSE    = pageGSE
 
 -- ============================================================
 -- PERSIST
