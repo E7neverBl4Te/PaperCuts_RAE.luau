@@ -60,6 +60,7 @@ local CSCP = {
     BroadcastList   = {},    -- [name] = true
     InferCaptures   = {},    -- populated by PR_SchemaInfer (read-only here)
     AutoMode        = true,
+    SeqCounters     = {},    -- [remoteName] = current sequence number
 }
 
 -- Persist key
@@ -223,12 +224,101 @@ local function CSCP_ParseValue(str, argType)
 end
 
 -- ── Build argument table from fields ─────────────────────────
+-- Three live-substitution rules applied at fire time:
+--
+--   PlayerRef   — always replaced with LocalPlayer.UserId.
+--     Stale captures may carry a different UserId. Using a
+--     wrong UserId causes server-side player lookup to fail
+--     or return the wrong player, invalidating the packet.
+--
+--   SeqNum      — auto-incremented per remote per session.
+--     Servers that validate sequence numbers reject replayed
+--     or out-of-order values. We track a per-remote counter
+--     and advance it on every fire.
+--
+--   SessionToken — re-fetched from the latest PR_Registry
+--     capture for this remote. Tokens are session-scoped and
+--     change when the server rotates them. Using a stale token
+--     from a prior capture will fail validation immediately.
+--     If no fresh capture is available the field value is
+--     left as-is (manual override stays intact).
 local function CSCP_BuildArgs()
-    local args = {}
+    local args       = {}
+    local remoteName = CSCP.SelectedRemote
+
+    -- Ensure a seq counter exists for this remote
+    if remoteName and not CSCP.SeqCounters[remoteName] then
+        -- Seed from the last observed value if PR has captures,
+        -- otherwise start at 1
+        local seed = 1
+        if PR_SchemaInfer and PR_SchemaInfer.GetSchema and PR_Registry then
+            local rec = PR_Registry[remoteName]
+            if rec then
+                pcall(function()
+                    local schema = PR_SchemaInfer.GetSchema(rec)
+                    if schema then
+                        for _, argDef in ipairs(schema) do
+                            if type(argDef.Sample) == "number"
+                            and argDef.Sample == math.floor(argDef.Sample)
+                            and argDef.Sample > 0 and argDef.Sample < 100000 then
+                                -- Plausible sequence seed
+                                seed = argDef.Sample + 1
+                                break
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+        CSCP.SeqCounters[remoteName] = seed
+    end
+
     for _, field in ipairs(CSCP.Fields) do
-        args[field.pos] = CSCP_ParseValue(field.value, field.argType)
+        local val = CSCP_ParseValue(field.value, field.argType)
+        local hint = field.tokenHint or ""
+
+        -- PlayerRef: always use current local player UserId
+        if hint == "PlayerRef" then
+            val = LP.UserId
+
+        -- SeqNum: advance the per-remote counter and use it
+        elseif hint:find("SeqNum", 1, true) then
+            if remoteName then
+                local cur = CSCP.SeqCounters[remoteName] or 1
+                val = cur
+                CSCP.SeqCounters[remoteName] = cur + 1
+            end
+
+        -- SessionToken / HexToken: pull latest from PR captures
+        elseif hint == "SessionToken" or hint == "HexToken" then
+            if remoteName and PR_SchemaInfer and PR_SchemaInfer.GetCaptures
+            and PR_Registry then
+                local rec = PR_Registry[remoteName]
+                if rec then
+                    pcall(function()
+                        local caps = PR_SchemaInfer.GetCaptures(rec)
+                        if caps and #caps > 0 then
+                            local latest = caps[#caps]
+                            local lv     = latest[field.pos]
+                            if type(lv) == "string" and #lv >= 8 then
+                                val = lv   -- fresh token from latest capture
+                            end
+                        end
+                    end)
+                end
+            end
+        end
+
+        args[field.pos] = val
     end
     return args
+end
+
+-- ── Expose SeqCounter reset (useful for testing fresh sequences) ──
+local function CSCP_ResetSeqCounter(remoteName)
+    if remoteName then
+        CSCP.SeqCounters[remoteName] = nil
+    end
 end
 
 -- ── Validate fields before fire ──────────────────────────────
@@ -723,10 +813,25 @@ local validLabel = mk("TextLabel", {
 })
 
 -- Fire row
+-- Live substitution status label
+local liveSubLabel = mk("TextLabel", {
+    BackgroundTransparency = 1,
+    Font       = Enum.Font.Gotham,
+    Text       = "",
+    TextColor3 = Color3.fromRGB(80,150,80),
+    TextSize   = 10,
+    Size       = UDim2.new(1,-16,0,0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextWrapped = true,
+    Parent     = sFireSection,
+})
+
 local fireRow = row(sFireSection)
-local btnValidate = cscpBtn(fireRow, "✓ Validate",       Color3.fromRGB(225,238,250), 1)
-local btnFire     = cscpBtn(fireRow, "🚀 Fire Packet",   Color3.fromRGB(255,235,210), 2)
-local btnBroadcast= cscpBtn(fireRow, "📡 Broadcast",     C.BCAST,                     3)
+local btnValidate  = cscpBtn(fireRow, "✓ Validate",       Color3.fromRGB(225,238,250), 1)
+local btnFire      = cscpBtn(fireRow, "🚀 Fire Packet",   Color3.fromRGB(255,235,210), 2)
+local btnBroadcast = cscpBtn(fireRow, "📡 Broadcast",     C.BCAST,                     3)
+local btnResetSeq  = cscpBtn(fireRow, "↺ Reset Seq",      Color3.fromRGB(240,235,220), 4)
 
 local fireResultLabel = mk("TextLabel", {
     BackgroundTransparency = 1,
@@ -763,6 +868,22 @@ btnFire.MouseButton1Click:Connect(function()
         fireResultLabel.TextColor3 = C.FAIL
         return
     end
+    -- Show live substitution summary before building args
+    local subSummary = {}
+    for _, field in ipairs(CSCP.Fields) do
+        local h = field.tokenHint or ""
+        if h == "PlayerRef" then
+            table.insert(subSummary, field.label .. "→UserId(" .. LP.UserId .. ")")
+        elseif h:find("SeqNum", 1, true) then
+            local cur = CSCP.SeqCounters[CSCP.SelectedRemote] or 1
+            table.insert(subSummary, field.label .. "→Seq#" .. tostring(cur))
+        elseif h == "SessionToken" or h == "HexToken" then
+            table.insert(subSummary, field.label .. "→LiveToken")
+        end
+    end
+    liveSubLabel.Text = #subSummary > 0
+        and ("⚡ Live: " .. table.concat(subSummary, "  "))
+        or  ""
     local args    = CSCP_BuildArgs()
     local ok, res = CSCP_Fire(CSCP.SelectedRemote, args)
     fireResultLabel.Text = (ok and "✅ " or "❌ ") ..
@@ -775,6 +896,15 @@ btnFire.MouseButton1Click:Connect(function()
 end)
 
 -- Broadcast: fire to all checked remotes simultaneously
+btnResetSeq.MouseButton1Click:Connect(function()
+    if CSCP.SelectedRemote then
+        CSCP_ResetSeqCounter(CSCP.SelectedRemote)
+        liveSubLabel.Text = "↺ Sequence counter reset for " ..
+            CSCP.SelectedRemote
+        liveSubLabel.TextColor3 = Color3.fromRGB(160,120,60)
+    end
+end)
+
 btnBroadcast.MouseButton1Click:Connect(function()
     local targets = {}
     for name in pairs(CSCP.BroadcastList) do
