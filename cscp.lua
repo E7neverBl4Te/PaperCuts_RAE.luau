@@ -58,7 +58,7 @@ local CSCP = {
     Fields          = {},    -- [i] = { pos, type, value, label, tokenHint }
     History         = {},    -- [i] = { time, remote, fields, result }
     BroadcastList   = {},    -- [name] = true
-    InferCaptures   = {},    -- [remoteName] = { [captureIdx] = {args...} }
+    InferCaptures   = {},    -- populated by PR_SchemaInfer (read-only here)
     AutoMode        = true,
 }
 
@@ -128,7 +128,11 @@ local function CSCP_InferFields(remoteName)
     local rec = PR_Registry and PR_Registry[remoteName]
     if not rec then return fields end
 
-    local captures = CSCP.InferCaptures[remoteName] or {}
+    -- Use PR_SchemaInfer's existing capture data if available
+    local captures = {}
+    if PR_SchemaInfer and PR_SchemaInfer.GetCaptures then
+        pcall(function() captures = PR_SchemaInfer.GetCaptures(rec) or {} end)
+    end
 
     -- Try PR_SchemaInfer first
     local schema = nil
@@ -190,31 +194,9 @@ local function CSCP_RecordCapture(remoteName, args)
     end
 end
 
--- Hook into __namecall to capture native FireServer/InvokeServer calls
-local function CSCP_InstallCaptureHook()
-    local ok, err = pcall(function()
-        local mt    = getrawmetatable(game)
-        local oldNC = rawget(mt, "__namecall")
-        setreadonly(mt, false)
-        local function newNC(self, ...)
-            local method = getnamecallmethod()
-            if method == "FireServer" or method == "InvokeServer" then
-                local name = self.Name
-                if name and PR_Registry and PR_Registry[name] then
-                    local args = {...}
-                    pcall(CSCP_RecordCapture, name, args)
-                end
-            end
-            if oldNC then return oldNC(self, ...) end
-        end
-        mt.__namecall = (type(newcclosure)=="function") and newcclosure(newNC) or newNC
-        setreadonly(mt, true)
-    end)
-    if not ok then
-        warn("[CSCP] Capture hook failed: " .. tostring(err))
-    end
-end
-CSCP_InstallCaptureHook()
+-- Capture comes from PR_SchemaInfer — no separate namecall hook needed.
+-- PR Bridge already intercepts all remote fires and stores schema data.
+-- CSCP reads from PR_SchemaInfer.GetSchema(rec) and PR_Registry directly.
 
 -- ── Parse a value string back into a Lua value ───────────────
 local function CSCP_ParseValue(str, argType)
@@ -488,9 +470,14 @@ local captureCountLbl = cscpLabel(remoteHeaderRow, "0 captures", 11, false, C.SU
 
 btnScanRemotes.MouseButton1Click:Connect(function()
     CSCP_RebuildRemoteChips()
+    -- Count from PR_Registry fire counts
     local total = 0
-    for _, caps in pairs(CSCP.InferCaptures) do total = total + #caps end
-    captureCountLbl.Text = total .. " capture(s) across all remotes"
+    if PR_Registry then
+        for _, rec in pairs(PR_Registry) do
+            total = total + (rec.FireCount or 0)
+        end
+    end
+    captureCountLbl.Text = total .. " fire(s) tracked by PR Bridge"
 end)
 
 -- ── SECTION: Field Builder ────────────────────────────────────
