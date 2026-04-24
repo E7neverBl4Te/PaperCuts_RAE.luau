@@ -58,14 +58,11 @@ local PR_SubPages = {}
 local PR_TabBtns  = {}
 
 for i, tabDef in ipairs(PR_TAB_DEFS) do
-    local subPage = mk("ScrollingFrame", {
+    local subPage = mk("Frame", {
         BackgroundTransparency = 1,
         BorderSizePixel        = 0,
-        Size                   = UDim2.new(1, 0, 0, 2000),
-        CanvasSize             = UDim2.new(0, 0, 0, 0),
-        AutomaticCanvasSize    = Enum.AutomaticSize.Y,
-        ScrollBarThickness     = 6,
-        ScrollingDirection     = Enum.ScrollingDirection.Y,
+        Size                   = UDim2.new(1, 0, 0, 0),
+        AutomaticSize          = Enum.AutomaticSize.Y,
         Visible                = (i == 1),
         LayoutOrder            = i,
         Parent                 = pagePR,
