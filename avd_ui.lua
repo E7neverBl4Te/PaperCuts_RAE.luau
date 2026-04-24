@@ -439,20 +439,20 @@ do
                 mk("UIPadding", { PaddingLeft=UDim.new(0,8), PaddingTop=UDim.new(0,4), Parent=row })
 
                 -- Name + signal
-                mkLabel(row, string.format("[%s] %s", f.signal, f.remoteName:sub(1,38)),
+                mkLabel(row, string.format("[%s] %s", f.signal or "?", (f.remoteName or "unknown"):sub(1,38)),
                     11, COL.TEXT, true).Size = UDim2.new(1,-12,0,14)
 
                 -- Score + technique
                 local line2 = mkLabel(row,
                     string.format("Score:%.2f  Tech:%s  Cat:%s%s",
-                        f.exploitScore, f.technique or "?", f.category or "?",
+                        f.exploitScore or 0, f.technique or "?", f.category or "?",
                         f.sarpReady and "  ✓SARP" or ""),
                     9, COL.MUTED)
                 line2.Position = UDim2.new(0,8,0,18)
                 line2.Size     = UDim2.new(1,-12,0,12)
 
                 -- Affected paths
-                local paths = #f.affectedPaths > 0
+                local paths = (type(f.affectedPaths)=="table" and #f.affectedPaths > 0)
                     and table.concat(f.affectedPaths, ", "):sub(1,60)
                     or  (f.latencyDelta and string.format("+%.0fms latency", f.latencyDelta))
                     or  "no state change observed"
