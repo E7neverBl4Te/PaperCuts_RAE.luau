@@ -207,7 +207,7 @@ local function CSCP_InstallCaptureHook()
             end
             if oldNC then return oldNC(self, ...) end
         end
-        mt.__namecall = newcclosure and newcclosure(newNC) or newNC
+        mt.__namecall = (type(newcclosure)=="function") and newcclosure(newNC) or newNC
         setreadonly(mt, true)
     end)
     if not ok then
