@@ -11,6 +11,122 @@ local makeButton     = _U.makeButton
 local makeSection    = _U.makeSection
 local makeToggle     = _U.makeToggle
 local pagePR         = _U.pagePR
+
+-- ============================================================
+-- PR SUB-TAB SYSTEM
+-- Three sub-tabs inside pagePR:
+--   Overview — header, calibrator, anomaly detector, settings
+--   Manifest — remote manifest browser + dependency chain
+--   CSCP     — packet crafter (populated by cscp.lua)
+-- ============================================================
+local PR_TAB_DEFS = {
+    { key="Overview", label="📡  Overview" },
+    { key="Manifest", label="🗺  Manifest" },
+    { key="CSCP",     label="📦  CSCP"     },
+}
+
+local PR_TAB_ACTIVE_BG   = Color3.fromRGB(80, 110, 190)
+local PR_TAB_INACTIVE_BG = Color3.fromRGB(225, 220, 240)
+local PR_TAB_ACTIVE_TC   = Color3.fromRGB(255, 252, 255)
+local PR_TAB_INACTIVE_TC = Color3.fromRGB(50,  40,  80)
+
+-- Tab bar
+local prTabBar = mk("Frame", {
+    BackgroundColor3 = Color3.fromRGB(236, 232, 248),
+    BorderSizePixel  = 0,
+    Size             = UDim2.new(1, 0, 0, 38),
+    LayoutOrder      = -9999,
+    Parent           = pagePR,
+})
+addCorner(prTabBar, UDim.new(0, 10))
+addStroke(prTabBar, 1, 0.3)
+mk("UIListLayout", {
+    FillDirection       = Enum.FillDirection.Horizontal,
+    VerticalAlignment   = Enum.VerticalAlignment.Center,
+    Padding             = UDim.new(0, 4),
+    Parent              = prTabBar,
+})
+mk("UIPadding", {
+    PaddingLeft=UDim.new(0,6), PaddingRight=UDim.new(0,6),
+    PaddingTop=UDim.new(0,4),  PaddingBottom=UDim.new(0,4),
+    Parent = prTabBar,
+})
+
+local PR_SubPages = {}
+local PR_TabBtns  = {}
+
+for i, tabDef in ipairs(PR_TAB_DEFS) do
+    local subPage = mk("ScrollingFrame", {
+        BackgroundTransparency = 1,
+        BorderSizePixel        = 0,
+        Size                   = UDim2.new(1, 0, 0, 2000),
+        CanvasSize             = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize    = Enum.AutomaticSize.Y,
+        ScrollBarThickness     = 6,
+        ScrollingDirection     = Enum.ScrollingDirection.Y,
+        Visible                = (i == 1),
+        LayoutOrder            = i,
+        Parent                 = pagePR,
+    })
+    mk("UIListLayout", {
+        FillDirection       = Enum.FillDirection.Vertical,
+        HorizontalAlignment = Enum.HorizontalAlignment.Left,
+        SortOrder           = Enum.SortOrder.LayoutOrder,
+        Padding             = UDim.new(0, 14),
+        Parent              = subPage,
+    })
+    mk("UIPadding", {
+        PaddingTop=UDim.new(0,10), PaddingBottom=UDim.new(0,10),
+        Parent = subPage,
+    })
+    PR_SubPages[tabDef.key] = subPage
+
+    local btn = mk("TextButton", {
+        AutoButtonColor  = false,
+        BackgroundColor3 = (i == 1) and PR_TAB_ACTIVE_BG or PR_TAB_INACTIVE_BG,
+        BorderSizePixel  = 0,
+        Font             = Enum.Font.GothamSemibold,
+        Text             = tabDef.label,
+        TextColor3       = (i == 1) and PR_TAB_ACTIVE_TC or PR_TAB_INACTIVE_TC,
+        TextSize         = 11,
+        AutomaticSize    = Enum.AutomaticSize.X,
+        Size             = UDim2.new(0, 0, 1, 0),
+        Parent           = prTabBar,
+    })
+    addCorner(btn, UDim.new(0, 7))
+    mk("UIPadding", {PaddingLeft=UDim.new(0,10), PaddingRight=UDim.new(0,10), Parent=btn})
+    PR_TabBtns[tabDef.key] = btn
+
+    local key = tabDef.key
+    btn.MouseButton1Click:Connect(function()
+        clickSound()
+        for _, td in ipairs(PR_TAB_DEFS) do
+            if PR_SubPages[td.key] then PR_SubPages[td.key].Visible = false end
+            if PR_TabBtns[td.key] then
+                tween(PR_TabBtns[td.key], TweenInfo.new(0.12), {
+                    BackgroundColor3 = PR_TAB_INACTIVE_BG,
+                    TextColor3       = PR_TAB_INACTIVE_TC,
+                })
+            end
+        end
+        if PR_SubPages[key] then PR_SubPages[key].Visible = true end
+        tween(btn, TweenInfo.new(0.12), {
+            BackgroundColor3 = PR_TAB_ACTIVE_BG,
+            TextColor3       = PR_TAB_ACTIVE_TC,
+        })
+    end)
+end
+
+-- Export for cscp.lua
+_G.PC.PR_SubPages    = PR_SubPages
+_G.PC.prPageOverview = PR_SubPages["Overview"]
+_G.PC.prPageManifest = PR_SubPages["Manifest"]
+_G.PC.prPageCSCP     = PR_SubPages["CSCP"]
+
+-- Convenience locals — used by pr_ui.lua sections below
+local prPageOverview = PR_SubPages["Overview"]
+local prPageManifest = PR_SubPages["Manifest"]
+
 local PR_CFG              = _C.PR_CFG
 local PR_Registry         = _C.PR_Registry
 local PR_SchemaInfer      = _C.PR_SchemaInfer
@@ -35,7 +151,7 @@ do
             TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
             Size=UDim2.new(1,0,0,size and size*2.5 or 28),Parent=parent})
     end
-    local _, sHdr = makeSection(pagePR, "PR — Protocol Reconstruction")
+    local _, sHdr = makeSection(prPageOverview, "PR — Protocol Reconstruction")
     mkL(sHdr,"Passive + active protocol layer. Intercepts remotes, classifies by role and frequency, detects AC anomalies, and feeds calibrated echo-window estimates into SARP.",12,Color3.fromRGB(60,80,120))
     local prFPLabel  = mkL(sHdr,"Fingerprint: initializing...",11,Color3.fromRGB(80,100,160))
     prFPLabel.Size   = UDim2.new(1,0,0,16)
@@ -43,7 +159,7 @@ do
     prStatLabel.Size  = UDim2.new(1,0,0,16)
 
     -- Echo Calibrator
-    local _, sCalib = makeSection(pagePR, "Echo Calibrator")
+    local _, sCalib = makeSection(prPageOverview, "Echo Calibrator")
     local calibLabel = mkL(sCalib,"Waiting for PERIODIC S2C remote...",11,Color3.fromRGB(70,110,80))
     calibLabel.Size  = UDim2.new(1,0,0,48)
     local calibRow   = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,34),Parent=sCalib})
@@ -68,7 +184,7 @@ do
     end)
 
     -- Anomaly Detector
-    local _, sAnomaly = makeSection(pagePR, "Anomaly Detector")
+    local _, sAnomaly = makeSection(prPageOverview, "Anomaly Detector")
     local acBadge = mk("TextLabel",{Text="AC STATUS: UNKNOWN",Font=Enum.Font.GothamBold,TextSize=11,
         TextColor3=Color3.fromRGB(255,255,255),BackgroundColor3=Color3.fromRGB(120,120,120),
         Size=UDim2.new(1,0,0,26),TextXAlignment=Enum.TextXAlignment.Center,Parent=sAnomaly})
@@ -129,7 +245,7 @@ do
     end)
 
     -- Remote Manifest Browser
-    local _, sManifest = makeSection(pagePR, "Remote Manifest Browser")
+    local _, sManifest = makeSection(prPageManifest, "Remote Manifest Browser")
     local ROLE_COLORS = {
         MOVEMENT=Color3.fromRGB(210,240,255),COMBAT=Color3.fromRGB(255,220,215),
         ECONOMY=Color3.fromRGB(220,255,225),ANTICHEAT=Color3.fromRGB(255,235,200),
@@ -254,7 +370,7 @@ do
     end)
 
     -- Dependency chain viewer
-    local _, sChain = makeSection(pagePR, "Dependency Chain Viewer")
+    local _, sChain = makeSection(prPageManifest, "Dependency Chain Viewer")
     local chainResult = mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.Code,Text="",
         TextColor3=Color3.fromRGB(50,50,80),TextSize=11,TextWrapped=true,
         TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,60),Parent=sChain})
@@ -294,7 +410,7 @@ do
     end)
 
     -- PR Settings
-    local _, sPRSet = makeSection(pagePR, "PR Settings")
+    local _, sPRSet = makeSection(prPageOverview, "PR Settings")
     local psRow = mk("Frame",{BackgroundTransparency=1,Size=UDim2.new(1,0,0,10),
         AutomaticSize=Enum.AutomaticSize.Y,Parent=sPRSet})
     mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,10),Parent=psRow})

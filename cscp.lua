@@ -40,7 +40,13 @@ local hookHover       = _C.hookHover
 local makeSection     = _U.makeSection
 local makeButton      = _U.makeButton
 local sendNotification= _U.sendNotification
-local pagePR          = _U.pagePR
+local pagePR          = _U.pagePR  -- kept for guard check
+local prPageCSCP      = (_G.PC and _G.PC.prPageCSCP)
+if not prPageCSCP then
+    -- pr_ui.lua runs before cscp.lua, so prPageCSCP must exist
+    warn("[CSCP] prPageCSCP not found — ensure pr_ui.lua loaded first")
+    return
+end
 local PR_Registry     = _C.PR_Registry
 local PR_SchemaInfer  = _C.PR_SchemaInfer
 
@@ -394,7 +400,7 @@ local function row(parent, lo)
 end
 
 -- ── SECTION: CSCP Header + Remote Selector ───────────────────
-local _, sHeader = makeSection(pagePR, "📦  CSCP — Packet Crafter")
+local _, sHeader = makeSection(prPageCSCP, "📦  CSCP — Packet Crafter")
 
 cscpLabel(sHeader,
     "Builds structurally correct packets for any discovered remote.\n" ..
@@ -488,7 +494,7 @@ btnScanRemotes.MouseButton1Click:Connect(function()
 end)
 
 -- ── SECTION: Field Builder ────────────────────────────────────
-local _, sBuilder = makeSection(pagePR, "🔧  Packet Field Builder")
+local _, sBuilder = makeSection(prPageCSCP, "🔧  Packet Field Builder")
 
 cscpLabel(sBuilder,
     "Each row is one argument. Types auto-inferred from captures.\n" ..
@@ -710,7 +716,7 @@ btnReinfer.MouseButton1Click:Connect(function()
 end)
 
 -- ── SECTION: Validation + Fire ────────────────────────────────
-local _, sFireSection = makeSection(pagePR, "🚀  Validate & Fire")
+local _, sFireSection = makeSection(prPageCSCP, "🚀  Validate & Fire")
 
 cscpLabel(sFireSection,
     "Validates type correctness before firing. Results logged to history.",
@@ -819,7 +825,7 @@ btnBroadcast.MouseButton1Click:Connect(function()
 end)
 
 -- ── SECTION: Broadcast Target Selector ───────────────────────
-local _, sBcast = makeSection(pagePR, "📡  Broadcast Targets")
+local _, sBcast = makeSection(prPageCSCP, "📡  Broadcast Targets")
 
 cscpLabel(sBcast,
     "Select multiple remotes to fire the same packet to all simultaneously.",
@@ -933,7 +939,7 @@ btnBcastClear.MouseButton1Click:Connect(function()
 end)
 
 -- ── SECTION: Packet History ───────────────────────────────────
-local _, sHist = makeSection(pagePR, "📜  Packet History")
+local _, sHist = makeSection(prPageCSCP, "📜  Packet History")
 
 cscpLabel(sHist,
     "Last 50 crafted packets. One-click recall loads fields back into the builder.",
