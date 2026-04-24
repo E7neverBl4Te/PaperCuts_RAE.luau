@@ -29,7 +29,8 @@ local chunks = {
 
     -- ── PR (Protocol Reconstruction) ─────────────────────────
     "pr.lua",               -- PR v5 module
-    "pr_ui.lua",            -- PR UI tab
+    "pr_ui.lua",
+    "cscp.lua",           -- CSCP: Packet Crafter (PR Bridge sub-section)            -- PR UI tab
 
     -- ── BRE (Breach / Recon Engine) ──────────────────────────
     "bre.lua",              -- BRE core engine

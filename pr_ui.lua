@@ -200,8 +200,24 @@ do
                 mk("TextLabel",{Text=string.format("Echo:%.2f Pay:%.2f | %s",
                     rec.EchoRelevance or 0,rec.PayloadScore or 0,sch),
                     Font=Enum.Font.Code,TextSize=9,TextColor3=Color3.fromRGB(90,80,110),
-                    Position=UDim2.new(0,6,0,32),Size=UDim2.new(1,-12,0,12),
+                    Position=UDim2.new(0,6,0,32),Size=UDim2.new(1,-90,0,12),
                     TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Parent=row})
+                -- CSCP Craft Packet button
+                local craftBtn = mk("TextButton",{
+                    AutoButtonColor=false,
+                    BackgroundColor3=Color3.fromRGB(200,120,50),
+                    BorderSizePixel=0,Font=Enum.Font.GothamBold,
+                    Text="Craft →",TextColor3=Color3.fromRGB(255,250,240),TextSize=9,
+                    Position=UDim2.new(1,-82,0,29),Size=UDim2.new(0,76,0,18),
+                    Parent=row})
+                addCorner(craftBtn,UDim.new(0,5))
+                local capName = name
+                craftBtn.MouseButton1Click:Connect(function()
+                    clickSound()
+                    if _G.PC and _G.PC.CSCP_LoadRemote then
+                        _G.PC.CSCP_LoadRemote(capName)
+                    end
+                end)
             end
         end
         if shown==0 then
