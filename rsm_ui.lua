@@ -13,7 +13,7 @@ local makeChip       = _U.makeChip
 local makeSection    = _U.makeSection
 local makeToggle     = _U.makeToggle
 local sendNotification = _U.sendNotification
-local pageRSM        = _U.pageRSM
+local pageRSM        = (_U.pageRSM) or _U.makePage("RSM")
 
 -- ============================================================
 -- PAGE: RSM — Remote Signature Mapping

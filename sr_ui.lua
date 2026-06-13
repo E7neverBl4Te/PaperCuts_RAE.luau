@@ -12,7 +12,7 @@ local makeButton     = _U.makeButton
 local makeChip       = _U.makeChip
 local makeSection    = _U.makeSection
 local sendNotification = _U.sendNotification
-local pageSR         = _U.pageSR
+local pageSR         = (_U.pageSR) or _U.makePage("SR")
 
 -- ============================================================
 -- PAGE: SR — State Reconstruction
