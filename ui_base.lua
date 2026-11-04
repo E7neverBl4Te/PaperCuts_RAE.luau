@@ -227,7 +227,11 @@ local pageTSR       = makePage("TSR")
 
 -- ============================================================
 -- ── ui_base exports ─────────────────────────────────────────────────────────
-_G.PCU = {
+-- FIX: export into both _G.PCU (alias) and _G.PC (primary).
+-- boot.lua and all module files read from _G.PC; without this merge
+-- every UI symbol (pagesFolder, panelTitle, navHolder, page refs, etc.)
+-- would be nil there, causing "attempt to index nil" at startup.
+local uiExports = {
     sendNotification=sendNotification,
     makeButton=makeButton, makeSection=makeSection, makePage=makePage,
     makeToggle=makeToggle, makeSlider=makeSlider,
@@ -247,3 +251,9 @@ _G.PCU = {
     pageChain=pageChain, pageUtils=pageUtils, pageAbout=pageAbout,
     pageForge=pageForge, pageSARP=pageSARP, pagePR=pagePR, pageAVD=pageAVD, pageTSR=pageTSR,
 }
+-- Write into _G.PCU (kept as alias for any module that uses it)
+_G.PCU = uiExports
+-- Merge into _G.PC so boot.lua and module files using _G.PC can find everything
+for k, v in pairs(uiExports) do
+    _C[k] = v
+end
