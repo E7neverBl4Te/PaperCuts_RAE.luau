@@ -8,22 +8,27 @@
 -- in the module UI files resolve correctly.
 --
 -- Modules covered:
---   CSK  — Cross-Session Knowledge
---   SR   — State Reconstruction
---   RSM  — Remote Signature Mapping
---   SBI  — Server Behavior Inference
---   APE  — Active Probing Engine
---   ASE  — Autonomous Strategy Engine
+--   CSK — Cross-Session Knowledge
+--   SR  — State Reconstruction
+--   RSM — Remote Signature Mapping
+--   SBI — Server Behavior Inference
+--   APE — Active Probing Engine
+--   ASE — Autonomous Strategy Engine
 -- ============================================================
 
-local PC       = _G.PC
-local PCU      = _G.PCU
-if not PC or not PC.makePage then
-    warn("[ui_pages_ext] PC.makePage not available — skipping")
+local PC  = _G.PC
+local PCU = _G.PCU
+
+-- FIX: ui_base.lua exports makePage into _G.PCU (and now _G.PC via
+-- the merge loop). Guard against both locations so this file works
+-- whether or not the merge has run, and emit a clear error if neither
+-- has makePage (e.g. ui_base.lua itself failed to load).
+local makePage = (PC and PC.makePage) or (PCU and PCU.makePage)
+
+if not makePage then
+    warn("[ui_pages_ext] makePage not found in _G.PC or _G.PCU — skipping. Check that ui_base.lua loaded successfully.")
     return
 end
-
-local makePage = PC.makePage
 
 -- Create each page and export to both PC and PCU so files
 -- using either _C.pageXXX or _U.pageXXX can find them.
@@ -34,7 +39,7 @@ local pageSBI = makePage("SBI")
 local pageAPE = makePage("APE")
 local pageASE = makePage("ASE")
 
--- Export to PC
+-- Export to PC (_G.PC is the primary table boot.lua reads from)
 PC.pageCSK = pageCSK
 PC.pageSR  = pageSR
 PC.pageRSM = pageRSM
@@ -42,9 +47,9 @@ PC.pageSBI = pageSBI
 PC.pageAPE = pageAPE
 PC.pageASE = pageASE
 
--- Export to PCU (alias — same table as PC since _G.PCU = PC)
--- Explicit assignment in case any file captured PCU before
--- the alias was set.
+-- Export to PCU (alias — same table as PC since _G.PCU = PC after
+-- the ui_base.lua merge, but explicit assignment guards against any
+-- file that captured PCU before the alias was set).
 if PCU then
     PCU.pageCSK = pageCSK
     PCU.pageSR  = pageSR
