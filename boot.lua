@@ -167,18 +167,36 @@ end
 -- ============================================================
 -- MINIMIZE / CLOSE
 -- ============================================================
-local isMinimized=false
+-- Cache the window's full size once at boot so minimize/restore
+-- always has the right target regardless of when the user clicks.
+local windowFullSize = window.Size
+local isMinimized = false
+
 if btnMin then
     btnMin.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(btnMin)
-        isMinimized=not isMinimized
-        tween(body, TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out), {Size=isMinimized and UDim2.new(1,0,0,0) or UDim2.new(1,0,1,-56)})
+        isMinimized = not isMinimized
+        -- Tween the window itself (not body) so the chrome collapses
+        -- cleanly to just the topbar and nothing bleeds outside.
+        tween(window,
+            TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { Size = isMinimized
+                and UDim2.new(windowFullSize.X.Scale, windowFullSize.X.Offset, 0, 56)
+                or  windowFullSize }
+        )
     end)
 end
+
 if btnClose then
     btnClose.MouseButton1Click:Connect(function()
         clickSound(); pulseClick(btnClose)
-        tween(window, TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.In), {BackgroundTransparency=1,Size=window.Size+UDim2.fromOffset(0,-20)})
+        -- Shrink to centre and fade out, then destroy.
+        -- AnchorPoint=0.5,0.5 is set during the intro animation so this
+        -- collapses inward from the middle rather than from a corner.
+        tween(window,
+            TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+            { Size = UDim2.fromOffset(0, 0), BackgroundTransparency = 1 }
+        )
         task.delay(0.25, function() screenGui:Destroy() end)
     end)
 end

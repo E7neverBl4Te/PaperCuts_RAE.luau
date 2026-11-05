@@ -32,7 +32,9 @@ local window = mk("Frame", {
     ZIndex=10, Parent=root,
 })
 addCorner(window, UDim.new(0,18)); addStroke(window,1,0.22); addShadow(window,10)
-mk("UISizeConstraint", {MinSize=Vector2.new(720,440),MaxSize=Vector2.new(1200,820),Parent=window})
+-- MinSize removed so the close/minimize tween can shrink window to 0.
+-- MaxSize kept to prevent the resize grip from going too large.
+mk("UISizeConstraint", {MinSize=Vector2.new(0,0),MaxSize=Vector2.new(1200,820),Parent=window})
 mk("UIGradient", {Rotation=90,Color=ColorSequence.new({
     ColorSequenceKeypoint.new(0,Color3.fromRGB(252,249,245)),
     ColorSequenceKeypoint.new(1,Color3.fromRGB(246,241,234))}),Parent=window})
@@ -185,18 +187,24 @@ end
 local btnMin=makeCtrl("—",Color3.fromRGB(244,239,232)); local btnClose=makeCtrl("✕",Color3.fromRGB(244,233,228))
 
 -- ── Body / Sidebar / Pages ────────────────────────────────────
-local body=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,0,0,56),Size=UDim2.new(1,0,1,-56),Parent=window})
-local bodyRow=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,16,0,12),Size=UDim2.new(1,-32,1,-24),Parent=body})
+-- ClipsDescendants=true on body and bodyRow ensures that when the window
+-- is minimized (height tweened to 0) or closed, children don't bleed
+-- outside the window bounds.
+local body=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,0,0,56),Size=UDim2.new(1,0,1,-56),ClipsDescendants=true,Parent=window})
+local bodyRow=mk("Frame",{BackgroundTransparency=1,Position=UDim2.new(0,16,0,12),Size=UDim2.new(1,-32,1,-24),ClipsDescendants=true,Parent=body})
 mk("UIListLayout",{FillDirection=Enum.FillDirection.Horizontal,HorizontalAlignment=Enum.HorizontalAlignment.Left,VerticalAlignment=Enum.VerticalAlignment.Top,SortOrder=Enum.SortOrder.LayoutOrder,Padding=UDim.new(0,14),Parent=bodyRow})
-local sidebar=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,239,231),BorderSizePixel=0,Size=UDim2.new(0,200,1,0),Parent=bodyRow})
+-- ClipsDescendants on sidebar prevents the tab list from rendering
+-- outside the sidebar card when it overflows.
+local sidebar=mk("Frame",{BackgroundColor3=Color3.fromRGB(245,239,231),BorderSizePixel=0,Size=UDim2.new(0,200,1,0),ClipsDescendants=true,Parent=bodyRow})
 addCorner(sidebar,UDim.new(0,16)); addStroke(sidebar,1,0.32)
 mk("UIPadding",{PaddingTop=UDim.new(0,14),PaddingLeft=UDim.new(0,14),PaddingRight=UDim.new(0,14),PaddingBottom=UDim.new(0,14),Parent=sidebar})
 mk("TextLabel",{BackgroundTransparency=1,Font=Enum.Font.GothamBold,Text="Tabs",TextColor3=Color3.fromRGB(64,58,52),TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,Size=UDim2.new(1,0,0,20),Parent=sidebar})
--- FIX: use a ScrollingFrame for the nav so that many tabs (24+) don't
--- overflow and overlap outside the sidebar bounds.
+-- ScrollingFrame nav: sized to fill sidebar below the "Tabs" label,
+-- accounting for UIPadding (14px top already consumed by label+gap,
+-- 14px bottom padding = -28 total so the scroll area stays inside).
 local navHolder=mk("ScrollingFrame",{
     BackgroundTransparency=1, BorderSizePixel=0,
-    Size=UDim2.new(1,0,1,-30), Position=UDim2.new(0,0,0,28),
+    Size=UDim2.new(1,0,1,-28), Position=UDim2.new(0,0,0,28),
     CanvasSize=UDim2.new(0,0,0,0),
     AutomaticCanvasSize=Enum.AutomaticSize.Y,
     ScrollBarThickness=4,
