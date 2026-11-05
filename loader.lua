@@ -1,6 +1,6 @@
 -- ══════════════════════════════════════════════════════════════════════════════
 -- PaperCuts RAE — Full Framework Loader
--- 34-module stack + BCS + BGH + TRCR
+-- Core module stack
 -- ══════════════════════════════════════════════════════════════════════════════
 
 local BASE = "https://raw.githubusercontent.com/E7neverBl4Te/PaperCuts_RAE.luau/refs/heads/PaperTree/"
@@ -55,25 +55,7 @@ local chunks = {
 	"tsr_runtime.lua",   -- TSR: Runtime executor
 	"tsr_ui.lua",        -- TSR: UI (self-registering)
 
-	-- ── STS ───────────────────────────────────────────────────────────────
-	"sts.lua",           -- STS: Server Topology Scanner
-	"sts_ui.lua",        -- STS: UI (self-registering)
-
-	-- ── BRE ───────────────────────────────────────────────────────────────
-	"bre.lua",           -- BRE: BedRock Execution Engine (Layer 5)
-	"bre_ui.lua",        -- BRE: UI (self-registering)
-
-	-- ── BGH ───────────────────────────────────────────────────────────────
-	"bre_gadget_hunt.lua",    -- BGH: Binary .text gadget scanner (Layer 4 BRCE)
-	"bre_gadget_hunt_ui.lua", -- BGH: UI (self-registering)
-
-	-- ── BCS ───────────────────────────────────────────────────────────────
-	"bre_cold_sync.lua",      -- BCS: Cold-Boot Re-Sync engine (guard page recovery)
-	"bre_cold_sync_ui.lua",   -- BCS: UI (self-registering)
-
-	-- ── Source-to-Sink Tracer ─────────────────────────────────────────────
-	"sts_tracer.lua",         -- TRCR: Source-to-Sink chain tracer engine
-	"sts_tracer_ui.lua",      -- TRCR: S2S tracer UI (self-registering)
+	-- STS, BRE, BGH, BCS, S2S (sts_tracer) intentionally excluded
 
 	-- ── Boot ──────────────────────────────────────────────────────────────
 	"boot.lua",          -- navigation, drag, global API, bootRAE
